@@ -1,0 +1,21 @@
+# Chicory's bundled Tor daemon. The app previously relied on umbrelOS's system
+# tor_proxy; when that daemon cannot build circuits (getumbrel/umbrel#2189)
+# every Tor-enabled wallet loses peer connectivity and onion publishing.
+# Bundling our own Tor, as the Bitcoin and Core Lightning apps do, makes the
+# app self-sufficient.
+SocksPort 0.0.0.0:9050
+ControlPort 0.0.0.0:29051
+
+# Password: beignetonionbrrr. The control port is only reachable on the app's
+# private Docker network; a fixed hash is the same convention other Umbrel
+# apps use for their bundled Tor.
+HashedControlPassword 16:41AC1BEA54AA122760DA861ACBE5B1A3E5D7CC6B43A5C6FA07C08E4508
+
+# Tor's state (cached directory, entry guards) lives here instead of under
+# HOME in the container, which umbrelOS deletes every time it stops the app.
+# Without it every restart downloads the directory again, picks new guards and
+# publishes the onion from scratch. /data is umbrelOS's Tor data folder
+# (TOR_DATA_DIR), which its own Tor writes onion services to as the same uid
+# 1000, so Tor can create this directory itself. umbrelOS renders this file
+# with envsubst, so no dollar signs here.
+DataDirectory /data/app-chicory-wallet-tor

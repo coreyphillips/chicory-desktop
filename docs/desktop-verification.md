@@ -1,0 +1,74 @@
+# Desktop verification
+
+This file records checks performed for the initial desktop adaptation on
+November 3, 2026. Upstream browser and regtest reports remain historical
+references. They do not qualify a desktop binary by themselves.
+
+## Scope
+
+The desktop app reuses the production Chicory UI snapshot, shared wallet client,
+Beignet 0.36.1 engine and the Umbrel manager's payment safeguards. Desktop changes
+add an isolated Electron window, stable custom origin, private manager transport,
+responsive navigation, native commands and platform packaging.
+
+## Automated checks
+
+`npm run check` passed: 86 platform tests, 9 desktop policy tests, 349 manager
+tests, TypeScript and the production renderer build.
+
+- TypeScript and a production Vite build.
+- UI/platform tests, including custom spring animation execution, reduced motion,
+  interrupted animations, uncertain outcomes, request routing, public storage,
+  desktop widths and keyboard behavior.
+- Manager tests, including import identity, recovery access, storage, payment
+  metadata, engine compatibility, TLS, local capability authentication, Host and
+  Origin rejection, readiness and parent-disconnect shutdown.
+- Desktop policy tests for application URL parsing, external URL restrictions,
+  payment-link bounds, traversal rejection, capability forwarding, restrictive
+  CSP, display bounds and the preload's event boundary.
+- Native SQLite validation under the exact standalone Node runtime included in
+  the package. The build repeats this against copied package resources.
+
+## Native interaction checks
+
+The `scripts/desktop/smoke.mjs` runner uses a disposable demo profile and native
+Electron menus. It checks the normal and compact desktop workspace, physical
+amount entry, payment review, cancellation of an incomplete hold, Receive,
+Settings, reduced motion, renderer isolation and demo API denial. It never uses
+real wallet data or sends a real payment.
+
+The packaged macOS arm64 application also passed `scripts/desktop/live-smoke.mjs`
+with production developer tools disabled. Its real manager reported Beignet
+0.36.1 and zero wallets in a disposable profile. The test verified loopback-only
+listening, HTTP 403 for unauthenticated requests, preferences surviving a complete
+app restart, clean application exits and termination of each manager process.
+No real wallet was created and no funds were used.
+
+Detailed run results and screenshots are generated in `artifacts/smoke/`. That
+folder is excluded from source control. Selected screenshots in this repository
+show only the explicit sample wallet.
+
+## Release limits
+
+macOS Apple Silicon is the local build host. Windows, Linux and Intel macOS have
+build workflows but require their own native interaction and installation
+qualification. macOS local builds use ad hoc signing without Developer ID or
+notarization. No public binary release or automatic updater is configured.
+
+New funded Lightning/on-chain payments, full disaster recovery, physical camera
+hardware, OS protocol installation and Windows/Linux permissions remain release
+qualification work. The existing browser regtest results are useful inherited
+evidence, not a substitute for these checks.
+
+The desktop manager retains the upstream seed-file storage model. It has no
+SQLCipher or native biometric gate. Tor is an optional external SOCKS service;
+there is no bundled Tor client in this version. These differences are documented
+in the main README and must remain visible until the implementation changes.
+
+## Dependency audit
+
+The installed local manager dependency tree reported zero npm audit findings
+after compatible Express and proxy dependency updates. The build-only
+Electron Builder tree reports moderate minimatch denial-of-service advisories.
+That toolchain processes repository build patterns and is excluded from the
+packaged application. Do not force a major downgrade to silence this report.

@@ -1,0 +1,16 @@
+node_modules/
+.runtime/
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+data/
+coverage/
+*.log
+playwright-report/
+test-results/
+store/generated/
+release/
+artifacts/
+*.tsbuildinfo

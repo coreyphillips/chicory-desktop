@@ -1,0 +1,37 @@
+version: "3.7"
+services:
+  app_proxy:
+    environment:
+      APP_HOST: chicory-wallet_manager_1
+      APP_PORT: 3000
+  manager:
+    container_name: chicory-wallet_manager_1
+    image: __IMAGE__@__DIGEST__
+    restart: on-failure
+    init: true
+    stop_grace_period: 1m
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    ports:
+      - "20101-20130:9101-9130"
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      CHILD_PORT_BASE: "3101"
+      CHILD_PORT_MAX: "3999"
+      PUBLIC_PORT_BASE: "20101"
+      TOR_PROXY_IP: chicory-wallet_tor_1
+      TOR_PROXY_PORT: "9050"
+      TOR_PASSWORD: beignetonionbrrr
+    depends_on:
+      - tor
+  tor:
+    container_name: chicory-wallet_tor_1
+    image: ghcr.io/getumbrel/tor:0.4.9.11@sha256:e382b8629c0dfef6ceb396b062622d4e4e955b19d6f16b883fd2c0723ad5671a
+    user: "1000:1000"
+    restart: on-failure
+    volumes:
+      - ${APP_DATA_DIR}/torrc:/etc/tor/torrc:ro
+      - ${TOR_DATA_DIR}:/data
+    environment:
+      HOME: /tmp

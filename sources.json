@@ -1,0 +1,32 @@
+{
+  "chicory": {
+    "repository": "https://github.com/coreyphillips/chicory",
+    "commit": "2af470820d5e6388d0c0312f8f8e8c75d2afac00",
+    "destination": "web/chicory",
+    "license": "MIT",
+    "notes": "Production UI snapshot with browser adapters, static imports and public network defaults. Tests and native platform projects are excluded."
+  },
+  "beignet-umbrel": {
+    "repository": "https://github.com/coreyphillips/beignet-umbrel",
+    "commit": "249ec4b174fbee8743104ebf63e7022aa484454a",
+    "destination": "server",
+    "license": "MIT",
+    "notes": "Manager and tests adapted for the Chicory application identity, static build path, local bind defaults and duplicate seed import protection."
+  },
+  "wallet-core": {
+    "repository": "https://github.com/coreyphillips/beignet-wallet-core",
+    "commit": "fdbe9dceb3301fc87c2169ab508634f9b1843f1e",
+    "destination": "package.json dependency"
+  },
+  "engineVersion": "0.36.1",
+  "enginePatches": [
+    "scripts/apply-engine-patches.mjs"
+  ],
+  "chicory-umbrel": {
+    "repository": "https://github.com/coreyphillips/chicory-umbrel",
+    "commit": "612092b28628e0edbdcade21253b7ea49a3b143b",
+    "destination": "web and server",
+    "license": "MIT",
+    "notes": "Desktop layout and browser motion foundation, adapted to an isolated Electron renderer and local manager."
+  }
+}

@@ -1,0 +1,86 @@
+appId: com.chicory.desktop
+productName: Chicory
+copyright: Copyright (c) 2026 Corey Phillips
+artifactName: Chicory-${version}-${os}-${arch}.${ext}
+asar: true
+npmRebuild: false
+beforePack: build/verify-runtime.cjs
+afterPack: build/verify-package.cjs
+directories:
+  output: release
+  buildResources: build
+files:
+  - desktop/**/*
+  - build/icon.png
+  - package.json
+  - LICENSE
+  - '!**/*.test.*'
+  - '!node_modules/**/*'
+extraResources:
+  - from: dist
+    to: dist
+  - from: server
+    to: server
+    filter:
+      - '**/*'
+      - '!**/*.test.*'
+      - '!fixtures/**/*'
+      - '!package-lock.json'
+  # electron-builder omits a source directory's root node_modules. Copy these
+  # explicitly because they belong to the standalone Node runtime, not Electron.
+  - from: server/node_modules
+    to: server/node_modules
+    filter: ['**/*', '!.bin/**/*', '!.cache/**/*']
+  - from: .runtime/engine
+    to: runtime/engine
+    filter:
+      - '**/*'
+      - '!node_modules/.cache/**/*'
+      - '!node_modules/.bin/**/*'
+  - from: .runtime/engine/node_modules
+    to: runtime/engine/node_modules
+    filter: ['**/*', '!.bin/**/*', '!.cache/**/*']
+  - from: .runtime/node
+    to: runtime/node
+    filter:
+      - bin/node
+      - node.exe
+      - LICENSE
+  - from: .runtime/manifest.json
+    to: runtime/manifest.json
+protocols:
+  - name: Bitcoin payment request
+    schemes: [bitcoin]
+  - name: Lightning payment request
+    schemes: [lightning]
+mac:
+  # Development builds are ad hoc signed. Override for a Developer ID release.
+  identity: '-'
+  category: public.app-category.finance
+  icon: build/icon.png
+  target: [dmg, zip]
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  binaries:
+    - Contents/Resources/runtime/node/bin/node
+  extendInfo:
+    NSCameraUsageDescription: Chicory uses your camera to read payment QR codes.
+dmg:
+  backgroundColor: '#110e0c'
+  title: Chicory
+win:
+  icon: build/icon.png
+  target: [nsis]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: false
+linux:
+  icon: build/icon.png
+  category: Finance
+  target: [AppImage]
+  synopsis: A self-custodial Bitcoin and Lightning wallet
+publish: null

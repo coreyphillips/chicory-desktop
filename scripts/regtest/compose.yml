@@ -1,0 +1,52 @@
+name: chicory-browser-regtest
+
+services:
+  bitcoin:
+    image: btcpayserver/bitcoin:31.0
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        bitcoind -datadir=/data -regtest -server=1 -rpcbind=0.0.0.0 \
+          -rpcallowip=0.0.0.0/0 -rpcport=18443 -txindex=1 \
+          -fallbackfee=0.00001 -listen=1 -discover=0 &
+        bitcoin_pid=$$!
+        while [ ! -f /data/regtest/.cookie ]; do sleep 1; done
+        chmod 755 /data/regtest
+        chmod 644 /data/regtest/.cookie
+        wait $$bitcoin_pid
+    volumes:
+      - bitcoin:/data
+    ports:
+      - "127.0.0.1:29443:18443"
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-datadir=/data", "-regtest", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  electrs:
+    image: getumbrel/electrs:v0.10.10
+    user: "0:0"
+    restart: "no"
+    command:
+      - --skip-default-conf-files
+      - --network=regtest
+      - --db-dir=/db
+      - --daemon-dir=/bitcoin
+      - --cookie-file=/bitcoin/regtest/.cookie
+      - --daemon-rpc-addr=bitcoin:18443
+      - --daemon-p2p-addr=bitcoin:18444
+      - --electrum-rpc-addr=0.0.0.0:60401
+      - --log-filters=INFO
+    volumes:
+      - bitcoin:/bitcoin:ro
+      - electrs:/db
+    ports:
+      - "127.0.0.1:62401:60401"
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+
+volumes:
+  bitcoin:
+  electrs:

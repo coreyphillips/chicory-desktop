@@ -1,0 +1,20 @@
+manifestVersion: 1
+id: chicory-wallet
+name: Chicory
+tagline: A Lightning-first Bitcoin wallet
+category: Finance
+version: "__VERSION__"
+port: 3016
+description: >-
+  Chicory brings its native wallet interface to your Umbrel. Send and receive
+  Bitcoin and Lightning payments with explicit amount and fee reviews.
+  Your wallet runs on your Umbrel and keeps working when the browser closes.
+developer: Corey Phillips
+website: https://github.com/coreyphillips/chicory-umbrel
+repo: https://github.com/coreyphillips/chicory-umbrel
+support: https://github.com/coreyphillips/chicory-umbrel/issues
+submitter: Corey Phillips
+submission: https://github.com/coreyphillips/chicory-umbrel
+dependencies: []
+releaseNotes: >-
+  Initial Chicory browser foundation. Bundles Beignet 0.36.1.

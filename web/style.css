@@ -1,0 +1,71 @@
+:root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #110e0c; color: #f3ecdf; }
+html, body, #root { width: 100%; height: 100%; margin: 0; }
+body { overflow: hidden; }
+#root { display: flex; flex-direction: column; align-items: center; }
+.wallet-frame { display: flex; flex: 1; width: 100%; max-width: 680px; min-height: 0; position: relative; isolation: isolate; overflow: hidden; }
+.wallet-frame > div { flex: 1; min-width: 0; }
+.browser-shell, .browser-stage { display: flex; flex: 1; min-width: 0; min-height: 0; width: 100%; position: relative; }
+.browser-sidebar { display: none; }
+.desktop-titlebar { height: 38px; flex: 0 0 38px; width: 100%; position: relative; display: flex; align-items: center; justify-content: center; background: #15110f; border-bottom: 1px solid #2c241f; box-sizing: border-box; user-select: none; -webkit-app-region: drag; }
+.desktop-titlebar-title { font-size: 12px; font-weight: 500; color: #b9ad9e; letter-spacing: .02em; pointer-events: none; }
+.desktop-titlebar[data-platform="darwin"] { padding: 0 90px; }
+.desktop-window-controls { position: absolute; top: 0; right: 0; height: 37px; display: flex; -webkit-app-region: no-drag; }
+.desktop-window-controls button { width: 46px; border: 0; background: transparent; color: #b9ad9e; display: grid; place-items: center; cursor: default; }
+.desktop-window-controls button:hover { background: #2f2621; color: #f3ecdf; }
+.desktop-window-controls .desktop-window-close:hover { background: #8b3c34; color: #fff; }
+.desktop-window-controls svg { fill: none; stroke: currentColor; stroke-width: 1; }
+.demo-banner { flex-shrink: 0; box-sizing: border-box; text-align: center; padding: 7px 12px; width: 100%; color: #b9ad9e; background: #241d19; font-size: 12px; letter-spacing: .03em; }
+.skip-link { position: absolute; left: 16px; top: -60px; z-index: 100; padding: 12px; color: #110e0c; background: #8fa5e4; border-radius: 8px; }
+.skip-link:focus { top: 12px; }
+.startup-error { max-width: 420px; margin: auto; padding: 24px; }
+.startup-error h1 { font-size: 22px; }
+.startup-error p { line-height: 1.5; overflow-wrap: anywhere; }
+.startup-error button { padding: 12px 18px; border: 1px solid #8fa5e4; border-radius: 20px; background: #8fa5e4; color: #110e0c; cursor: pointer; }
+button, input, textarea { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, [role="button"]:focus-visible, [data-amount-entry]:focus-visible, [role="slider"]:focus-visible { outline: 2px solid #a9baee; outline-offset: 4px; }
+input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outline-offset: 2px; }
+[data-hold-confirmation] { touch-action: none; user-select: none; cursor: pointer; }
+* { scrollbar-width: thin; scrollbar-color: #4a3e36 transparent; }
+@media (min-width: 900px) {
+  .wallet-frame { max-width: none; }
+  .browser-shell { display: grid; grid-template-columns: 80px minmax(0, 1fr); }
+  .browser-sidebar { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #302822; background: #15110f; padding: 24px 12px 22px; box-sizing: border-box; }
+  .browser-brand { display: flex; align-items: center; justify-content: center; gap: 11px; padding: 0 0 34px; }
+  .browser-brand > span { display: none; font-size: 25px; font-weight: 450; letter-spacing: -1px; }
+  .browser-sidebar nav { display: flex; flex-direction: column; gap: 7px; }
+  .browser-sidebar nav button { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; border: 0; background: transparent; color: #b9ad9e; text-align: left; padding: 14px 12px; border-radius: 13px; font-size: 14px; cursor: pointer; transition: background-color 140ms, color 140ms; }
+  .browser-sidebar nav button:hover:not(:disabled) { background: #241d19; color: #f3ecdf; }
+  .browser-sidebar nav button[aria-current="page"], .browser-sidebar nav button[aria-current="page"]:hover:not(:disabled) { background: #282933; color: #a9baee; }
+  .browser-sidebar nav button:disabled { cursor: default; opacity: .45; }
+  .browser-sidebar nav button[data-scene="settings"] { margin-top: 22px; }
+  .browser-nav-label, .browser-sidebar kbd { display: none; }
+  .browser-wallet-identity { display: flex; flex-direction: column; gap: 10px; margin-top: auto; padding: 20px 0 0; border-top: 1px solid #302822; min-width: 0; }
+  .browser-wallet-caption { color: #8c8174; font-size: 10px; letter-spacing: .04em; }
+  .browser-wallet-identity select { width: 100%; min-width: 0; padding: 7px 0; color: #f3ecdf; background: #15110f; border: 0; border-bottom: 1px solid #4a3e36; font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
+  .browser-wallet-identity select:focus-visible { outline: 2px solid #8fa5e4; outline-offset: 3px; }
+  .browser-network { font-size: 11px; color: #b9ad9e; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .browser-network i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #f2c46b; }
+  .browser-network i[data-connected="true"] { background: #9fd4a6; }
+  .browser-network > span, .browser-device-caption { display: none; }
+  [data-desktop="true"] [data-testid="home-hero"] { max-width: 720px; align-self: center; width: 100%; }
+}
+@media (min-width: 1200px) {
+  .browser-shell { grid-template-columns: 208px minmax(0, 1fr); }
+  .browser-sidebar { padding: 28px 16px 24px; }
+  .browser-brand { justify-content: flex-start; padding: 0 10px 40px; }
+  .browser-brand > span, .browser-nav-label { display: inline; }
+  .browser-sidebar nav button { justify-content: flex-start; padding: 14px 13px; }
+  .browser-sidebar kbd { display: inline; margin-left: auto; color: #8c8174; font-family: inherit; font-size: 10px; font-weight: 400; opacity: 0; transition: opacity 140ms; }
+  .browser-sidebar nav button:hover kbd, .browser-sidebar nav button:focus-visible kbd { opacity: 1; }
+  .browser-wallet-identity { padding: 22px 12px 0; gap: 10px; }
+  .browser-wallet-caption { font-size: 11px; }
+  .browser-wallet-identity select { font-size: 12px; }
+  .browser-network { justify-content: flex-start; font-size: 12px; }
+  .browser-network > span { display: inline; }
+  .browser-device-caption { display: block; font-size: 10px; color: #8c8174; padding-top: 3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+  .browser-sidebar nav button, .browser-sidebar kbd { transition: none; }
+}

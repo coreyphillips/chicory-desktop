@@ -1,0 +1,10 @@
+.git
+.runtime
+**/node_modules
+dist
+coverage
+data
+.env
+.env.*
+**/.DS_Store
+**/*.log

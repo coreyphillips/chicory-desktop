@@ -1,0 +1,431 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { DemoWalletClient, WalletError } from '@beignet/wallet-core';
+import type {
+  CreatedWallet, CreateWalletInput, Network, WalletClientInterface,
+  WalletRecord, WalletSnapshot,
+} from '@beignet/wallet-core';
+import { createHostWalletClient, UmbrelWalletClient } from './walletClient.ts';
+import {
+  defaultProfile, loadNetworkPreferences, saveNetworkPreferences, validateProfile,
+} from '../chicory/src/services/networks.ts';
+import type { NetworkProfile } from '../chicory/src/services/networks.ts';
+import { mergeSnapshot } from '../chicory/src/services/activityMerge.ts';
+
+export type Tab = 'Wallet' | 'Activity' | 'Settings';
+export const STALE_AFTER_MS = 45000;
+export const RECOVERY_DEADLINE_MS = 60000;
+export const errorMessage = (error: unknown): string => error instanceof Error
+  ? error.message : 'The wallet could not complete this action.';
+export function primaryPubkey(snapshot: WalletSnapshot | null | undefined): string {
+  const value = snapshot?.wallet.lfbw?.primaryPubkey ?? snapshot?.wallet.lfbw?.primaryUri?.split('@')[0];
+  return typeof value === 'string' && /^0[23][a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : '';
+}
+export interface WalletSessionView {
+  tab: Tab; onTab: (tab: Tab) => void; onCloseSheet: () => void; paused?: boolean;
+}
+export interface SessionDependencies {
+  createHostClient: () => UmbrelWalletClient;
+  createDemoClient: () => DemoWalletClient;
+}
+interface OpenOptions {
+  restore?: boolean; existingOnly?: boolean; walletId?: string;
+  prepared?: boolean; backupPending?: boolean; allowEmpty?: boolean;
+}
+type Remembered = {
+  mode: 'host'; network: Network; walletId?: string; locked: boolean;
+  prepared?: boolean; backupPending?: boolean;
+};
+type Action = { generation: number };
+const KEY = 'chicory:host-selection';
+const BACKUP = 'chicory:backup-pending:';
+const factories: SessionDependencies = {
+  createHostClient: createHostWalletClient,
+  createDemoClient: () => new DemoWalletClient(),
+};
+function selectionStorage(): Storage {
+  return typeof window !== 'undefined' && window.chicoryDesktop ? localStorage : sessionStorage;
+}
+function savedSelection(): { walletId?: string; locked?: boolean } {
+  try {
+    const value = JSON.parse(selectionStorage().getItem(KEY) ?? '{}');
+    return {
+      ...(typeof value?.walletId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value.walletId)
+        ? { walletId: value.walletId } : {}),
+      locked: value?.locked === true,
+    };
+  } catch { return {}; }
+}
+function remember(walletId: string, locked: boolean) {
+  try { selectionStorage().setItem(KEY, JSON.stringify({ walletId, locked })); }
+  catch { /* Optional public preference. */ }
+}
+function pendingBackup(id: string): boolean {
+  try { return localStorage.getItem(BACKUP + id) === 'true'; } catch { return true; }
+}
+
+/** The desktop service owns the engine and channel state. Unmounting detaches the view. */
+export function useWalletSession(
+  view: WalletSessionView,
+  dependencies: SessionDependencies = factories,
+) {
+  const deps = useRef(dependencies);
+  const demoMode = useRef(typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo'));
+  const mounted = useRef(true);
+  const callbacks = useRef(view);
+  callbacks.current = view;
+  const [client, setClient] = useState<WalletClientInterface | null>(null);
+  const current = useRef<WalletClientInterface | null>(null);
+  const [wallets, setWallets] = useState<WalletRecord[]>([]);
+  const [walletId, setWalletId] = useState('');
+  const selectedId = useRef('');
+  const [snapshot, setSnapshot] = useState<WalletSnapshot | null>(null);
+  const [activeProfile, setActiveProfile] = useState(() => defaultProfile('mainnet'));
+  const profile = useRef(activeProfile);
+  const [rememberedSession, setRememberedSession] = useState<Remembered | null>(null);
+  const [initializing, setInitializing] = useState(true);
+  const [connecting, setConnecting] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [switchTarget, setSwitchTarget] = useState<Network | null>(null);
+  const [networkEditor, setNetworkEditor] = useState(false);
+  const [deviceVisible, setDeviceVisible] = useState(false);
+  const [deviceHint, setDeviceHint] = useState(false);
+  const [error, setError] = useState('');
+  const [switchError, setSwitchError] = useState('');
+  const generation = useRef(0);
+  const action = useRef<Action | null>(null);
+  const reading = useRef<object | null>(null);
+  const locks = useRef(0);
+
+  const setProfile = useCallback((value: NetworkProfile) => {
+    profile.current = value; setActiveProfile(value);
+  }, []);
+  const begin = useCallback((replace = false): Action => {
+    if (action.current && !replace)
+      throw new WalletError('Wait for the current wallet action to finish.', 'ACTION_IN_PROGRESS');
+    const token = { generation: ++generation.current };
+    action.current = token; reading.current = null;
+    setConnecting(false); setSelecting(false); setRefreshing(false);
+    setClosing(false); setSwitching(false); setSwitchTarget(null);
+    return token;
+  }, []);
+  const valid = useCallback((token: Action, adapter?: WalletClientInterface) =>
+    mounted.current && action.current === token && generation.current === token.generation &&
+      (!adapter || current.current === adapter), []);
+  const finish = useCallback((token: Action) => {
+    // An old operation cannot release a newer operation's latch or flags.
+    if (!mounted.current || action.current !== token) return;
+    action.current = null;
+    setConnecting(false); setSelecting(false); setRefreshing(false);
+    setClosing(false); setSwitching(false); setSwitchTarget(null);
+    setInitializing(false);
+  }, []);
+  const makeRaw = useCallback((): WalletClientInterface => demoMode.current
+    ? deps.current.createDemoClient() : deps.current.createHostClient(), []);
+
+  const activate = useCallback(async (
+    adapter: WalletClientInterface, wallet: WalletRecord, backup: boolean, token: Action,
+  ) => {
+    if (!valid(token, adapter)) return;
+    const previous = selectedId.current;
+    if (previous && previous !== wallet.id && adapter instanceof UmbrelWalletClient) {
+      await adapter.stopWallet();
+      if (!valid(token, adapter)) return;
+    }
+    adapter.selectWallet(wallet.id);
+    selectedId.current = wallet.id; setWalletId(wallet.id); setSnapshot(null);
+    setWallets(old => [...old.filter(item => item.id !== wallet.id), wallet]);
+    if (profile.current.network !== wallet.network) setProfile(defaultProfile(wallet.network));
+    setRememberedSession({ mode: 'host', network: wallet.network, walletId: wallet.id, locked: false, backupPending: backup });
+    setDeviceHint(true);
+    if (!demoMode.current) remember(wallet.id, false);
+    callbacks.current.onCloseSheet(); callbacks.current.onTab('Wallet');
+    await adapter.startWallet();
+    if (!valid(token, adapter)) return;
+    const read = await adapter.snapshot();
+    if (valid(token, adapter) && selectedId.current === wallet.id && read.wallet.id === wallet.id) {
+      setSnapshot(read); setError('');
+    }
+  }, [setProfile, valid]);
+
+  const wrapClient = useCallback((raw: WalletClientInterface): WalletClientInterface => {
+    let exposed: WalletClientInterface;
+    const create = async (input?: CreateWalletInput): Promise<CreatedWallet> => {
+      if (current.current !== exposed || !mounted.current)
+        throw new WalletError('Reopen the wallet before creating one.', 'WALLET_CHANGED');
+      const token = begin();
+      const lockAt = locks.current;
+      setSelecting(true); setError('');
+      // Creation gets its own client. Its automatic core selection cannot
+      // change the displayed wallet or invalidate a newer session's requests.
+      const creator = makeRaw();
+      try {
+        if (selectedId.current && raw instanceof UmbrelWalletClient) {
+          await raw.stopWallet();
+          if (!valid(token, exposed)) throw new WalletError('The selected wallet changed.', 'WALLET_CHANGED');
+        }
+        const created = await creator.createWallet(input);
+        if (!demoMode.current && input?.mnemonic === undefined) {
+          try { localStorage.setItem(BACKUP + created.id, 'true'); }
+          catch { /* The current session still requires acknowledgement. */ }
+        }
+        if (!valid(token, exposed)) {
+          // A lock can overtake a create. Stop a known late-created daemon.
+          // A tab closing alone leaves the daemon running, like any other tab.
+          if (locks.current !== lockAt && creator instanceof UmbrelWalletClient)
+            await creator.stopWallet().catch(() => {});
+          throw new WalletError('The selected wallet changed. Reopen the wallet to continue.', 'WALLET_CHANGED');
+        }
+        const { mnemonic: _phrase, warnings: _warnings, ...record } = created;
+        setWallets(old => [...old.filter(item => item.id !== record.id), record]);
+        setDeviceHint(true);
+        if (!demoMode.current) remember(record.id, false);
+        return created;
+      } finally { finish(token); }
+    };
+    exposed = new Proxy(raw, {
+      get(target, property) {
+        if (property === 'createWallet') return create;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return exposed;
+  }, [begin, finish, makeRaw, valid]);
+
+  const selectWallet = useCallback(async (
+    wallet: WalletRecord, created = false,
+    backup = created ? false : !demoMode.current && pendingBackup(wallet.id),
+  ) => {
+    const adapter = current.current;
+    if (!adapter) throw new WalletError('Open your wallet first.', 'NO_WALLET');
+    const token = begin();
+    setSelecting(true); setConnecting(true); setError('');
+    try {
+      // The shared CreateSheet calls onCreated only after its backup control.
+      if (created && !backup && !demoMode.current) localStorage.removeItem(BACKUP + wallet.id);
+      await activate(adapter, wallet, backup, token);
+    } catch (cause) { if (valid(token, adapter)) setError(errorMessage(cause)); throw cause; }
+    finally { finish(token); }
+  }, [activate, begin, finish, valid]);
+
+  const connect = useCallback(async (
+    input?: NetworkProfile | { restore?: boolean }, options: OpenOptions = {}, automatic = false,
+  ) => {
+    const token = begin();
+    setConnecting(true); setError('');
+    const configured = input && 'network' in input ? input : undefined;
+    const restoring = options.restore === true || (input && 'restore' in input && input.restore === true);
+    try {
+      if (configured) validateProfile(configured, true);
+      const adapter = current.current ?? wrapClient(makeRaw());
+      if (restoring && selectedId.current && adapter instanceof UmbrelWalletClient) {
+        await adapter.stopWallet();
+        if (!valid(token)) return;
+      }
+      const [config, records, preferences] = await Promise.all([
+        adapter.getConfig(), adapter.listWallets(), loadNetworkPreferences(),
+      ]);
+      if (!valid(token)) return;
+      const saved = demoMode.current ? {} : savedSelection();
+      const requested = options.walletId ?? saved.walletId;
+      const candidates = configured ? records.filter(item => item.network === configured.network) : records;
+      const selected = candidates.find(item => item.id === requested) ??
+        candidates.find(item => item.network === (configured?.network ?? preferences.selectedNetwork)) ??
+        (configured ? undefined : candidates[0]);
+      const network = configured?.network ?? selected?.network ?? config.defaultNetwork ?? preferences.selectedNetwork;
+      setProfile(configured ?? {
+        ...preferences.profiles[network],
+        ...(config.defaultElectrum ? { electrum: config.defaultElectrum } : {}),
+      });
+      setWallets(records); setDeviceHint(records.length > 0);
+      setNetworkEditor(false); setDeviceVisible(false);
+      if (automatic && saved.locked && selected) {
+        current.current = null; setClient(null); selectedId.current = ''; setWalletId(''); setSnapshot(null);
+        setRememberedSession({ mode: 'host', network: selected.network, walletId: selected.id, locked: true });
+        return;
+      }
+      current.current = adapter; setClient(adapter);
+      if (restoring || !selected) {
+        selectedId.current = ''; setWalletId(''); setSnapshot(null); setRememberedSession(null);
+        callbacks.current.onCloseSheet();
+        return;
+      }
+      await activate(adapter, selected, options.backupPending ?? (!demoMode.current && pendingBackup(selected.id)), token);
+    } catch (cause) {
+      if (valid(token)) setError(errorMessage(cause));
+      if (!automatic) throw cause;
+    }
+    finally { finish(token); }
+  }, [activate, begin, finish, makeRaw, setProfile, valid, wrapClient]);
+  const openWallet = useCallback(async (
+    input?: NetworkProfile | { restore?: boolean }, options?: OpenOptions,
+  ) => connect(input, options), [connect]);
+  const openDevice = openWallet;
+
+  const refresh = useCallback(async () => {
+    const adapter = current.current;
+    const id = selectedId.current;
+    if (!adapter || !id || adapter.connection.walletId !== id || reading.current || action.current) return;
+    const at = generation.current;
+    const token = {};
+    reading.current = token;
+    const stillCurrent = () => mounted.current && reading.current === token &&
+      generation.current === at && current.current === adapter && selectedId.current === id &&
+      adapter.connection.walletId === id;
+    try {
+      const read = await adapter.snapshot();
+      if (stillCurrent() && read.wallet.id === id) {
+        setSnapshot(old => old?.wallet.id === id ? mergeSnapshot(old, read) : read); setError('');
+      }
+    } catch (cause) { if (stillCurrent()) setError(errorMessage(cause)); }
+    finally { if (reading.current === token) reading.current = null; }
+  }, []);
+  useEffect(() => {
+    if (!client || !walletId) return;
+    const wake = () => { if (document.visibilityState === 'visible') void refresh(); };
+    const timer = setInterval(wake, 12000);
+    document.addEventListener('visibilitychange', wake);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', wake); };
+  }, [client, walletId, refresh]);
+
+  const manualRefresh = useCallback(async () => {
+    const adapter = current.current;
+    const id = selectedId.current;
+    if (!adapter || !id) return;
+    const token = begin();
+    setRefreshing(true); setError('');
+    try {
+      await adapter.startWallet();
+      if (!valid(token, adapter)) return;
+      await adapter.refreshWallet();
+      if (!valid(token, adapter)) return;
+      const read = await adapter.snapshot();
+      if (valid(token, adapter) && selectedId.current === id && read.wallet.id === id)
+        setSnapshot(old => old?.wallet.id === id ? mergeSnapshot(old, read) : read);
+    } catch (cause) { if (valid(token, adapter)) setError(errorMessage(cause)); }
+    finally { finish(token); }
+  }, [begin, finish, valid]);
+  const createDefaultWallet = useCallback(async () => {
+    const adapter = current.current;
+    if (!adapter) return;
+    const at = generation.current;
+    try {
+      const selected = profile.current;
+      const created = await adapter.createWallet({
+        name: 'My wallet', network: selected.network,
+        primaryUri: selected.primaryUri, electrum: selected.electrum,
+      });
+      if (!mounted.current || generation.current !== at + 1 || current.current !== adapter) return;
+      const { mnemonic: _phrase, warnings: _warnings, ...record } = created;
+      await selectWallet(record, true, !demoMode.current);
+    } catch (cause) {
+      if (mounted.current && generation.current === at + 1 && current.current === adapter)
+        setError(errorMessage(cause));
+    }
+  }, [selectWallet]);
+
+  const switchNetwork = useCallback(async (next: NetworkProfile) => {
+    validateProfile(next, true);
+    const adapter = current.current;
+    if (!adapter) throw new WalletError('Open your wallet first.', 'NO_WALLET');
+    const token = begin();
+    setSwitching(true); setSwitchTarget(next.network); setSwitchError('');
+    try {
+      if (next.network === profile.current.network && selectedId.current && adapter instanceof UmbrelWalletClient) {
+        await adapter.updateWalletSettings({ electrum: next.electrum });
+        if (!valid(token, adapter)) return;
+      }
+      const [records, preferences] = await Promise.all([adapter.listWallets(), loadNetworkPreferences()]);
+      if (!valid(token, adapter)) return;
+      const selected = records.find(item => item.id === selectedId.current && item.network === next.network) ??
+        records.find(item => item.network === next.network);
+      if (!selected && selectedId.current && adapter instanceof UmbrelWalletClient) {
+        await adapter.stopWallet();
+        if (!valid(token, adapter)) return;
+      }
+      preferences.selectedNetwork = next.network;
+      preferences.profiles[next.network] = next;
+      await saveNetworkPreferences(preferences);
+      if (!valid(token, adapter)) return;
+      setProfile(next); setWallets(records); setNetworkEditor(false);
+      if (selected) await activate(adapter, selected, !demoMode.current && pendingBackup(selected.id), token);
+      else {
+        selectedId.current = ''; setWalletId(''); setSnapshot(null); setRememberedSession(null);
+        if (!demoMode.current) remember('', false);
+        callbacks.current.onCloseSheet();
+      }
+    } catch (cause) { if (valid(token, adapter)) setSwitchError(errorMessage(cause)); throw cause; }
+    finally { finish(token); }
+  }, [activate, begin, finish, setProfile, valid]);
+
+  const disconnect = useCallback(async () => {
+    // Lock can overtake a slow connection, create, read or network switch.
+    const token = begin(true);
+    locks.current++;
+    const adapter = current.current;
+    const id = selectedId.current;
+    setClosing(true);
+    try {
+      if (!adapter) return;
+      if (adapter instanceof UmbrelWalletClient && adapter.connection.walletId) await adapter.stopWallet();
+      if (!valid(token, adapter)) return;
+      if (!demoMode.current) remember(id, true);
+      current.current = null; setClient(null); selectedId.current = ''; setWalletId(''); setSnapshot(null);
+      setRememberedSession(old => old ? { ...old, locked: true } : null);
+      callbacks.current.onCloseSheet(); setError('');
+    } catch (cause) {
+      // An unconfirmed stop keeps the wallet visible. The released read latch
+      // permits a fresh poll instead of falsely claiming successful lock.
+      if (valid(token, adapter ?? undefined)) setError(errorMessage(cause));
+    } finally { finish(token); }
+  }, [begin, finish, valid]);
+  const acknowledgeBackup = useCallback(() => {
+    const id = selectedId.current;
+    if (!id) return;
+    if (!demoMode.current) {
+      try { localStorage.removeItem(BACKUP + id); }
+      catch { setError('Chicory could not remember the backup acknowledgement.'); return; }
+    }
+    setRememberedSession(old => old?.walletId === id ? { ...old, backupPending: false } : old);
+  }, []);
+  const retrySetup = useCallback(async () => {
+    const adapter = current.current;
+    if (!adapter || !selectedId.current) return;
+    const token = begin();
+    setRefreshing(true); setError('');
+    try {
+      await adapter.retrySetup();
+      if (!valid(token, adapter)) return;
+      const read = await adapter.snapshot();
+      if (valid(token, adapter) && read.wallet.id === selectedId.current)
+        setSnapshot(old => old?.wallet.id === read.wallet.id ? mergeSnapshot(old, read) : read);
+    } catch (cause) { if (valid(token, adapter)) setError(errorMessage(cause)); }
+    finally { finish(token); }
+  }, [begin, finish, valid]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      generation.current++;
+      action.current = null; reading.current = null; current.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (view.paused) void disconnect();
+    else void connect(undefined, {}, true).catch(() => {});
+  }, [view.paused, connect, disconnect]);
+
+  return {
+    client, wallets, walletId, snapshot, activeProfile, rememberedSession, deviceHint,
+    initializing, connecting, selecting, refreshing, closing, erasing: false,
+    switching, switchTarget, switchError, networkEditor, deviceVisible, error,
+    setError, setSwitchError, setNetworkEditor, setDeviceVisible, refresh, manualRefresh,
+    retrySetup, selectWallet, openDevice, openWallet, createDefaultWallet,
+    switchNetwork, disconnect, acknowledgeBackup,
+    eraseDevice: undefined,
+  };
+}
