@@ -24,15 +24,17 @@ function scriptFor(address, network) {
     return bitcoinAddress.toOutputScript(address, chain);
   } catch { refuse('INVALID_ADDRESS', 'Enter a Bitcoin address on this wallet\'s network.'); }
 }
-function atomicSave(file, value) {
+function atomicSave(file, value, { platform = process.platform } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.tmp`;
   const fd = fs.openSync(temporary, 'w', 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   fs.renameSync(temporary, file);
-  const directory = fs.openSync(path.dirname(file), 'r');
-  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  // Node cannot flush directory handles on Windows. Flush the replacement
+  // file at its destination there; POSIX also commits the directory rename.
+  const committed = fs.openSync(platform === 'win32' ? file : path.dirname(file), platform === 'win32' ? 'r+' : 'r');
+  try { fs.fsyncSync(committed); } finally { fs.closeSync(committed); }
 }
 
 /** Public request links and splice identities live beside their wallet data. */

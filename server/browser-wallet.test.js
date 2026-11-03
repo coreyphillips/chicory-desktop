@@ -38,7 +38,7 @@ test('receive links persist after a restart and retry returns the same immutable
   assert.equal(saved.bitcoinTracking, 'unique');
   assert.deepEqual(await f.store.register(request()), saved);
   assert.deepEqual(new BrowserWallet(f.options).requests(), [saved]);
-  assert.equal(fs.statSync(f.file).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(f.file).mode & 0o777, 0o600);
 });
 test('receive registration rejects foreign addresses, altered invoices and duplicate URI fields', async t => {
   const f = fixture(t); await f.store.allocate({});

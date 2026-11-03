@@ -164,7 +164,8 @@ function openArchive(archive, passphrase) {
 /**
  * Read what belongs in an archive off the data volume: the registry and
  * settings files as they are, and each wallet's two secrets. Files are copied
- * verbatim, with their modes, so a restore can put them back exactly.
+ * verbatim. Secrets carry portable owner-only permissions even when the
+ * source platform, such as Windows, does not expose POSIX mode bits.
  */
 function buildPayload({ dataDir, walletIds, app, engine, createdAt }) {
 	const files = [];
@@ -180,7 +181,8 @@ function buildPayload({ dataDir, walletIds, app, engine, createdAt }) {
 				`${rel} could not be read (${err.message}), so this archive would not restore the box.`
 			);
 		}
-		files.push({ path: rel, mode: fs.statSync(abs).mode & 0o777, data: data.toString('base64') });
+		const secret = /^wallets\/[^/]+\/secrets\/(mnemonic|api_token)$/.test(rel);
+		files.push({ path: rel, mode: secret ? 0o600 : fs.statSync(abs).mode & 0o777, data: data.toString('base64') });
 	};
 	// The wallet records live in registry.json; it is required as soon as
 	// there is a wallet to record.

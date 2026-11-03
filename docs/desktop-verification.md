@@ -13,7 +13,7 @@ responsive navigation, native commands and platform packaging.
 
 ## Automated checks
 
-`npm run check` passed: 86 platform tests, 9 desktop policy tests, 349 manager
+`npm run check` passed: 86 platform tests, 9 desktop policy tests, 354 manager
 tests, TypeScript and the production renderer build.
 
 - TypeScript and a production Vite build.
@@ -48,6 +48,14 @@ Detailed run results and screenshots are generated in `artifacts/smoke/`. That
 folder is excluded from source control. Selected screenshots in this repository
 show only the explicit sample wallet.
 
+## Windows portability
+
+The first Windows CI pass caught an inherited directory-fsync assumption. The
+metadata writer now flushes the replacement file on Windows and retains directory
+flushes on POSIX. Failure-injection tests verify that flush errors still propagate.
+Secret backup metadata and restored files use private POSIX permissions even when
+an archive originated on Windows, whose file permissions use ACLs.
+
 ## Release limits
 
 macOS Apple Silicon is the local build host. Windows, Linux and Intel macOS have
@@ -68,7 +76,8 @@ in the main README and must remain visible until the implementation changes.
 ## Dependency audit
 
 The installed local manager dependency tree reported zero npm audit findings
-after compatible Express and proxy dependency updates. The build-only
+after compatible Express and proxy dependency updates. The bundled Beignet
+runtime also reported zero audit findings. The build-only
 Electron Builder tree reports moderate minimatch denial-of-service advisories.
 That toolchain processes repository build patterns and is excluded from the
 packaged application. Do not force a major downgrade to silence this report.

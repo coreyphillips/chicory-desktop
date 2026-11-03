@@ -151,21 +151,18 @@ test('a compaction failure is reported and does not destroy the file', (t) => {
 
 	const warnings = [];
 	const full = new ChannelEventLog(dir, { warn: (m) => warnings.push(m) });
-	fs.chmodSync(dir, 0o555);
-	t.after(() => {
-		try {
-			fs.chmodSync(dir, 0o755);
-		} catch (_) {
-			/* already restored or removed */
-		}
+	// Directory chmod does not enforce write restrictions on Windows or
+	// under a privileged user. Inject the failed temporary-file write itself.
+	const temporary = path.join(dir, 'channel-events.jsonl.tmp');
+	const write = fs.writeFileSync;
+	t.mock.method(fs, 'writeFileSync', (file, ...args) => {
+		if (file === temporary) throw Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+		return write(file, ...args);
 	});
-	// This record crosses the cap, so it takes the compaction path, whose tmp
-	// file cannot be CREATED in the read-only directory.
 	const rec = full.record('channel:ready', { channelId: 'cc', timestamp: 9999 });
 	assert.equal(rec.persisted, false);
 	assert.match(warnings[0], /write failed/);
 
-	fs.chmodSync(dir, 0o755);
 	const reloaded = new ChannelEventLog(dir);
 	assert.equal(reloaded.list().length, MAX_EVENTS, 'original file intact');
 });

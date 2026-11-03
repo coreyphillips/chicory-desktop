@@ -2456,12 +2456,11 @@ class WalletManager {
 		};
 	}
 
-	// The archive carries each file's mode. It is set again after the write
-	// because writeFileSync only applies one when it creates the file, and a
-	// umask can narrow the one it asks for.
+	// A Windows archive can carry emulated 0666 modes. Never reproduce those
+	// permissions on POSIX. Windows protects these files with profile ACLs.
 	_writeSecret(file, entry) {
-		fs.writeFileSync(file, entry.data, { mode: entry.mode });
-		fs.chmodSync(file, entry.mode);
+		fs.writeFileSync(file, entry.data, { mode: 0o600 });
+		fs.chmodSync(file, 0o600);
 	}
 
 	// ── Lightning-first wallets ──

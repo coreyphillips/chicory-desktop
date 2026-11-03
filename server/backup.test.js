@@ -163,8 +163,11 @@ test('a box round-trips: export, wipe, restore, and the secrets are the same byt
 		const got = secretsOf(rec.id);
 		assert.deepEqual(got.mnemonic, before[rec.id].mnemonic, `${rec.name} seed is the same bytes`);
 		assert.deepEqual(got.token, before[rec.id].token, `${rec.name} token is the same bytes`);
-		assert.equal(modeOf(path.join(DATA_DIR, 'wallets', rec.id, 'secrets', 'mnemonic')), 0o600);
-		assert.equal(modeOf(path.join(DATA_DIR, 'wallets', rec.id, 'secrets', 'api_token')), 0o600);
+		// Windows reports emulated mode bits; its profile ACLs control access.
+		if (process.platform !== 'win32') {
+			assert.equal(modeOf(path.join(DATA_DIR, 'wallets', rec.id, 'secrets', 'mnemonic')), 0o600);
+			assert.equal(modeOf(path.join(DATA_DIR, 'wallets', rec.id, 'secrets', 'api_token')), 0o600);
+		}
 	}
 
 	// The records come back as they were, but stopped: a restore starts
