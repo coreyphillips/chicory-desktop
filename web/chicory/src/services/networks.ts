@@ -37,11 +37,9 @@ export function defaultProfile(network: Network): NetworkProfile {
         : network === 'regtest'
         ? { ...DEFAULT_REGTEST_ELECTRUM }
         : { host: '', port: 50002, tls: true },
-    // Desktop has no bundled Tor daemon. New wallets choose a reachable
-    // primary explicitly; saved profiles keep the node their owner selected.
-    primaryUri: network === 'mainnet' && !(typeof window !== 'undefined' && window.chicoryDesktop)
-      ? DEFAULT_PRIMARY_URI : '',
-    // The local service owns native TCP and optional configured Tor transport.
+    // The desktop app owns bundled Tor for the shared mobile onion primary.
+    primaryUri: network === 'mainnet' ? DEFAULT_PRIMARY_URI : '',
+    // The local service owns native TCP and bundled Tor transport.
     transport: 'native',
     relayUrl: '',
     relayToken: '',

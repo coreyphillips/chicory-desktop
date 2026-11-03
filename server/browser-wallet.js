@@ -1,6 +1,6 @@
 'use strict';
 
-const fs = require('fs');
+const fs = require('./vault-files').fs;
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
@@ -25,6 +25,8 @@ function scriptFor(address, network) {
   } catch { refuse('INVALID_ADDRESS', 'Enter a Bitcoin address on this wallet\'s network.'); }
 }
 function atomicSave(file, value, { platform = process.platform } = {}) {
+  const vault = require('./vault-files');
+  if (vault.protects(file)) return vault.atomicWriteFileSync(file, JSON.stringify(value));
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.tmp`;
   const fd = fs.openSync(temporary, 'w', 0o600);

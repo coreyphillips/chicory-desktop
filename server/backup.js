@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const fs = require('fs');
+const fs = require('./vault-files').fs;
 const path = require('path');
 
 /**

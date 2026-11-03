@@ -381,12 +381,13 @@ test('a native desktop wallet explicitly stopped stays stopped across launches',
   assert.equal(reopened.events.some(item => item.startsWith('start:')), false);
 });
 
-test('native defaults require a primary while saved primary profiles are preserved', async () => {
+test('desktop defaults use the mobile primary and preserve custom profiles', async () => {
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
   const { defaultPreferences, loadNetworkPreferences, saveNetworkPreferences } = await import('../chicory/src/services/networks.ts');
   const preferences = defaultPreferences();
-  assert.equal(preferences.profiles.mainnet.primaryUri, '');
-  preferences.profiles.mainnet.primaryUri = DEFAULT_PRIMARY_URI;
+  assert.equal(preferences.profiles.mainnet.primaryUri, DEFAULT_PRIMARY_URI);
+  const customPrimary = '02' + 'a'.repeat(64) + '@node.example:9735';
+  preferences.profiles.mainnet.primaryUri = customPrimary;
   await saveNetworkPreferences(preferences);
-  assert.equal((await loadNetworkPreferences()).profiles.mainnet.primaryUri, DEFAULT_PRIMARY_URI);
+  assert.equal((await loadNetworkPreferences()).profiles.mainnet.primaryUri, customPrimary);
 });

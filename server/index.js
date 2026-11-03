@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { config, SUPPORTED_NETWORKS, ELECTRUM_PRESETS, PUBLIC_ELECTRUM_SERVERS } = require('./config');
+const desktopNetwork = require('./desktop-network');
 const { WalletManager } = require('./wallet-manager');
 const { createAccessGuard } = require('./access-control');
 const { releaseUpstreamOnClose } = require('./proxy-release');
@@ -33,9 +34,13 @@ async function startManager({
 	bindHost = config.bindHost,
 	publicDir = process.env.PUBLIC_DIR || path.join(__dirname, '..', 'dist')
 } = {}) {
+	if (process.env.CHICORY_ENCRYPTED_STORAGE === '1' && !require('./vault-files').isActive())
+		throw new Error('Encrypted wallet storage must be opened before the manager.');
 	if (process.env.DESKTOP_MODE === '1' && !desktopSessionToken)
 		throw new Error('The desktop manager requires its private session token.');
 	const desktopGuard = desktopSessionToken ? createDesktopAccessGuard(desktopSessionToken) : null;
+	// Subscribe to safe bootstrap progress before automatic wallet starts.
+	desktopNetwork.torStatus();
 	await manager.init();
 
 	const app = express();
@@ -178,7 +183,8 @@ async function startManager({
 				electrumPresets: ELECTRUM_PRESETS,
 				electrumPublicServers: PUBLIC_ELECTRUM_SERVERS,
 
-				torAvailable: !!config.torProxy,
+				torAvailable: desktopNetwork.enabled() || !!config.torProxy,
+				torStatus: desktopNetwork.torStatus(),
 				onionAvailable: manager.onionAvailable(),
 				// The Tor proxy scoped to .onion peers (beignet #963): without it a
 				// Clearnet or Hybrid wallet dials with no proxy at all.
@@ -662,4 +668,4 @@ if (require.main === module) main().catch((err) => {
 	process.exit(1);
 });
 
-module.exports = { startManager };
+module.exports = { startManager, main };

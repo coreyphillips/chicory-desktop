@@ -1,7 +1,7 @@
 'use strict';
 
 const net = require('net');
-const fs = require('fs');
+const fs = require('./vault-files').fs;
 const os = require('os');
 
 const RECONNECT_MS = 15000;

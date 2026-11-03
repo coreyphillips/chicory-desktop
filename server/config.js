@@ -16,7 +16,8 @@ const SUPPORTED_NETWORKS = ['mainnet', 'testnet', 'regtest'];
 const injectedNetwork = process.env.DEFAULT_NETWORK || 'mainnet';
 const defaultNetwork = SUPPORTED_NETWORKS.includes(injectedNetwork) ? injectedNetwork : 'mainnet';
 
-// Umbrel injects its Tor. The SOCKS proxy (TOR_PROXY_IP:TOR_PROXY_PORT) is used
+// Desktop supplies its private bundled Tor proxy. Umbrel can inject its own.
+// The SOCKS proxy (TOR_PROXY_IP:TOR_PROXY_PORT) is used
 // for per-wallet outbound Lightning over Tor. The control port (29051, same IP,
 // authed with TOR_PASSWORD) is used to publish an inbound hidden service.
 const torProxyIp = process.env.TOR_PROXY_IP || '';
@@ -33,6 +34,7 @@ const config = {
 	// outside a release build; a backup archive records it either way.
 	appVersion: process.env.APP_VERSION || null,
 	torProxy,
+	desktopTor: process.env.DESKTOP_TOR_MANAGED === '1',
 	torProxyIp,
 	torControlPort,
 	torPassword: process.env.TOR_PASSWORD || '',

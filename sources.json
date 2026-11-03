@@ -20,7 +20,8 @@
   },
   "engineVersion": "0.36.1",
   "enginePatches": [
-    "scripts/apply-engine-patches.mjs"
+    "scripts/apply-engine-patches.mjs",
+    "scripts/apply-storage-encryption.mjs"
   ],
   "chicory-umbrel": {
     "repository": "https://github.com/coreyphillips/chicory-umbrel",
@@ -28,5 +29,16 @@
     "destination": "web and server",
     "license": "MIT",
     "notes": "Desktop layout and browser motion foundation, adapted to an isolated Electron renderer and local manager."
+  },
+  "encryptedStorage": {
+    "driver": "better-sqlite3-multiple-ciphers",
+    "version": "13.0.3",
+    "cipher": "sqlcipher",
+    "compatibility": 4,
+    "notes": "Pinned standalone Node native build with encrypted wallet, guardian and backup databases."
+  },
+  "tor": {
+    "manifest": "build/tor-manifest.json",
+    "notes": "Official Tor Expert Bundle with pinned checksums and upstream license/source notices."
   }
 }

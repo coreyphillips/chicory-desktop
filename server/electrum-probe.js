@@ -18,6 +18,7 @@ const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
 const { certificateAccepted } = require('./electrum-tls');
+const { resolveElectrum } = require('./desktop-network');
 
 // A server that does not answer at all in this long is reported as such. The
 // same bound the manager uses before starting a wallet.
@@ -94,8 +95,10 @@ function codedError(code, message) {
  * `transport` is the pair of modules that open sockets, so a test can hand
  * in one whose connection never completes.
  */
-function electrumRequests(electrum, requests, { timeoutMs = PROBE_TIMEOUT_MS, transport = { net, tls } } = {}) {
-	const { host, port, tls: useTls } = electrum;
+async function electrumRequests(electrum, requests, { timeoutMs = PROBE_TIMEOUT_MS, transport = { net, tls } } = {}) {
+	const endpoint = await resolveElectrum(electrum);
+	const { host, port } = electrum;
+	const useTls = endpoint.tls;
 	return new Promise((resolve, reject) => {
 		let done = false;
 		let buf = '';
@@ -138,8 +141,8 @@ function electrumRequests(electrum, requests, { timeoutMs = PROBE_TIMEOUT_MS, tr
 		};
 		try {
 			socket = useTls
-				? transport.tls.connect({ host, port, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false })
-				: transport.net.connect({ host, port });
+				? transport.tls.connect({ host: endpoint.host, port: endpoint.port, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false })
+				: transport.net.connect({ host: endpoint.host, port: endpoint.port });
 		} catch (err) {
 			return reject(err);
 		}

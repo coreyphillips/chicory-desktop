@@ -40,8 +40,8 @@ jobs:
           git config --global --add url."https://github.com/".insteadOf git@github.com:
       - run: npm ci
       - run: npm --prefix server ci --omit=dev
+      - run: npm run runtime:prepare
       - run: npm run check
-      - run: node scripts/desktop/prepare-runtime.mjs
       - name: Package for the build host
         run: npx electron-builder --config build/electron-builder.yml --${{ matrix.platform }} --${{ matrix.arch }} --publish never
         env:

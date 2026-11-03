@@ -33,13 +33,27 @@ extraResources:
     filter: ['**/*', '!.bin/**/*', '!.cache/**/*']
   - from: .runtime/engine
     to: runtime/engine
-    filter:
-      - '**/*'
-      - '!node_modules/.cache/**/*'
-      - '!node_modules/.bin/**/*'
+    filter: ['package.json', 'package-lock.json']
   - from: .runtime/engine/node_modules
     to: runtime/engine/node_modules
-    filter: ['**/*', '!.bin/**/*', '!.cache/**/*']
+    filter:
+      - '**/*'
+      - '!.bin/**/*'
+      - '!.cache/**/*'
+      - '!better-sqlite3/**/*'
+      - '!better-sqlite3-multiple-ciphers/**/*'
+  # Only ship the reviewed native build, not unused upstream prebuilds or
+  # compiler outputs. This binding runs under bundled Node, never Electron.
+  - from: .runtime/engine/node_modules/better-sqlite3-multiple-ciphers
+    to: runtime/engine/node_modules/better-sqlite3-multiple-ciphers
+    filter:
+      - package.json
+      - LICENSE
+      - lib/**/*
+      - build/Release/better_sqlite3.node
+  - from: .runtime/tor
+    to: runtime/tor
+    filter: ['**/*']
   - from: .runtime/node
     to: runtime/node
     filter:
@@ -64,6 +78,9 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   binaries:
     - Contents/Resources/runtime/node/bin/node
+    - Contents/Resources/runtime/engine/node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node
+    - Contents/Resources/runtime/tor/tor/tor
+    - Contents/Resources/runtime/tor/tor/libevent-2.1.7.dylib
   extendInfo:
     NSCameraUsageDescription: Chicory uses your camera to read payment QR codes.
 dmg:

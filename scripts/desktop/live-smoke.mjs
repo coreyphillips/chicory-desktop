@@ -96,7 +96,34 @@ try {
   if (executable) assert.equal(state.packaged, true);
   const isolation = await page.evaluate(() => ({ require: typeof window.require, process: typeof window.process }));
   assert.deepEqual(isolation, { require: 'undefined', process: 'undefined' });
+  const envelope = JSON.parse(await fs.readFile(path.join(profile, 'storage-key.json'), 'utf8'));
+  assert.equal(envelope.provider, 'electron.safeStorage');
+  assert.equal(envelope.version, 1);
+  assert.ok(envelope.ciphertext.length > 32);
+  const marker = await fs.readFile(path.join(profile, 'wallets/.vault-v1'));
+  assert.equal(marker.subarray(0, Buffer.byteLength('CHICORYVAULT1')).toString(), 'CHICORYVAULT1');
+  assert.equal(marker.includes(Buffer.from('version')), false);
+  checks.push('OS-protected storage key, authenticated encrypted vault marker and restart continuity');
   checks.push('Isolated real profile, live manager API, Beignet 0.36.1, zero wallets, sandboxed renderer');
+
+  if (process.env.CHICORY_SMOKE_TOR === '1') {
+    // Tor Project's published Onion-Location address, used only to exercise
+    // the app's private manager/main bridge. It is not an Electrum server.
+    await page.evaluate(async () => {
+      const response = await fetch('/api/electrum/test', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: '2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion', port: 80, tls: false }),
+        signal: AbortSignal.timeout(140000) });
+      if (!response.ok) throw new Error('Desktop Tor bridge request failed.');
+    });
+    const torStatus = await page.evaluate(async () => (await (await fetch('/api/config')).json()).result.torStatus);
+    assert.equal(torStatus.phase, 'ready');
+    assert.equal(torStatus.progress, 100);
+    const torProcess = processTree().find(item => item.parent === electron.process().pid && /(?:^|[/\\])tor(?:\.exe)?$/.test(item.name));
+    assert.ok(torProcess, 'The bundled Tor process is owned by the app');
+    managerPids.push(torProcess.pid);
+    checks.push('Real bundled Tor reaches 100% through private manager IPC and an onion bridge');
+  }
 
   if (process.platform === 'darwin' || process.platform === 'linux') {
     const listeners = execFileSync('lsof', ['-nP', '-a', '-p', String(firstManager), '-iTCP', '-sTCP:LISTEN', '-Fn'], { encoding: 'utf8' });

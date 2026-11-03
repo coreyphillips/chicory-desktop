@@ -5,9 +5,7 @@
   "license": "MIT",
   "description": "Pinned wallet engine for the standalone Node runtime bundled with Chicory Desktop.",
   "dependencies": {
-    "beignet": "0.36.1"
-  },
-  "allowScripts": {
-    "better-sqlite3@12.11.1": true
+    "beignet": "0.36.1",
+    "better-sqlite3-multiple-ciphers": "13.0.3"
   }
 }

@@ -37,13 +37,17 @@ npm start
 
 `runtime:prepare` downloads an official Node release, checks its pinned SHA256,
 installs the pinned Beignet 0.36.1 engine from a lockfile, applies the reviewed
-fresh-address patch and checks the native SQLite module. Packaged apps include
-these components and do not need Node or npm installed separately.
+fresh-address and encrypted-storage patches, builds the pinned encrypted SQLite
+driver, and verifies real encrypted database files. It also downloads and verifies
+the pinned official Tor Expert Bundle. Building the driver requires a C++ toolchain
+and Python. Packaged apps include these components and need no Node, npm or
+separate Tor installation.
 
 On first launch, create or restore a wallet and choose its network, Electrum
-server and reachable primary node. There is no bundled Tor daemon. To use onion
-peers, provide a running local SOCKS service through `TOR_PROXY_IP` and
-`TOR_PROXY_PORT` when launching the app. Clearnet peers connect directly.
+server and primary node. Bundled Tor starts on demand for onion peers, guardians
+and onion Electrum servers. Its bootstrap must succeed before wallet connections
+use that route, and onion failures never fall back to a direct connection.
+Clearnet peers continue to connect directly; this is not an all-traffic VPN.
 
 To explore the interface without creating a wallet or installing the wallet
 runtime:
@@ -66,11 +70,27 @@ using a fresh capability. The manager rejects unauthenticated requests, foreign
 origins and unexpected Host headers. The renderer never receives that capability
 or daemon credentials.
 
-Wallet seeds, channel state and signing remain on this computer. Storage uses
-owner-only directories and restricted seed-file permissions. This first desktop
-version does **not** reproduce the phone's SQLCipher encryption or biometric
-lock. Use an encrypted OS disk and protect your computer account. Do not run the
-same Lightning wallet concurrently on another device.
+Wallet seeds, channel state and signing remain on this computer. A random storage
+key is protected by macOS Keychain, Windows DPAPI or a supported Linux system
+keyring through Electron's secure storage. Linux plaintext keyring fallback is
+refused. Wallet and guardian databases use SQLCipher-compatible AES-256 page
+encryption. Seeds, configuration, manager metadata and wallet logs use
+authenticated AES-256-GCM file encryption. Keys travel only through private
+process bootstrap channels, never renderer IPC or command-line arguments.
+
+This version targets fresh encrypted profiles and contains no legacy wallet
+migration. A missing or unreadable key never silently creates a replacement for
+existing data. Native app lock and biometric approval remain future work. OS
+protection does not isolate an unlocked wallet from every process running as the
+same user. Renderer preferences and offline draft caches are a separate pending
+privacy improvement. Do not run the same Lightning wallet concurrently on
+another device.
+
+Engine database backups retain page encryption and require the original desktop
+profile key. A recovery phrase alone cannot decrypt those files on another
+installation. The existing passphrase-encrypted identity/settings export is
+portable, but it is not a full channel backup. Portable full-wallet encrypted
+exports are tracked in the issue backlog.
 
 On macOS, closing the window leaves Chicory running in the Dock. Quit Chicory
 stops its wallet daemons and closes the app. On Windows and Linux, closing the
@@ -96,7 +116,7 @@ npm run dist
 
 `package` creates an unpacked application in `release/`; `dist` builds the host's
 DMG/ZIP, NSIS installer or AppImage. Packaging checks that the bundled Node,
-engine and native SQLite match the target. On macOS without a Developer ID,
+engine, encrypted SQLite driver and Tor match the target. On macOS without a Developer ID,
 add `-c.mac.identity=-` to an `electron-builder` command for an ad hoc local build.
 
 The [package workflow](.github/workflows/package.yml) builds macOS Apple Silicon,
@@ -115,6 +135,9 @@ Checks cover TypeScript, shared UI behavior, motion, manager routes, payment
 safeguards, local authentication, lifecycle and desktop policy. The Electron
 smoke test uses a disposable sample profile, exercises native menus and window
 sizes, and writes screenshots and a report to `artifacts/smoke/`.
+
+Remaining mobile parity and release work is tracked in the
+[GitHub issues](https://github.com/coreyphillips/chicory-desktop/issues).
 
 See [desktop verification](docs/desktop-verification.md) for the exact checks
 performed and remaining platform qualification. The inherited
@@ -135,5 +158,7 @@ layout and manager. Source revisions and dependency pins are in
 - `docker/`, `store/`, and the older browser verification files: inherited
   deployment references, outside the desktop packaging path.
 
-MIT. See [LICENSE](LICENSE). Beignet and the original Chicory sources retain
-their upstream licenses and copyright notices.
+Application source is MIT. See [LICENSE](LICENSE). Bundled dependencies retain
+their own licenses. The Tor bundle includes GPL components and ships its upstream
+notices and corresponding source references; see [the pinned manifest](build/tor-manifest.json).
+Beignet and the original Chicory sources retain their copyright notices.

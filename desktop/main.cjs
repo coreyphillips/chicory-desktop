@@ -1,7 +1,9 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, screen, session, shell, protocol } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, screen, session, shell, protocol, safeStorage } = require('electron');
 const { fork } = require('node:child_process');
+const { loadStorageKey } = require('./storage-key.cjs');
+const { BundledTor } = require('./tor.cjs');
 const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,6 +20,9 @@ app.setPath('userData', profile);
 const locked = app.requestSingleInstanceLock();
 let window;
 let manager;
+let tor;
+let torProxy;
+const torRequests = new Set();
 let origin;
 let stopping = false;
 let stopped = false;
@@ -58,11 +63,9 @@ function managerEnvironment() {
   for (const key of ['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']) {
     if (process.env[key]) env[key] = process.env[key];
   }
-  // Explicit optional SOCKS configuration for owners using a local Tor service.
-  for (const key of ['TOR_PROXY_IP', 'TOR_PROXY_PORT']) {
-    if (process.env[key]) env[key] = process.env[key];
-  }
   return { ...env, NODE_ENV: 'production', DESKTOP_SESSION_TOKEN: token,
+    CHICORY_ENCRYPTED_STORAGE: '1', DESKTOP_TOR_MANAGED: '1',
+    TOR_PROXY_IP: torProxy.host, TOR_PROXY_PORT: String(torProxy.port),
     DATA_DIR: path.join(profile, 'wallets'), PUBLIC_DIR: publicDirectory,
     APP_VERSION: app.getVersion(), BEIGNET_BIN: path.join(runtime, 'engine/node_modules/beignet/dist/cli/cli.js') };
 }
@@ -74,10 +77,20 @@ async function startManager() {
     throw new Error('The local wallet runtime is missing. For a source checkout, run npm run runtime:prepare.');
   }
   fs.mkdirSync(path.join(profile, 'wallets'), { recursive: true, mode: 0o700 });
-  manager = fork(path.join(root, 'server/index.js'), [], {
-    execPath: node, env: managerEnvironment(), cwd: profile,
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
-  });
+  const key = await loadStorageKey({ profile, safeStorage, platform: process.platform });
+  if (stopping) { key.fill(0); return; }
+  tor = new BundledTor({ bundleDirectory: path.join(runtime, 'tor'), dataDirectory: path.join(profile, 'tor'),
+    onStatus: status => {
+      if (manager?.connected && !stopping) manager.send({ type: 'tor:status', status }, () => {});
+    } });
+  try { torProxy = await tor.startProxy(); } catch (error) { key.fill(0); throw error; }
+  if (stopping) { key.fill(0); await tor.stop(); return; }
+  try {
+    manager = fork(path.join(root, 'server/desktop-bootstrap.js'), [], {
+      execPath: node, env: managerEnvironment(), cwd: profile,
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
+    });
+  } catch (error) { key.fill(0); throw error; }
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('The local wallet did not finish starting.')), 30000);
     manager.once('error', (error) => { clearTimeout(timeout); reject(error); });
@@ -90,13 +103,43 @@ async function startManager() {
       }
     });
     manager.on('message', (message) => {
+      if (message?.type === 'startup-error') {
+        clearTimeout(timeout);
+        reject(new Error(message.code === 'STORAGE_UNAVAILABLE' ? String(message.message).slice(0, 300) : 'The local wallet could not start.'));
+        return;
+      }
+      if (message?.type === 'tor:ensure' || message?.type === 'tor:bridge') {
+        void handleTorRequest(manager, message);
+        return;
+      }
       if (message?.type !== 'ready' || !Number.isInteger(message.port) || message.port < 1 || message.port > 65535 ||
           message.host !== '127.0.0.1' || message.origin !== `http://127.0.0.1:${message.port}`) return;
       clearTimeout(timeout);
       origin = message.origin;
+      manager.send({ type: 'tor:status', status: tor.status() }, () => {});
       resolve();
     });
+    try {
+      manager.send({ type: 'initialize-storage', key: key.toString('hex') }, error => {
+        if (error) { clearTimeout(timeout); reject(new Error('The protected wallet key could not reach the local wallet.')); }
+      });
+    } finally { key.fill(0); }
   });
+}
+
+async function handleTorRequest(child, message) {
+  if (stopping || !child.connected || typeof message.requestId !== 'string' ||
+      !/^[a-f0-9-]{36}$/.test(message.requestId) || torRequests.has(message.requestId)) return;
+  const reply = payload => { if (child.connected && !stopping) child.send({ type: 'tor:result', requestId: message.requestId, ...payload }, () => {}); };
+  if (torRequests.size >= 64) { reply({ error: 'The Tor service is busy. Retry shortly.' }); return; }
+  torRequests.add(message.requestId);
+  try {
+    if (message.type === 'tor:bridge' && (!/^[a-z2-7]{56}\.onion$/.test(message.host) ||
+        !Number.isInteger(message.port) || message.port < 1 || message.port > 65535)) throw new Error();
+    const endpoint = message.type === 'tor:bridge' ? await tor.createBridge(message.host, message.port) : await tor.ensureReady();
+    reply({ result: { host: endpoint.host, port: endpoint.port } });
+  } catch { reply({ error: 'Tor could not connect. Check the network and retry.' }); }
+  finally { torRequests.delete(message.requestId); }
 }
 
 async function stopManager() {
@@ -106,7 +149,7 @@ async function stopManager() {
     // The manager gives each wallet a bounded graceful stop before terminating it.
     const deadline = setTimeout(() => { child.kill('SIGKILL'); }, 45000);
     child.once('exit', () => { clearTimeout(deadline); resolve(); });
-    if (child.connected) child.send({ type: 'shutdown' });
+    if (child.connected) child.send({ type: 'shutdown' }, () => {});
     else child.kill('SIGTERM');
   });
 }
@@ -244,7 +287,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitting) return;
   stopping = true;
-  quitting = stopManager().finally(() => { stopped = true; app.quit(); });
+  quitting = stopManager().finally(() => tor?.stop()).finally(() => { stopped = true; app.quit(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', showWindow);

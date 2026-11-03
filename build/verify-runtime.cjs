@@ -4,6 +4,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
+const { pathToFileURL } = require('node:url');
+const { torEnvironment } = require('../desktop/tor.cjs');
+
+function verifyTor(directory, platform, arch) {
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, 'tor-manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'bundle.json'), 'utf8'));
+  const archive = expected.platforms[`${platform}-${arch}`];
+  if (!archive || manifest.platform !== platform || manifest.arch !== arch ||
+      manifest.torVersion !== expected.torVersion || manifest.bundleVersion !== expected.bundleVersion ||
+      manifest.archiveSha256 !== archive.sha256) {
+    throw new Error('The bundled Tor resources do not match the reviewed platform manifest.');
+  }
+  const binary = path.join(directory, 'tor', platform === 'win32' ? 'tor.exe' : 'tor');
+  for (const relative of ['data/geoip', 'data/geoip6', 'docs/GPL-3.0.txt', 'source/README.txt', `source/tor-${manifest.torVersion}.tar.gz`]) {
+    if (!fs.existsSync(path.join(directory, relative))) throw new Error(`Bundled Tor resource is missing: ${relative}`);
+  }
+  const sources = [{ file: `tor-${expected.torVersion}.tar.gz`, sha256: expected.source.sha256 }, ...(expected.additionalSources || [])];
+  for (const source of sources) {
+    const hash = createHash('sha256').update(fs.readFileSync(path.join(directory, 'source', source.file))).digest('hex');
+    if (hash !== source.sha256) throw new Error('Bundled Tor source failed its pinned SHA256 check.');
+  }
+  const version = execFileSync(binary, ['--version'], { env: torEnvironment(directory), encoding: 'utf8' });
+  if (!version.startsWith(`Tor version ${expected.torVersion} `)) throw new Error('The bundled Tor executable has the wrong version.');
+}
 
 module.exports = async function verifyRuntime(context) {
   const root = context.packager.projectDir;
@@ -14,18 +38,19 @@ module.exports = async function verifyRuntime(context) {
       manifest.platform !== process.platform || manifest.arch !== process.arch) {
     throw new Error('The wallet runtime must be prepared and packaged on its target OS and architecture.');
   }
-  const engine = path.join(runtime, 'engine');
+  const engine = path.join(runtime, 'engine/node_modules/beignet');
   const lockHash = createHash('sha256').update(fs.readFileSync(path.join(root, 'build/runtime/package-lock.json'))).digest('hex');
-  if (manifest.node !== '24.22.1' || manifest.engine !== '0.36.1' || manifest.engineLockSha256 !== lockHash) {
+  if (manifest.node !== '24.22.1' || manifest.engine !== '0.36.1' || manifest.encryptedStorage !== '13.0.3' || manifest.engineLockSha256 !== lockHash) {
     throw new Error('The bundled runtime is out of date. Run npm run runtime:prepare before packaging.');
   }
+  const binding = fs.readFileSync(path.join(engine, 'dist/lightning/storage/sqlite-binding.js'), 'utf8');
+  if (!binding.includes("require('./engine-storage.cjs').EncryptedDatabase")) throw new Error('The engine encrypted storage patch is missing.');
+  if (!fs.readFileSync(path.join(engine, 'dist/cli/restore.js'), 'utf8').includes('chicory-desktop-encrypted-restore-v1')) throw new Error('The encrypted database restore patch is missing.');
+  if (!fs.readFileSync(path.join(engine, 'dist/lightning/storage/engine-storage.cjs')).equals(fs.readFileSync(path.join(root, 'server/engine-storage.cjs')))) throw new Error('The encrypted storage helper is stale. Run npm run runtime:prepare.');
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
-  execFileSync(node, ['-e', `
-    if (process.version !== 'v24.22.1') throw new Error('Wrong bundled Node version.');
-    if (require('beignet/package.json').version !== '0.36.1') throw new Error('Wrong wallet engine version.');
-    const Database = require('better-sqlite3');
-    const database = new Database(':memory:');
-    database.prepare('select 1').get();
-    database.close();
-  `], { cwd: engine, stdio: 'inherit' });
+  if (execFileSync(node, ['--version'], { encoding: 'utf8' }).trim() !== 'v24.22.1') throw new Error('Wrong bundled Node version.');
+  const { verifyDriver } = await import(pathToFileURL(path.join(root, 'scripts/apply-storage-encryption.mjs')).href);
+  verifyDriver(node, engine);
+  verifyTor(path.join(runtime, 'tor'), manifest.platform, manifest.arch);
 };
+module.exports.verifyTor = verifyTor;

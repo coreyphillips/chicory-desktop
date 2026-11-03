@@ -1,6 +1,6 @@
 # Desktop verification
 
-This file records checks performed for the initial desktop adaptation on
+This file records checks performed for the desktop adaptation on
 November 3, 2026. Upstream browser and regtest reports remain historical
 references. They do not qualify a desktop binary by themselves.
 
@@ -13,8 +13,15 @@ responsive navigation, native commands and platform packaging.
 
 ## Automated checks
 
-`npm run check` passed: 86 platform tests, 9 desktop policy tests, 354 manager
-tests, TypeScript and the production renderer build.
+`npm run runtime:prepare` provisions the exact runtime before `npm run check`.
+The suite covers platform behavior, desktop policy, OS key wrapping, encrypted
+files and database pages, Tor supervision, manager routes, TypeScript and the
+production renderer build.
+
+Version 0.2 passed 527 automated tests locally: 86 platform tests, 45 desktop
+tests and 396 manager/storage tests, with zero skips. The actual bundled engine
+fixture verified private IPC bootstrap, encrypted config and database creation,
+and early parent-disconnect cleanup against a local test endpoint.
 
 - TypeScript and a production Vite build.
 - UI/platform tests, including custom spring animation execution, reduced motion,
@@ -68,10 +75,18 @@ hardware, OS protocol installation and Windows/Linux permissions remain release
 qualification work. The existing browser regtest results are useful inherited
 evidence, not a substitute for these checks.
 
-The desktop manager retains the upstream seed-file storage model. It has no
-SQLCipher or native biometric gate. Tor is an optional external SOCKS service;
-there is no bundled Tor client in this version. These differences are documented
-in the main README and must remain visible until the implementation changes.
+Version 0.2 adds OS-protected storage keys, authenticated encrypted wallet files,
+SQLCipher-compatible wallet/guardian databases and encrypted engine backups.
+Fresh profiles are supported without legacy migration code. Native app lock,
+biometric approval, encrypted renderer drafts and portable full channel backups
+remain tracked work. Bundled Tor starts on demand and refuses direct onion
+fallback. Clearnet connections retain their normal routing.
+
+Encryption regression checks include wrong and missing keys, tampered files and
+pages, live WAL contents, crash recovery, cross-process file access, encrypted
+backups, real Beignet and guardian schemas, and refusal of plaintext database
+files. Tor checks cover bootstrap, SOCKS hostname routing, loopback listeners,
+process failure, restart and shutdown.
 
 ## Dependency audit
 

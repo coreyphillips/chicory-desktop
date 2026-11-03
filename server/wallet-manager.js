@@ -1,6 +1,6 @@
 'use strict';
 
-const fs = require('fs');
+const fs = require('./vault-files').fs;
 const os = require('os');
 const net = require('net');
 const path = require('path');
@@ -62,6 +62,7 @@ const {
 } = require('./engine');
 const { normalizeElectrumTls, electrumTlsEnv } = require('./electrum-tls');
 const { electrumRequests, cachedProbe, discoverServers } = require('./electrum-probe');
+const desktopNetwork = require('./desktop-network');
 const lfbw = require('./lfbw');
 const ffor = require('./ffor');
 const netmode = require('./network-mode');
@@ -142,6 +143,10 @@ function httpError(status, code, message) {
  */
 function beignetSpawn() {
 	const bin = process.env.BEIGNET_BIN;
+	if (require('./vault-files').isActive()) {
+		if (!bin || !bin.endsWith('.js')) throw new Error('The encrypted wallet requires its bundled engine.');
+		return { cmd: process.execPath, args: [path.join(__dirname, 'engine-bootstrap.js'), bin, 'start'], encrypted: true };
+	}
 	if (bin && bin.endsWith('.js')) return { cmd: process.execPath, args: [bin, 'start'] };
 	if (bin) return { cmd: bin, args: ['start'] };
 	return { cmd: 'beignet', args: ['start'] };
@@ -221,7 +226,7 @@ class WalletManager {
 		}
 		// Publish the inbound hidden service via the app's own Tor before boot
 		// so announce-enabled wallets advertise the onion from the start.
-		if (config.torProxyIp && config.torPassword) {
+		if (!desktopNetwork.enabled() && config.torProxyIp && config.torPassword) {
 			const ports = Array.from(
 				{ length: ANNOUNCE_PORT_COUNT },
 				(_, i) => config.childPortBase + LISTEN_PORT_OFFSET + i
@@ -244,7 +249,7 @@ class WalletManager {
 				);
 			}
 		}
-		if (config.torProxy) this._scheduleTorCheck();
+		if (config.torProxy && !desktopNetwork.enabled()) this._scheduleTorCheck();
 	}
 
 	// One check at a time, each scheduling the next: soon while Tor is unknown
@@ -492,7 +497,8 @@ class WalletManager {
 		});
 	}
 
-	_probeElectrum({ host, port }) {
+	async _probeElectrum(electrum) {
+		const { host, port } = await desktopNetwork.resolveElectrum(electrum);
 		return this._probeTcp(host, port);
 	}
 
@@ -1086,8 +1092,10 @@ class WalletManager {
 	}) {
 		const net = this._validateNetwork(network);
 		const resolvedElectrum = this._resolveElectrum(electrum);
-		// Before a port is taken: a refused server leaves nothing behind.
-		await this._refuseWrongChain(resolvedElectrum, net, { allow: allowChainMismatch });
+		// A cold onion route can take two minutes. Desktop defers its chain
+		// check to background startup so creation can return the recovery phrase.
+		const deferredChainGuard = desktopNetwork.enabled() && desktopNetwork.isOnionHost(resolvedElectrum.host);
+		if (!deferredChainGuard) await this._refuseWrongChain(resolvedElectrum, net, { allow: allowChainMismatch });
 		// No asynchronous work follows this check before the registry is written.
 		// Concurrent imports therefore cannot both claim the same seed and chain.
 		if (imported) this._assertImportIdentityAvailable(net, mnemonic);
@@ -1147,6 +1155,7 @@ class WalletManager {
 			mode: 0o600
 		});
 
+		if (deferredChainGuard) rec.pendingChainGuard = { allow: allowChainMismatch === true };
 		this.registry.upsert(rec);
 		await this.startWallet(id);
 		// Lightning-first setup (trust, the direct-funding policy, the peer
@@ -1470,6 +1479,19 @@ class WalletManager {
 		const rt = this.runtimeState(id);
 		if (rt.proc || rt.spawning) return;
 		rt.spawning = true;
+		if (desktopNetwork.enabled()) {
+			rt.status = 'starting'; rt.healthy = false; rt.lastStartError = null;
+			if (!rec.running) { rec.running = true; this.registry.upsert(rec); }
+			// The HTTP response remains responsive while the app-owned Tor
+			// process builds its first circuit. The record reports any failure.
+			rt.startTask = this._startWalletLocked(id, rec, rt).catch(err => {
+				if (rt.stopping || this.shuttingDown) return;
+				rt.status = 'error'; rt.healthy = false;
+				rt.lastStartError = { message: err.message, at: nowIso() };
+				this._log(id, `start failed: ${err.message}`);
+			}).finally(() => { rt.spawning = false; rt.startTask = null; });
+			return;
+		}
 		try {
 			await this._startWalletLocked(id, rec, rt);
 		} finally {
@@ -1484,7 +1506,19 @@ class WalletManager {
 			rt.electrumWait = null;
 		}
 
-		const reachable = await this._probeElectrum(rec.electrum);
+		if (desktopNetwork.enabled() && desktopNetwork.requiresTor(rec)) {
+			await desktopNetwork.ensureTor();
+			if (rt.stopping || this.shuttingDown) return;
+		}
+		if (rec.pendingChainGuard) {
+			await this._refuseWrongChain(rec.electrum, rec.network, { allow: rec.pendingChainGuard.allow === true });
+			if (rt.stopping || this.shuttingDown) return;
+			delete rec.pendingChainGuard;
+			this.registry.upsert(rec);
+		}
+		const runtimeElectrum = await desktopNetwork.resolveElectrum(rec.electrum);
+		if (rt.stopping || this.shuttingDown) return;
+		const reachable = await this._probeElectrum(runtimeElectrum);
 		// A stop that arrived while the probe was out wins: stopWallet found
 		// no child to kill and wrote running=false, so spawning now would
 		// leave a daemon up that the record and the dashboard say is stopped.
@@ -1525,9 +1559,10 @@ class WalletManager {
 		const mnemonic = fs.readFileSync(p.mnemonicFile, 'utf8').trim();
 		const token = this.token(id);
 		this._clearStaleInstanceLock(rec, p);
-		const env = this._daemonEnv(rec, p, mnemonic, token);
+		// Persist the user's onion address, never the transient local bridge.
+		const env = this._daemonEnv({ ...rec, electrum: runtimeElectrum }, p, mnemonic, token);
 
-		const { cmd, args } = beignetSpawn();
+		const { cmd, args, encrypted } = beignetSpawn();
 		rt.status = 'starting';
 		rt.healthy = false;
 		this._log(
@@ -1535,7 +1570,9 @@ class WalletManager {
 			`starting on 127.0.0.1:${rec.port} (network ${rec.network}, electrum ${rec.electrum.host}:${rec.electrum.port} tls=${rec.electrum.tls}${rec.electrum.tlsVerify ? ' verified' : ''})`
 		);
 
-		const proc = spawn(cmd, args, { env, cwd: p.home });
+		const launchEnv = encrypted ? { ...env } : env;
+		if (encrypted) { delete launchEnv.BEIGNET_MNEMONIC; delete launchEnv.BEIGNET_API_TOKEN; }
+		const proc = spawn(cmd, args, { env: launchEnv, cwd: p.home, ...(encrypted ? { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] } : {}) });
 		rt.proc = proc;
 		rt.spawnedEnv = env;
 		rt.startedAt = Date.now();
@@ -1562,6 +1599,29 @@ class WalletManager {
 
 		proc.on('error', (err) => this._log(id, `spawn error: ${err.message}`));
 		proc.on('exit', (code, signal) => this._onChildExit(id, rt, proc, code, signal));
+		if (encrypted) {
+			let initializationFailed = false;
+			const failed = () => {
+				if (initializationFailed || rt.proc !== proc) return;
+				initializationFailed = true;
+				rt.status = 'error'; rt.healthy = false;
+				rt.lastStartError = { message: 'Encrypted wallet initialization could not be delivered.', at: nowIso() };
+				this._log(id, rt.lastStartError.message);
+				proc.kill('SIGTERM');
+			};
+			const timer = setTimeout(failed, 5000);
+			timer.unref();
+			proc.once('exit', () => clearTimeout(timer));
+			try {
+				proc.send({ type: 'initialize-storage', ...require('./vault-files').engineKeys(id), mnemonic, apiToken: token }, err => {
+					clearTimeout(timer);
+					if (err) failed();
+				});
+			} catch {
+				clearTimeout(timer); failed();
+			}
+			if (initializationFailed) return;
+		}
 
 		this._startEvents(id, rec, rt);
 
@@ -3655,7 +3715,9 @@ class WalletManager {
 			// Tor matters to every Lightning wallet (its .onion peers and its own
 			// onion; in Tor mode every peer): false means the last probe could not
 			// build a circuit, so those connections will time out.
-			torCircuitOk: rec.onchainOnly ? null : this.torCircuitOk,
+			torCircuitOk: rec.onchainOnly ? null : desktopNetwork.enabled()
+				? ({ ready: true, failed: false }[desktopNetwork.torStatus().phase] ?? null)
+				: this.torCircuitOk,
 			recovery: {
 				mode: (rec.recovery && rec.recovery.mode) || 'off',
 				guardians: (rec.recovery && rec.recovery.guardians) || [],

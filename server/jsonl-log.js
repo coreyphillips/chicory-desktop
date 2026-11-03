@@ -1,6 +1,6 @@
 'use strict';
 
-const fs = require('fs');
+const fs = require('./vault-files').fs;
 
 /**
  * An append-only JSON-lines file for per-wallet history that has to outlive

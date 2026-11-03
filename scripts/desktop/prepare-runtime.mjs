@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { patchEngine } from '../apply-engine-patches.mjs';
+import { patchStorageEncryption, verifyDriver } from '../apply-storage-encryption.mjs';
+import { prepareTor } from './prepare-tor.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtime = path.join(root, '.runtime');
@@ -78,22 +80,19 @@ for (const key of Object.keys(env)) {
   if (/^npm_config_(target|runtime|disturl|arch|target_arch)$/i.test(key)) delete env[key];
 }
 delete env.ELECTRON_RUN_AS_NODE;
-execFileSync(node, [npm, 'ci', '--include=optional', '--omit=dev', '--no-audit', '--no-fund'], {
+// Native dependencies are built explicitly below from pinned source and headers.
+// Do not run npm install hooks that could download an unreviewed native prebuild.
+execFileSync(node, [npm, 'ci', '--ignore-scripts', '--include=optional', '--omit=dev', '--no-audit', '--no-fund'], {
   cwd: engine, env, stdio: 'inherit',
 });
-patchEngine(path.join(engine, 'node_modules/beignet'));
-// Optional dependencies must not silently omit the wallet's durable storage.
-execFileSync(node, ['-e', `
-  const Database = require('better-sqlite3');
-  const database = new Database(':memory:');
-  const result = database.prepare('select 1 as value').get();
-  database.close();
-  if (result.value !== 1) throw new Error('SQLite runtime verification failed.');
-  console.log('Standalone Node and native SQLite verified.');
-`], { cwd: engine, env, stdio: 'inherit' });
+const enginePackage = path.join(engine, 'node_modules/beignet');
+patchEngine(enginePackage);
+const storage = await patchStorageEncryption(enginePackage, { node });
+verifyDriver(node, enginePackage);
+await prepareTor(root);
 await fs.writeFile(path.join(runtime, 'manifest.json'), JSON.stringify({
-  node: version, engine: '0.36.1', platform: process.platform, arch: process.arch,
+  node: version, engine: '0.36.1', encryptedStorage: storage.driver, platform: process.platform, arch: process.arch,
   nodeArchive: archiveName, nodeArchiveSha256: selected[1],
   engineLockSha256: createHash('sha256').update(await fs.readFile(path.join(engine, 'package-lock.json'))).digest('hex'),
 }, null, 2) + '\n');
-console.log(`Desktop runtime ready: Node ${version}, Beignet 0.36.1, ${target}.`);
+console.log(`Desktop runtime ready: Node ${version}, Beignet 0.36.1, encrypted SQLite ${storage.driver}, bundled Tor, ${target}.`);
