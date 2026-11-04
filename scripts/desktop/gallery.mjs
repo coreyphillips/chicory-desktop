@@ -63,6 +63,7 @@ const failures = [];
 const pageErrors = [];
 const consoleErrors = [];
 const checks = [];
+const breachLog = [];
 
 async function resize({ width, height }) {
   await electron.evaluate(({ BrowserWindow }, size) => {
@@ -73,17 +74,52 @@ async function resize({ width, height }) {
 async function configure(config) {
   await resize(config.size);
   await page.emulateMedia({ reducedMotion: config.motion });
+  // Reanimated reads Reduce Motion once, as it loads, so each configuration
+  // starts from a fresh load. The breach log does not survive one.
+  breachLog.push(...await page.evaluate(() => window.chicoryGallery.breaches()));
+  await page.reload();
+  await page.waitForFunction(() => !!window.chicoryGallery, null, { timeout: 20000 });
+  assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), config.motion === 'reduce');
   await electron.evaluate(({ BrowserWindow }, zoom) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(zoom), config.zoom);
   await page.waitForTimeout(150);
 }
 
+/** Exit clones seen while the last state was drawn. */
+let exitClones = 0;
+
 /** Draws state `index` from nothing and waits until its steps are done. */
 async function reach(index) {
-  await page.evaluate(at => window.chicoryGallery.go(at), index);
+  // Exit clones are gone once a state settles, so focusable controls in
+  // hidden panes are looked for on every frame while it is drawn.
+  await page.evaluate(at => {
+    const watch = { clones: 0, problems: new Set() };
+    window.chicoryExits = watch;
+    const frame = () => {
+      if (window.chicoryExits !== watch) return;
+      watch.clones += document.querySelectorAll('[data-chicory-motion-exit]').length;
+      for (const el of document.querySelectorAll('a[href], button, input, textarea, select, [tabindex]')) {
+        if (el.disabled || el.tabIndex < 0 || !el.closest('[aria-hidden="true"]') || el.closest('[inert]')) continue;
+        if (!el.getClientRects().length || getComputedStyle(el).visibility === 'hidden') continue;
+        watch.problems.add(`focusable control in a hidden pane ${el.tagName.toLowerCase()}[${el.getAttribute('aria-label') || ''}]`);
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    window.chicoryGallery.go(at);
+  }, index);
   await page.waitForFunction(at => window.chicoryGallery.index === at && window.chicoryGallery.status === 'reached', index, { timeout: REACH_MS });
   // Let the last step's motion land; reduced motion lands at once.
   await page.waitForTimeout(700);
-  return page.evaluate(() => window.chicoryGallery.reports.filter(line => /^GALLERY (MISS|ERROR)/.test(line)));
+  const { lines, clones } = await page.evaluate(() => {
+    const watch = window.chicoryExits;
+    window.chicoryExits = null;
+    return {
+      lines: [...window.chicoryGallery.reports.filter(line => /^GALLERY (MISS|ERROR)/.test(line)), ...watch.problems],
+      clones: watch.clones,
+    };
+  });
+  exitClones = clones;
+  return lines;
 }
 
 /**
@@ -118,10 +154,11 @@ function audit() {
     if (el.closest('svg') || !live(el)) continue;
     const own = ownDigits(el);
     const text = el.textContent || '';
-    // An odometer names its amount on a wrapper and draws each digit in its
-    // own cell, so it is measured by the span of those cells.
+    // An odometer names its amount on a wrapper, and a keyed amount marks its
+    // entry. Both draw each digit in its own cell, so they are measured by the
+    // span of those cells.
     const label = el.getAttribute('aria-label') || '';
-    const digits = !own && /\d/.test(label) && figure.test(label)
+    const digits = el.matches('[data-amount-entry]') || (!own && /\d/.test(label) && figure.test(label))
       ? [...el.querySelectorAll('*')].filter(d => shown(d) && ownDigits(d)).map(d => d.getBoundingClientRect())
       : [];
     if (!digits.length && (!own || !figure.test(text) || text.length > 80)) continue;
@@ -297,7 +334,8 @@ async function interactions(names) {
   // Focus moves into the newly opened scene and never stays on an exiting pane.
   const focusTarget = names.indexOf('send, sent');
   if (focusTarget >= 0) {
-    await reach(focusTarget);
+    assert.deepEqual(await reach(focusTarget), []);
+    assert.ok(exitClones > 0, 'Send\'s exiting panes were checked for focusable controls while they left');
     const where = await page.evaluate(() => {
       const el = document.activeElement;
       return { body: !el || el === document.body, hidden: !!el?.closest('[inert], [aria-hidden="true"]') };
@@ -397,7 +435,7 @@ try {
   if (!only) await interactions(names);
 
   // The breaches the seal check above provoked on purpose are the only ones.
-  const breaches = (await page.evaluate(() => window.chicoryGallery.breaches())).slice(4);
+  const breaches = [...breachLog, ...await page.evaluate(() => window.chicoryGallery.breaches())].slice(4);
   const refused = await electron.evaluate(() => global.galleryRefused);
   assert.deepEqual(breaches, [], 'No state reached the network, clipboard or camera');
   assert.deepEqual(refused.filter(url => !url.startsWith('chicory-app://wallet/api/config')), [], 'No request left the gallery');
