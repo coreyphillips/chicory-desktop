@@ -8,7 +8,7 @@ import { dropOut, riseIn } from '../motion/presets';
 import { HoldConfirm } from '../scenes/settings/HoldConfirm';
 import { RecoveryWords } from '../scenes/settings/RecoveryWords';
 import { Action, Body, Note, Section } from '../scenes/settings/ui';
-import { requireUnlock } from '../services/lock';
+import { onConceal, requireUnlock } from '../services/lock';
 import { duringSystemPrompt } from '../stage/systemPrompt';
 import { space } from '../theme';
 
@@ -82,6 +82,16 @@ export function RecoveryPhraseBody({
     });
     return () => subscription.remove();
   }, []);
+  // A desktop window can lose the foreground, or the screen can lock, while
+  // it stays visible to the page. The main process says so here.
+  useEffect(
+    () =>
+      onConceal(() => {
+        setPhrase('');
+        setLetGo(null);
+      }),
+    [],
+  );
   async function reveal() {
     setBusy(true);
     setError('');

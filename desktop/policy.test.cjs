@@ -109,7 +109,7 @@ test('initial and restored windows fit small display work areas', () => {
   assert.deepEqual(windowBounds(null, laptop), { width: 1280, height: 696 });
 });
 
-test('preload exposes only window commands and strips IPC events from subscriptions', () => {
+test('preload exposes only window commands, the lock bridge, and strips IPC events from subscriptions', () => {
   const emitter = new EventEmitter();
   const sent = [];
   let api;
@@ -127,7 +127,7 @@ test('preload exposes only window commands and strips IPC events from subscripti
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
@@ -142,4 +142,22 @@ test('preload exposes only window commands and strips IPC events from subscripti
   emitter.emit('desktop:command', privilegedEvent, 'send');
   assert.equal(received.length, 2);
   assert.equal(emitter.listenerCount('desktop:command'), 0);
+
+  // The lock bridge can only ask the main process to prompt.
+  const invoked = [];
+  ipc.invoke = async (...args) => { invoked.push(args); return { ok: false }; };
+  assert.deepEqual(Object.keys(api.lock).sort(), ['authorize', 'onEvent', 'setEnabled', 'state', 'unlock']);
+  assert.equal(Object.isFrozen(api.lock), true);
+  api.lock.state(); api.lock.unlock({ ok: true }); api.lock.authorize('anything');
+  api.lock.setEnabled('false'); api.lock.setEnabled({ enabled: true }); api.lock.setEnabled(true);
+  assert.deepEqual(invoked, [['lock:state'], ['lock:unlock'], ['lock:authorize'],
+    ['lock:set-enabled', false], ['lock:set-enabled', false], ['lock:set-enabled', true]]);
+  const lockEvents = [];
+  const stop = api.lock.onEvent((...args) => lockEvents.push(args));
+  emitter.emit('desktop:lock', privilegedEvent, 'locked', 'suspend');
+  emitter.emit('desktop:lock', privilegedEvent, 'unlock-now', true);
+  emitter.emit('desktop:lock', privilegedEvent, 'conceal', privilegedEvent);
+  assert.deepEqual(lockEvents, [['locked', 'suspend'], ['conceal', undefined]]);
+  stop();
+  assert.equal(emitter.listenerCount('desktop:lock'), 0);
 });
