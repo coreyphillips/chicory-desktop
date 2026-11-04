@@ -36,6 +36,21 @@ async function nativeMenu(label) {
   await page.waitForTimeout(1000);
 }
 
+/** Drags across the open form and triple-clicks inside it; nothing outside a field may end up selected. */
+async function assertNothingSelects() {
+  const form = await page.getByTestId('slot-top').boundingBox();
+  assert.ok(form, 'The open form has a box');
+  // Down the middle, across the figures and keys, which is where a stray
+  // drag used to paint the selection.
+  await page.mouse.move(form.x + form.width / 2, form.y + form.height * 0.05);
+  await page.mouse.down();
+  await page.mouse.move(form.x + form.width / 2, form.y + form.height * 0.95, { steps: 20 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => getSelection().toString()), '', 'A drag selects nothing');
+  await page.mouse.click(form.x + 12, form.y + 12, { clickCount: 3 });
+  assert.equal(await page.evaluate(() => getSelection().toString()), '', 'A triple click selects nothing');
+}
+
 async function screenshot(name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), animations: 'allow' });
 }
@@ -107,8 +122,14 @@ try {
   checks.push('Overview balance, Send, Receive and Scan answer a click');
 
   await nativeMenu('Send');
+  await assertNothingSelects();
   const address = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);
-  await page.getByRole('textbox', { name: 'Payment request or address', exact: true }).fill(address);
+  const request = page.getByRole('textbox', { name: 'Payment request or address', exact: true });
+  await request.fill(address);
+  await request.click({ clickCount: 3 });
+  assert.deepEqual(await request.evaluate(field => [field.selectionStart, field.selectionEnd]), [0, address.length],
+    'A field still selects its text');
+  checks.push('A drag or triple click selects nothing on Send, and its field still selects');
   const amount = page.locator('[data-amount-entry]').first();
   await amount.focus();
   await page.keyboard.type('1251');
@@ -130,6 +151,8 @@ try {
   checks.push('Physical amount entry and backspace, payment review, short hold cancels');
 
   await nativeMenu('Receive');
+  await assertNothingSelects();
+  checks.push('A drag or triple click selects nothing on Receive');
   const receiveAmount = page.locator('[data-amount-entry]').first();
   await receiveAmount.focus();
   await page.keyboard.type('2500');
