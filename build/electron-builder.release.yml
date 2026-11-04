@@ -1,0 +1,18 @@
+# Signed release builds. Only .github/workflows/release.yml uses this file.
+# Credentials come from the release environment's scoped secrets:
+#   macOS: CSC_LINK, CSC_KEY_PASSWORD (Developer ID Application certificate),
+#          APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER (notarization).
+#   Windows: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET for Azure
+#          Trusted Signing. The account and profile names are passed on the
+#          command line from repository variables.
+extends: build/electron-builder.yml
+artifactName: Chicory-${version}-${os}-${arch}.${ext}
+extraMetadata:
+  chicoryChannel: stable
+forceCodeSigning: true
+mac:
+  # Matches the Developer ID Application certificate imported from CSC_LINK.
+  # electron-builder rejects the name with its trailing colon, and the
+  # development config's '-' would otherwise be inherited as an ad hoc identity.
+  identity: Developer ID Application
+  notarize: true

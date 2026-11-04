@@ -87,7 +87,10 @@ and [macOS Intel](https://github.com/coreyphillips/chicory-desktop/actions/runs/
 These artifacts use identical production source; intervening fixes affect test
 fixtures only. Native interaction and installation qualification on Windows,
 Linux and Intel macOS remain separate release work. macOS local builds use ad hoc signing without Developer ID or
-notarization. No public binary release or automatic updater is configured.
+notarization. No signed binary release has been published. The release
+workflow, signed update manifest and manual update path are described in
+[releases.md](releases.md). They stay unused until the owner's signing
+identities are configured and a release passes its qualification list.
 
 New funded Lightning/on-chain payments, full disaster recovery, physical camera
 hardware, OS protocol installation and Windows/Linux permissions remain release

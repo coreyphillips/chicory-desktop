@@ -1,7 +1,11 @@
 appId: com.chicory.desktop
 productName: Chicory
 copyright: Copyright (c) 2026 Corey Phillips
-artifactName: Chicory-${version}-${os}-${arch}.${ext}
+# Development and CI test builds. Signed releases use electron-builder.release.yml,
+# which drops the development label only after Developer ID or Windows signing.
+artifactName: Chicory-${version}-development-${os}-${arch}.${ext}
+extraMetadata:
+  chicoryChannel: development
 asar: true
 npmRebuild: false
 beforePack: build/verify-runtime.cjs
@@ -12,6 +16,7 @@ directories:
 files:
   - desktop/**/*
   - build/icon.png
+  - build/update-keys.json
   - package.json
   - LICENSE
   - '!**/*.test.*'

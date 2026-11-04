@@ -12,6 +12,6 @@ coverage/
 playwright-report/
 test-results/
 store/generated/
-release/
+/release/
 artifacts/
 *.tsbuildinfo
