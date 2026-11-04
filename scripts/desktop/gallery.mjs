@@ -192,7 +192,12 @@ function audit() {
 async function capture(config, index, name) {
   const directory = path.join(output, configName(config));
   await fs.mkdir(directory, { recursive: true });
-  await page.screenshot({ path: path.join(directory, `${String(index).padStart(3, '0')}-${slug(name)}.png`), animations: 'allow' });
+  // page.screenshot crops a zoomed window to its CSS viewport, so the whole
+  // window is captured from the main process.
+  const png = await electron.evaluate(async ({ BrowserWindow }) =>
+    (await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64'));
+  assert.ok(png, 'Window capture is empty');
+  await fs.writeFile(path.join(directory, `${String(index).padStart(3, '0')}-${slug(name)}.png`), Buffer.from(png, 'base64'));
 }
 
 async function sweep(config, indices, names) {
@@ -211,7 +216,7 @@ async function sweep(config, indices, names) {
     } catch (error) {
       problems = [`not reached: ${String(error.message || error).split('\n')[0]}`];
     }
-    await capture(config, index, name).catch(() => {});
+    await capture(config, index, name).catch(error => problems.push(`not captured: ${String(error.message || error).split('\n')[0]}`));
     if (REAL_HOLD.has(name)) await page.mouse.up().catch(() => {});
     const where = configName(config);
     for (const entry of KNOWN.filter(item => item.name === name && item.config.test(where))) {
