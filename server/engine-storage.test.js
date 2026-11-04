@@ -23,9 +23,14 @@ const wrongKey = crypto.randomBytes(32).toString('hex');
 const secret = 'private-wallet-channel-and-seed-metadata-563b8d0a';
 const header = Buffer.from('SQLite format 3\0');
 
-function folder(t) {
+function folder(t, handles = new Set()) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chicory-engine-storage-test-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    // Windows refuses to remove an open database. Keep handle and directory
+    // disposal in one hook so assertion failures cannot reverse their order.
+    for (const database of handles) if (database.open) database.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   return root;
 }
 function plain(file) { return new (require(driverRoot))(file, { nativeBinding }); }
@@ -52,9 +57,10 @@ test('classifies engine databases, restore staging, guardian files and sidecars 
 });
 
 test('all database pages and live WAL hide wallet metadata, and commits survive reopen', { skip: !available }, (t) => {
-  const file = path.join(folder(t), 'wallet.db');
+  const handles = new Set();
+  const file = path.join(folder(t, handles), 'wallet.db');
   const db = openEncryptedDatabase(file, key, options);
-  t.after(() => { if (db.open) db.close(); });
+  handles.add(db);
   db.pragma('journal_mode=WAL');
   db.pragma('synchronous=FULL');
   db.pragma('wal_autocheckpoint=0');
@@ -66,16 +72,19 @@ test('all database pages and live WAL hide wallet metadata, and commits survive 
   encryptedOnDisk(file);
   assert.equal(verifyDatabase(file, key, options), true);
   const reopened = openEncryptedDatabase(file, key, options);
+  handles.add(reopened);
   assert.equal(reopened.prepare('SELECT metadata FROM channels').get().metadata, secret);
   reopened.close();
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
 test('missing keys never create a file and wrong keys never reset stored data', { skip: !available }, (t) => {
-  const file = path.join(folder(t), 'wallet.db');
+  const handles = new Set();
+  const file = path.join(folder(t, handles), 'wallet.db');
   failsSafely(() => openEncryptedDatabase(file, undefined, options), 'WALLET_STORAGE_KEY_REQUIRED');
   assert.equal(fs.existsSync(file), false);
   const db = openEncryptedDatabase(file, key, options);
+  handles.add(db);
   db.exec('CREATE TABLE secret(value TEXT)');
   db.prepare('INSERT INTO secret VALUES (?)').run(secret);
   db.close();
@@ -87,8 +96,10 @@ test('missing keys never create a file and wrong keys never reset stored data', 
 });
 
 test('existing plaintext is refused without changing its contents', { skip: !available }, (t) => {
-  const file = path.join(folder(t), 'plaintext.db');
+  const handles = new Set();
+  const file = path.join(folder(t, handles), 'plaintext.db');
   const db = plain(file);
+  handles.add(db);
   db.exec('CREATE TABLE metadata(value TEXT)');
   db.prepare('INSERT INTO metadata VALUES (?)').run(secret);
   db.close();
@@ -100,9 +111,10 @@ test('existing plaintext is refused without changing its contents', { skip: !ava
 });
 
 test('backups stay encrypted while the source is live, reopen correctly and reject unsafe destinations', { skip: !available }, async (t) => {
-  const root = folder(t), file = path.join(root, 'wallet.db'), backup = path.join(root, 'backup.sqlite');
+  const handles = new Set();
+  const root = folder(t, handles), file = path.join(root, 'wallet.db'), backup = path.join(root, 'backup.sqlite');
   const db = openEncryptedDatabase(file, key, options);
-  t.after(() => { if (db.open) db.close(); });
+  handles.add(db);
   db.pragma('journal_mode=WAL');
   db.exec('CREATE TABLE channels(value TEXT)');
   db.prepare('INSERT INTO channels VALUES (?)').run(secret);
@@ -110,6 +122,7 @@ test('backups stay encrypted while the source is live, reopen correctly and reje
   assert.equal(result.remainingPages, 0);
   encryptedOnDisk(backup);
   const copied = openEncryptedDatabase(backup, key, options);
+  handles.add(copied);
   assert.equal(copied.prepare('SELECT value FROM channels').get().value, secret);
   copied.close();
   failsSafely(() => verifyDatabase(backup, wrongKey, options), 'WALLET_STORAGE_LOCKED');
@@ -124,8 +137,10 @@ test('backups stay encrypted while the source is live, reopen correctly and reje
 });
 
 test('tampering with an encrypted page fails closed', { skip: !available }, (t) => {
-  const file = path.join(folder(t), 'wallet.db');
+  const handles = new Set();
+  const file = path.join(folder(t, handles), 'wallet.db');
   const db = openEncryptedDatabase(file, key, options);
+  handles.add(db);
   db.exec('CREATE TABLE metadata(value TEXT)');
   db.prepare('INSERT INTO metadata VALUES (?)').run(secret);
   db.close();
@@ -138,7 +153,8 @@ test('tampering with an encrypted page fails closed', { skip: !available }, (t) 
 
 
 test('encrypted commits survive abrupt process exit with an uncheckpointed WAL', { skip: !available }, (t) => {
-  const file = path.join(folder(t), 'wallet.db');
+  const handles = new Set();
+  const file = path.join(folder(t, handles), 'wallet.db');
   execFileSync(process.execPath, ['-e', `
     const fs = require('node:fs');
     const { openEncryptedDatabase } = require(process.argv[1]);
@@ -152,6 +168,7 @@ test('encrypted commits survive abrupt process exit with an uncheckpointed WAL',
   assert.ok(fs.statSync(file + '-wal').size > 0);
   for (const candidate of fs.readdirSync(path.dirname(file))) encryptedOnDisk(path.join(path.dirname(file), candidate));
   const db = openEncryptedDatabase(file, key, options);
+  handles.add(db);
   assert.equal(db.prepare('SELECT value FROM metadata').get().value, secret);
   db.close();
   assert.equal(verifyDatabase(file, key, options), true);
