@@ -313,7 +313,12 @@ export function Canvas({
   const layout = useMemo(
     () => {
       const at = canvasLayout({ scene, stack, overlay });
-      return desktop && scene.name === 'activity' ? { ...at, seam: 'home' as const, hero: 1, bar: 1 } : at;
+      // On desktop, Activity and a payment's detail sit beside Overview, not
+      // on a sheet, so the panes keep Overview's pose. The phone's compact
+      // stop would shrink the balance to its strip at the top edge, above the
+      // detail card and into the heading.
+      return desktop && (scene.name === 'activity' || scene.name === 'detail')
+        ? { ...at, seam: 'home' as const, hero: 1, bar: 1 } : at;
     },
     [scene, stack, overlay, desktop],
   );

@@ -182,6 +182,23 @@ try {
   await nativeMenu('Activity');
   checks.push('Native Send, Receive, Settings, Activity and Overview menus');
 
+  // A payment's detail opens over Overview as it stands. The phone's compact
+  // stop used to shrink the balance to a strip cut off at the top edge.
+  await nativeMenu('Overview');
+  const balance = page.getByTestId('home-hero');
+  await page.waitForTimeout(700);
+  const resting = await balance.boundingBox();
+  await page.getByText('Friday funds', { exact: true }).first().click();
+  await expect(page.getByText('Payment details', { exact: true })).toBeVisible();
+  const placed = async () => {
+    const box = await balance.boundingBox();
+    return box && Math.abs(box.y - resting.y) < 1 && Math.abs(box.height - resting.height) < 1;
+  };
+  await page.waitForTimeout(900);
+  assert.equal(await placed(), true, 'The balance keeps its Overview place and size under a payment detail');
+  await screenshot('desktop-payment-detail');
+  checks.push("A payment detail leaves Overview's balance in place");
+
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);
   await nativeMenu('Overview');
