@@ -33,8 +33,10 @@ function redactText(value, { paths = [], limit = MESSAGE_LIMIT } = {}) {
   text = text
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
     .replace(/\b(bearer|basic)\s+[\w.~+/=-]+/gi, '$1 [redacted]')
-    .replace(/\b([\w-]*(?:key|token|secret|password|passphrase|mnemonic|seed|cookie|auth)[\w-]*"?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)/gi, '$1[redacted]')
+    // Before the assignment rule, which would take a phrase's first word and
+    // leave the rest too short to match.
     .replace(/\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b/g, '[redacted words]')
+    .replace(/\b([\w-]*(?:key|token|secret|password|passphrase|mnemonic|seed|cookie|auth)[\w-]*"?\s*[=:]\s*)(?!\[redacted)("[^"]*"|'[^']*'|[^\s,;&]+)/gi, '$1[redacted]')
     .replace(/\bln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]{20,}/gi, '[redacted invoice]')
     .replace(/\blnurl[0-9a-z]{20,}/gi, '[redacted lnurl]')
     .replace(/\b(?:bcrt|bc|tb)1[0-9a-z]{20,}/gi, '[redacted address]')
@@ -168,7 +170,7 @@ class DesktopDiagnostics {
   /** `manager` is how the manager stopped: exited, timeout or not-running. */
   shutdownEnded({ manager, tor }) {
     const at = this.clock();
-    const outcome = manager === 'timeout' ? 'timeout' : tor === 'failed' ? 'incomplete' : 'clean';
+    const outcome = manager === 'timeout' ? 'timeout' : manager === 'failed' || tor === 'failed' ? 'incomplete' : 'clean';
     this.shutdowns.push({ at: iso(at), outcome, manager, tor, durationMs: this.shutdownAt === null ? null : at - this.shutdownAt });
     if (this.shutdowns.length > OUTCOME_LIMIT) this.shutdowns.shift();
     this.state('app', 'stopped');
@@ -271,7 +273,8 @@ class DesktopDiagnostics {
       },
       events: this.events,
       managerOutput: this.output,
-      ...(Array.isArray(events) ? { appEvents: redactValue(events.slice(-80), this.options) } : {}),
+      // redactValue keeps an array's first 50 items, so the newest are picked here.
+      ...(Array.isArray(events) ? { appEvents: redactValue(events.slice(-50), this.options) } : {}),
       ...(walletError ? { walletError: redactText(walletError, this.options) } : {}),
       ...(wallet ? { wallet: redactValue(wallet, this.options) } : {}),
       ...(this.previous ? { previousSession: { ...this.previous, state: 'stale' } } : {}),
@@ -298,7 +301,7 @@ function stopChild(child, { timeoutMs = 45000, message = { type: 'shutdown' } } 
   return new Promise(resolve => {
     let outcome = 'exited';
     const deadline = setTimeout(() => { outcome = 'timeout'; child.kill('SIGKILL'); }, timeoutMs);
-    child.once('exit', () => { clearTimeout(deadline); resolve(outcome); });
+    child.once('exit', code => { clearTimeout(deadline); resolve(outcome === 'exited' && code ? 'failed' : outcome); });
     if (child.connected) child.send(message, () => {});
     else child.kill('SIGTERM');
   });

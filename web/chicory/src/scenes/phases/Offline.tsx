@@ -29,6 +29,8 @@ import { curves, durations, springs } from '../../motion/tokens';
 import { NetworkSettings } from '../../screens/NetworkSettings';
 import { motionReduced } from '../../services/motion';
 import type { NetworkProfile } from '../../services/networks';
+import type { WalletAdapter } from '../../services/wallet';
+import { DiagnosticsPanel } from '../settings/Diagnostics';
 import { usePhaseBack } from '../../stage/StageContext';
 import { space } from '../../theme';
 import {
@@ -51,7 +53,8 @@ import { bloomTone, DORMANT_OPEN, SIZES, UNPLUG_DRIFT } from './visual';
  * honey pip when that setup has failed before.
  *
  * The cog opens a setup panel in the Settings language, holding the network
- * editor and the recovery phrase, and under it the lock, the glyph that
+ * editor, the recovery phrase and diagnostics, which Settings cannot show
+ * before the wallet's first read, and under it the lock, the glyph that
  * leaves this wallet. All stay reachable, because this is exactly the screen
  * where someone needs them.
  */
@@ -68,6 +71,7 @@ export function OfflineWallet({
   onApplyNetwork,
   onDisconnect,
   loadPhrase,
+  client,
 }: {
   name?: string;
   network: Network;
@@ -81,9 +85,11 @@ export function OfflineWallet({
   onApplyNetwork: (profile: NetworkProfile) => Promise<void>;
   onDisconnect: () => void;
   loadPhrase: () => Promise<string>;
+  client: WalletAdapter;
 }) {
   // An editor left open elsewhere opens the panel it lives in.
   const [panel, setPanel] = useState(networkEditor);
+  const [diagnostics, setDiagnostics] = useState(false);
   // Closing the panel closes the editor inside it, so back never has an
   // unseen editor to close first.
   const togglePanel = () => {
@@ -186,6 +192,15 @@ export function OfflineWallet({
             />
           ) : null}
           <RecoveryPhrase loadPhrase={loadPhrase} />
+          <LinkButton
+            label={
+              diagnostics
+                ? copy.phase.hideDiagnostics
+                : copy.phase.showDiagnostics
+            }
+            onPress={() => setDiagnostics(!diagnostics)}
+          />
+          {diagnostics ? <DiagnosticsPanel client={client} /> : null}
         </SetupPanel>
       ) : null}
       {/* Leaving the wallet is not setup, so it keeps to a glyph, outside

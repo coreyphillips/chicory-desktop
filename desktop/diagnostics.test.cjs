@@ -48,6 +48,7 @@ test('redacts secrets, identifiers and private paths from text', () => {
     assert.equal(text.includes(secret), false, secret);
   assert.match(text, /\[redacted words\]/);
   assert.equal(redactText(PHRASE.replaceAll(' ', '\n')), '[redacted words]');
+  assert.equal(redactText(`mnemonic: ${PHRASE}`), 'mnemonic: [redacted words]');
   assert.match(text, /<home>/);
   assert.equal(redactText('x'.repeat(5000)).length <= 300, true);
 });
@@ -213,6 +214,12 @@ test('records a shutdown that needed the kill deadline as a timeout', async t =>
   clean.kill = () => assert.fail('a clean stop must not be killed');
   assert.equal(await stopChild(clean), 'exited');
   assert.equal(await stopChild(undefined), 'not-running');
+
+  const failing = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, connected: true });
+  failing.send = () => queueMicrotask(() => failing.emit('exit', 1, null));
+  assert.equal(await stopChild(failing), 'failed');
+  diagnostics.shutdownEnded({ manager: 'failed', tor: 'stopped' });
+  assert.equal(diagnostics.report().shutdowns.at(-1).outcome, 'incomplete');
 });
 
 test('keeps events, outcomes and output bounded', t => {
@@ -228,6 +235,8 @@ test('keeps events, outcomes and output bounded', t => {
   assert.equal(report.startups.length, OUTCOME_LIMIT);
   assert.equal(report.shutdowns.length, OUTCOME_LIMIT);
   assert.equal(report.managerOutput.length, OUTPUT_LIMIT);
+  const appEvents = Array.from({ length: 80 }, (_, index) => ({ message: `app ${index}` }));
+  assert.equal(diagnostics.report({ events: appEvents }).appEvents.at(-1).message, 'app 79');
   assert.ok(fs.statSync(file).size < 64 * 1024);
   const huge = { wallet: { utxos: Array.from({ length: 5000 }, (_, height) => ({ height, valueSats: 1 })) } };
   assert.ok(diagnostics.text(huge).length < 128 * 1024);

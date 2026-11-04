@@ -149,16 +149,25 @@ export function DiagnosticsPanel({ client }: { client: WalletAdapter }) {
     let failure = '';
     try {
       next = await client.diagnostics();
-      if (alive.current) setReport(next);
     } catch (e) {
       failure = e instanceof Error ? e.message : words.unreadable;
       if (alive.current) setError(failure);
     }
-    const hosted = await hostReport({
-      wallet: next,
-      ...(failure ? { walletError: failure } : {}),
-      events: recentDiagnostics(),
-    });
+    // On desktop only the host's redacted text is shown or copied, so the
+    // wallet's own report is kept only once there is no host to ask.
+    let hosted: string | null = null;
+    try {
+      hosted = await hostReport({
+        wallet: next,
+        ...(failure ? { walletError: failure } : {}),
+        events: recentDiagnostics(),
+      });
+      if (hosted === null && next && alive.current) setReport(next);
+    } catch (e) {
+      if (alive.current) {
+        setError(failure || (e instanceof Error ? e.message : words.unreadable));
+      }
+    }
     if (alive.current) {
       setHost(hosted);
       setBusy(false);
