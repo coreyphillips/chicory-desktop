@@ -21,6 +21,8 @@ files:
   - LICENSE
   - '!**/*.test.*'
   - '!node_modules/**/*'
+  # The Windows Hello helper's source. Windows builds ship only its binary.
+  - '!desktop/windows-hello/**/*'
 extraResources:
   - from: dist
     to: dist
@@ -94,6 +96,12 @@ dmg:
 win:
   icon: build/icon.png
   target: [nsis]
+  # The app lock's Windows Hello prompt, built by npm run runtime:prepare.
+  # electron-builder signs it with the rest of the resources' executables.
+  extraResources:
+    - from: .runtime/windows-hello
+      to: runtime/windows-hello
+      filter: [chicory-hello.exe]
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

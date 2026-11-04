@@ -71,6 +71,26 @@ unreachable confirmations, invisible glyphs and focusable hidden panes. CI runs
 a deterministic subset. Release checks run `npm run test:gallery:full`. See
 [gallery.md](gallery.md).
 
+## App lock on Windows
+
+The app lock raises Windows Hello through a small native helper,
+`desktop/windows-hello/hello.cpp`, which `npm run runtime:prepare` builds and
+Windows packages ship as `resources/runtime/windows-hello/chicory-hello.exe`.
+It calls `IUserConsentVerifierInterop::RequestVerificationForWindowAsync` with
+the main window's handle, so the prompt is owned by the Chicory window instead
+of opening without an owner. It checks availability before any prompt, refuses
+anything but a top-level window handle and the main process's fixed text,
+cancels its prompt if the window closes or after 110 seconds, and brings only a
+credential dialog owned by that window to the front. A system without the
+interop interface offers no app lock. Release builds sign the helper and check
+its Authenticode signature with the installer's.
+
+CI builds it on Windows Server 2025 and runs it there: the argument refusals,
+and the unavailable answer for a real window on a runner without Windows
+Hello. The owned prompt with PIN, face and fingerprint, cancel, and its
+placement on the same monitor have not yet been checked on real Windows 11
+hardware. That remains tracked in #16 and #17.
+
 ## Windows portability
 
 The first Windows CI pass caught an inherited directory-fsync assumption. The

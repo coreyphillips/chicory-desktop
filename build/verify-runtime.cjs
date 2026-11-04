@@ -29,6 +29,22 @@ function verifyTor(directory, platform, arch) {
   if (!version.startsWith(`Tor version ${expected.torVersion} `)) throw new Error('The bundled Tor executable has the wrong version.');
 }
 
+// The app lock's Windows Hello helper must be built from the current source
+// for this architecture. Its build record is written by runtime:prepare.
+function verifyWindowsHello(root, arch) {
+  const directory = path.join(root, '.runtime/windows-hello');
+  const hash = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  let build;
+  let binary;
+  try {
+    build = JSON.parse(fs.readFileSync(path.join(directory, 'build.json'), 'utf8'));
+    binary = hash(path.join(directory, 'chicory-hello.exe'));
+  } catch { throw new Error('The Windows Hello helper is missing. Run npm run runtime:prepare.'); }
+  if (build.source !== hash(path.join(root, 'desktop/windows-hello/hello.cpp')) || build.arch !== arch || build.sha256 !== binary) {
+    throw new Error('The Windows Hello helper is stale. Run npm run runtime:prepare.');
+  }
+}
+
 module.exports = async function verifyRuntime(context) {
   const root = context.packager.projectDir;
   const runtime = path.join(root, '.runtime');
@@ -52,5 +68,6 @@ module.exports = async function verifyRuntime(context) {
   const { verifyDriver } = await import(pathToFileURL(path.join(root, 'scripts/apply-storage-encryption.mjs')).href);
   verifyDriver(node, engine);
   verifyTor(path.join(runtime, 'tor'), manifest.platform, manifest.arch);
+  if (manifest.platform === 'win32') verifyWindowsHello(root, manifest.arch);
 };
 module.exports.verifyTor = verifyTor;
