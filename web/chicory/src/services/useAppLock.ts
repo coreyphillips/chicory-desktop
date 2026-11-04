@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
-import { authenticate, isLockEnabled, onLockChanged } from './lock';
+import { authenticate, isLockEnabled, onLockChanged, onRelock } from './lock';
 
 /**
  * The app-open gate for the optional biometric / passcode lock.
@@ -49,6 +49,16 @@ export function useAppLock() {
         setError('Chicory stays locked until this is confirmed.');
       }
       return allowed;
+    } catch (e) {
+      // The system could not authenticate at all. Say why and stay locked.
+      if (mounted.current) {
+        setError(
+          e instanceof Error && e.message
+            ? e.message
+            : 'Chicory stays locked until this is confirmed.',
+        );
+      }
+      return false;
     } finally {
       if (mounted.current) setPrompting(false);
     }
@@ -110,6 +120,21 @@ export function useAppLock() {
   // Settings saves the preference; the gate hears about it here, so turning
   // the lock on protects the very next background rather than the next launch.
   useEffect(() => onLockChanged(setEnabled), [setEnabled]);
+
+  // On desktop the main process relocks on screen lock, suspend and its own
+  // background grace period. Only a return from the background prompts at
+  // once; behind a locked screen or a sleeping machine a prompt cannot be
+  // answered, so the lock screen waits for Unlock instead.
+  useEffect(
+    () =>
+      onRelock(reason => {
+        if (!enabled.current) return;
+        backgroundedAt.current = null;
+        setLocked(true);
+        if (reason === 'grace') prompt();
+      }),
+    [prompt],
+  );
 
   return { checking, locked, prompting, error, prompt, setEnabled };
 }

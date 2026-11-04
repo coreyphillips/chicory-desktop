@@ -1,7 +1,9 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, powerMonitor, screen, session, shell, protocol, safeStorage } = require('electron');
-const { fork } = require('node:child_process');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, powerMonitor, screen, session, shell, protocol, safeStorage, systemPreferences } = require('electron');
+const { execFile, fork } = require('node:child_process');
+const { AppLock, installLockIpc } = require('./app-lock.cjs');
+const { createAuthenticator } = require('./os-auth.cjs');
 const { loadStorageKey, ENVELOPE_VERSION } = require('./storage-key.cjs');
 const { BundledTor, TOR_VERSION } = require('./tor.cjs');
 const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require('./diagnostics.cjs');
@@ -21,6 +23,9 @@ app.setPath('userData', profile);
 const locked = app.requestSingleInstanceLock();
 let window;
 let manager;
+let managerStart;
+let appLock;
+let loaded = false;
 let tor;
 let torProxy;
 const torRequests = new Set();
@@ -56,8 +61,8 @@ function showWindow() {
 }
 
 function paymentLink(url) {
-  // Never queue a payment link across startup or wallet selection.
-  if (!isPaymentLink(url) || !window || window.webContents.isLoading()) return;
+  // Never queue a payment link across startup, wallet selection or the lock.
+  if (!isPaymentLink(url) || !window || window.webContents.isLoading() || appLock?.required()) return;
   showWindow();
   command('payment-link', url);
 }
@@ -216,21 +221,30 @@ async function handleRequest(request) {
   const suppliedOrigin = request.headers.get('origin');
   if (suppliedOrigin && !isAppURL(suppliedOrigin)) return response('Forbidden', 403);
   const url = new URL(request.url);
-  if (demo) {
-    if (!['GET', 'HEAD'].includes(request.method) || /^\/(api|wallets)(\/|$)/.test(url.pathname)) return response('Demo mode has no wallet service.', 403);
+  const walletRoute = /^\/(api|wallets)(\/|$)/.test(url.pathname);
+  // The interface is served here so a locked launch can draw without the manager.
+  if (demo || !walletRoute) {
+    if (!['GET', 'HEAD'].includes(request.method) || walletRoute) return response(demo ? 'Demo mode has no wallet service.' : 'Forbidden', 403);
     const file = staticPath(publicDirectory, url.pathname);
     if (!file) return response('Not found', 404);
     const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
     try { return response(request.method === 'HEAD' ? null : await fs.promises.readFile(file), 200, types[path.extname(file)] || 'application/octet-stream'); }
     catch { return response('Not found', 404); }
   }
+  const admitted = appLock.admit(url.pathname);
+  if (!admitted.ok) return admitted.status === 403 ? response('Forbidden', 403) : response('Chicory is locked.', 423);
   if (!origin || stopping) return response('The local wallet is unavailable.', 503);
   try {
     const upstream = await fetch(`${origin}${url.pathname}${url.search}`, {
       method: request.method, headers: managerHeaders(request.headers, token, origin),
       ...(!['GET', 'HEAD'].includes(request.method) ? { body: await request.arrayBuffer() } : {}),
-      signal: request.signal, redirect: 'error',
+      signal: admitted.ticket ? AbortSignal.any([request.signal, admitted.ticket.signal]) : request.signal, redirect: 'error',
     });
+    // A payment or recovery answer that lands after a relock is not delivered.
+    if (!appLock.current(admitted.ticket)) {
+      void upstream.body?.cancel().catch(() => {});
+      return response('Chicory is locked.', 423);
+    }
     const headers = new Headers(upstream.headers);
     // fetch has already decoded content. Do not forward stale compression lengths.
     for (const key of ['content-encoding', 'content-length', 'set-cookie', 'x-chicory-session']) headers.delete(key);
@@ -238,7 +252,10 @@ async function handleRequest(request) {
     headers.set('Referrer-Policy', 'no-referrer');
     headers.set('Cache-Control', 'no-store');
     return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
-  } catch { return response('The local wallet is unavailable. Reopen Chicory to reconnect.', 503); }
+  } catch {
+    if (!appLock.current(admitted.ticket)) return response('Chicory is locked.', 423);
+    return response('The local wallet is unavailable. Reopen Chicory to reconnect.', 503);
+  }
 }
 
 function installMenu() {
@@ -272,11 +289,11 @@ function installPermissions(desktopSession) {
     const camera = permission === 'media' && details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'video';
     const clipboard = permission === 'clipboard-read';
     if (!camera && !clipboard) return callback(false);
-    const answer = await dialog.showMessageBox(window, { type: 'question', title: 'Chicory',
+    const answer = await appLock.duringPrompt(() => dialog.showMessageBox(window, { type: 'question', title: 'Chicory',
       message: camera ? 'Allow Chicory to use the camera?' : 'Allow Chicory to read the clipboard?',
       detail: camera ? 'QR codes are decoded on this computer. No video is saved or uploaded.' : 'The copied payment request will fill the Send form for review.',
-      buttons: ['Allow', 'Cancel'], defaultId: 1, cancelId: 1 });
-    callback(answer.response === 0);
+      buttons: ['Allow', 'Cancel'], defaultId: 1, cancelId: 1 }));
+    callback(answer.response === 0 && !appLock.required());
   });
   desktopSession.setDevicePermissionHandler(() => false);
   desktopSession.on('will-download', (event) => event.preventDefault());
@@ -327,18 +344,54 @@ function createWindow(desktopSession) {
     ['window:minimize', () => window.minimize()],
     ['window:maximize', () => window.isMaximized() ? window.unmaximize() : window.maximize()],
     ['window:close', () => window.close()],
-  ]) ipcMain.on(channel, (event) => {
-    if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame && isAppURL(event.senderFrame.url)) action();
-  });
+  ]) ipcMain.on(channel, (event) => { if (trustedSender(event)) action(); });
   // Read-only and redacted here, so the renderer never sees unredacted host state.
   ipcMain.handle('desktop:diagnostics', async (event, input) => {
-    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || !isAppURL(event.senderFrame.url))
-      throw new Error('Diagnostics are unavailable.');
+    if (!trustedSender(event)) throw new Error('Diagnostics are unavailable.');
     let size = Infinity;
     try { size = JSON.stringify(input ?? null).length; } catch {}
     const { wallet, walletError, events } = size <= INPUT_LIMIT && input && typeof input === 'object' ? input : {};
     return reportText({ wallet, walletError: typeof walletError === 'string' ? walletError : undefined, events });
   });
+  for (const name of ['blur', 'hide', 'minimize']) window.on(name, () => appLock.background(name === 'blur' ? 'blur' : 'hidden'));
+  for (const name of ['focus', 'show', 'restore']) window.on(name, () => appLock.foreground());
+}
+
+function trustedSender(event) {
+  return !!window && !window.isDestroyed() && event.sender === window.webContents &&
+    event.senderFrame === window.webContents.mainFrame && isAppURL(event.senderFrame.url);
+}
+
+function lockEvent(name, value) {
+  if (!window || window.isDestroyed() || !isAppURL(window.webContents.getURL())) return;
+  if (['locked', 'conceal', 'changed', 'unlocked'].includes(name))
+    window.webContents.send('desktop:lock', name, typeof value === 'string' || typeof value === 'boolean' ? value : undefined);
+}
+
+/** The storage key and wallet engines are released only after the gate opens. */
+function ensureManager() {
+  if (demo) return Promise.resolve();
+  // A start the lock deferred is timed from the unlock, not from launch.
+  if (!managerStart && loaded) diagnostics.startupBegan();
+  managerStart ??= startManager().then(() => {
+    if (loaded && !stopping) diagnostics.startupEnded('ready');
+  }, async (error) => {
+    if (!stopping) {
+      diagnostics.startupEnded('failed', error);
+      await failureDialog(null, 'Chicory could not open.', error.message);
+      app.quit();
+    }
+    throw Object.assign(error, { reported: true });
+  });
+  return managerStart;
+}
+
+function installLock() {
+  installLockIpc({ ipcMain, appLock, trusted: trustedSender, ensureManager });
+  const relock = (reason) => () => { appLock.conceal(reason); appLock.relock(reason); };
+  powerMonitor.on('lock-screen', relock('lock-screen'));
+  powerMonitor.on('suspend', relock('suspend'));
+  if (process.platform === 'darwin') powerMonitor.on('user-did-resign-active', relock('switch-user'));
 }
 
 app.on('before-quit', (event) => {
@@ -359,6 +412,9 @@ if (!locked) app.quit();
 else app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark';
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  appLock = new AppLock({ profile, onEvent: lockEvent,
+    authenticator: demo ? createAuthenticator({ platform: 'none' }) : createAuthenticator({ systemPreferences, execFile }),
+    isForeground: () => !!window && !window.isDestroyed() && window.isFocused() });
   diagnostics.startupBegan();
   powerMonitor.on('suspend', () => diagnostics.suspend());
   powerMonitor.on('resume', () => diagnostics.resume());
@@ -367,12 +423,18 @@ else app.whenReady().then(async () => {
   createWindow(desktopSession);
   installPermissions(desktopSession);
   installMenu();
-  if (!demo) await startManager();
+  installLock();
+  // With the lock on, no key is loaded and no wallet engine starts until it opens.
+  const deferred = appLock.required();
+  if (!deferred) await ensureManager();
   if (stopping) return diagnostics.startupEnded('cancelled');
   await window.loadURL(`${APP_URL}${demo ? '?demo' : ''}`);
-  diagnostics.startupEnded('ready');
+  loaded = true;
+  // A locked launch records its startup once the lock opens and the wallet starts.
+  if (deferred) diagnostics.state('app', 'locked');
+  else diagnostics.startupEnded('ready');
 }).catch(async (error) => {
-  if (stopping) return;
+  if (stopping || error.reported) return;
   diagnostics.startupEnded('failed', error);
   await failureDialog(null, 'Chicory could not open.', error.message);
   app.quit();

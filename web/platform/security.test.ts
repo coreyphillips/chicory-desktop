@@ -59,3 +59,41 @@ test('browser does not claim device biometric authentication', async () => {
   assert.equal(await lock.authenticate('Unlock'), false);
   await assert.rejects(lock.setLockEnabled(true), /unavailable/);
 });
+
+test('desktop lock adapter only asks the main process and surfaces its refusals', async () => {
+  const calls: string[] = [];
+  const listeners: Array<(name: string, value?: string | boolean) => void> = [];
+  let unlock = { ok: false, reason: 'cancelled', error: 'Authentication was cancelled.' };
+  let authorize = { ok: false, reason: 'unavailable', error: 'System authentication is unavailable.' };
+  const bridge = {
+    state: async () => { calls.push('state'); return { enabled: true, locked: true, kind: 'fingerprint' as const }; },
+    unlock: async () => { calls.push('unlock'); return unlock; },
+    setEnabled: async (enabled: boolean) => { calls.push(`set:${enabled}`); return { ok: false, error: 'Authentication was cancelled. The app lock was not changed.' }; },
+    authorize: async () => { calls.push('authorize'); return authorize; },
+    onEvent: (callback: (name: string, value?: string | boolean) => void) => { listeners.push(callback); return () => {}; },
+  };
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: { lock: bridge } } });
+  try {
+    assert.equal(await lock.supportedBiometry(), 'fingerprint');
+    assert.equal(await lock.isLockEnabled(), true);
+    assert.equal(await lock.authenticate('Unlock'), false, 'a cancelled prompt stays locked without an error loop');
+    unlock = { ok: false, reason: 'unavailable', error: 'System authentication is unavailable.' };
+    await assert.rejects(lock.authenticate('Unlock'), /unavailable/);
+    await assert.rejects(lock.requireUnlock('Reveal'), /unavailable/);
+    authorize = { ok: false, reason: 'cancelled', error: '' };
+    assert.equal(await lock.requireUnlock('Reveal'), false);
+    await assert.rejects(lock.setLockEnabled(true), /not changed/);
+    const seen: string[] = [];
+    lock.onRelock(reason => seen.push(`relock:${reason}`));
+    lock.onConceal(() => seen.push('conceal'));
+    lock.onLockChanged(enabled => seen.push(`changed:${enabled}`));
+    for (const listener of listeners) { listener('conceal', 'blur'); listener('locked', 'suspend'); listener('changed', 'yes'); }
+    assert.deepEqual(seen, ['relock:suspend', 'conceal', 'conceal']);
+    bridge.state = async () => { throw new Error('ipc closed'); };
+    assert.equal(await lock.isLockEnabled(), true, 'an unreadable state shows the lock screen');
+    assert.equal(await lock.supportedBiometry(), null);
+    assert.deepEqual(calls, ['state', 'state', 'unlock', 'unlock', 'authorize', 'authorize', 'set:true']);
+  } finally {
+    Reflect.deleteProperty(globalThis, 'window');
+  }
+});
