@@ -1,7 +1,14 @@
 /**
- * Compatibility for the native UI's public preferences.
- * This is browser storage, with no secure-store guarantees. Wallet seeds,
- * database keys, access tokens and protected entries are never accepted.
+ * Compatibility for the native UI's keychain calls.
+ *
+ * In the desktop app, private interface state (offline request drafts, cached
+ * wallet views, auto-pay policy and network profiles) is kept by the local
+ * wallet service in its encrypted storage, gated by the app lock, and never
+ * written to browser storage. Only display preferences stay in browser
+ * storage. In a plain browser there is no secure store, so private state
+ * lives in memory or, for drafts and policy, browser storage as before.
+ * Wallet seeds, database keys, access tokens and protected entries are never
+ * accepted anywhere.
  */
 type Options = {
   service?: string;
@@ -29,6 +36,48 @@ export const ACCESSIBLE = Object.freeze({
 export const ACCESS_CONTROL = Object.freeze({
   BIOMETRY_CURRENT_SET_OR_DEVICE_PASSCODE: 'unavailable',
 });
+
+/** Interface state that is private, or that authorizes a payment. */
+function isPrivate(service: string): boolean {
+  return service === `${NAME}auto-pay` || service === `${NAME}network-profiles` || service.startsWith(offlinePrefix) ||
+    service === snapshotPrefix || service.startsWith(`${snapshotPrefix}.`);
+}
+
+/** The desktop app with its wallet service. The demo has none, so it keeps the browser behavior. */
+function desktop(): boolean {
+  if (typeof window === 'undefined' || !(window as { chicoryDesktop?: unknown }).chicoryDesktop) return false;
+  return !(typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo'));
+}
+
+/** The desktop wallet service's encrypted store. */
+async function secureStore<T>(method: 'GET' | 'PUT' | 'DELETE', service?: string, entry?: Entry): Promise<T> {
+  const response = await fetch(`/api/secure-store${service === undefined ? '' : `/${encodeURIComponent(service)}`}`, {
+    method,
+    ...(entry ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: entry.username, password: entry.password }) } : {}),
+  });
+  if (response.status === 423) throw new Error('Unlock Chicory to read or save this.');
+  const packet = await response.json().catch(() => null) as { ok?: boolean; result?: T; error?: { message?: string } } | null;
+  if (!response.ok || packet?.ok !== true) throw new Error(packet?.error?.message || 'Private app state is unavailable right now.');
+  return packet.result as T;
+}
+
+let purged = false;
+/**
+ * Private state an earlier build left in browser storage is removed rather
+ * than carried over: it was never protected, and nothing is imported from it.
+ */
+function purgePlaintext(): void {
+  if (purged || !desktop()) return;
+  purged = true;
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < globalThis.localStorage.length; i++) {
+      const key = globalThis.localStorage.key(i);
+      if (key?.startsWith(PREFIX) && isPrivate(key.slice(PREFIX.length))) stale.push(key);
+    }
+    for (const key of stale) globalThis.localStorage.removeItem(key);
+  } catch { /* Browser storage may be unavailable; there is nothing to remove then. */ }
+}
 
 function isAllowed(service: string): boolean {
   return durable.has(service) || service.startsWith(offlinePrefix) ||
@@ -99,6 +148,13 @@ export async function setGenericPassword(username: string, password: string, opt
     throw new Error('Secure device storage is unavailable in the browser.');
   publicValue(service, password);
   const entry = { username, password, service };
+  purgePlaintext();
+  if (desktop() && isPrivate(service)) {
+    // Failure propagates: a draft that was not saved must stop its reservation.
+    await secureStore('PUT', service, entry);
+    memory.set(service, entry);
+    return true;
+  }
   if (isDurable(service)) {
     // Failure propagates so a payment preference never claims to be saved.
     globalThis.localStorage.setItem(PREFIX + service, JSON.stringify(entry));
@@ -112,6 +168,16 @@ export async function getGenericPassword(options: Options = {}): Promise<Entry |
   if (!isAllowed(service) || options.authenticationPrompt) return false;
   const cached = memory.get(service);
   if (cached) return { ...cached };
+  purgePlaintext();
+  if (desktop() && isPrivate(service)) {
+    const entry = await secureStore<Entry | null>('GET', service);
+    if (!entry) return false;
+    if (entry.service !== service || typeof entry.password !== 'string' || typeof entry.username !== 'string')
+      throw new Error('Saved app state could not be read.');
+    publicValue(service, entry.password);
+    memory.set(service, { username: entry.username, password: entry.password, service });
+    return { username: entry.username, password: entry.password, service };
+  }
   if (!isDurable(service)) return false;
   const raw = globalThis.localStorage.getItem(PREFIX + service);
   if (!raw) return false;
@@ -124,12 +190,15 @@ export async function getGenericPassword(options: Options = {}): Promise<Entry |
 export async function resetGenericPassword(options: Options = {}): Promise<true> {
   const service = options.service ?? '';
   memory.delete(service);
+  if (desktop() && isPrivate(service)) await secureStore('DELETE', service);
   if (isAllowed(service)) globalThis.localStorage.removeItem(PREFIX + service);
   return true;
 }
 
 export async function getAllGenericPasswordServices(): Promise<string[]> {
   const services = new Set(memory.keys());
+  purgePlaintext();
+  if (desktop()) for (const service of await secureStore<string[]>('GET')) if (isPrivate(service)) services.add(service);
   for (let i = 0; i < globalThis.localStorage.length; i++) {
     const key = globalThis.localStorage.key(i);
     if (key?.startsWith(PREFIX) && isAllowed(key.slice(PREFIX.length)))

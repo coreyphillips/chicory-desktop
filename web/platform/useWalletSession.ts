@@ -10,6 +10,7 @@ import {
 } from '../chicory/src/services/networks.ts';
 import type { NetworkProfile } from '../chicory/src/services/networks.ts';
 import { mergeSnapshot } from '../chicory/src/services/activityMerge.ts';
+import { loadCachedSnapshot, saveCachedSnapshot } from '../chicory/src/services/snapshotCache.ts';
 
 export type Tab = 'Wallet' | 'Activity' | 'Settings';
 export const STALE_AFTER_MS = 45000;
@@ -123,6 +124,18 @@ export function useWalletSession(
     setClosing(false); setSwitching(false); setSwitchTarget(null);
     setInitializing(false);
   }, []);
+  /**
+   * A live read of wallet `id`, merged over what is shown so known history is
+   * never dropped, and saved as that wallet's encrypted cached view on
+   * desktop, so the next launch opens on it.
+   */
+  const land = useCallback((id: string, read: WalletSnapshot) => {
+    setSnapshot(old => {
+      const next = old?.wallet.id === id ? mergeSnapshot(old, read) : read;
+      if (!demoMode.current && typeof window !== 'undefined' && window.chicoryDesktop) void saveCachedSnapshot(id, next);
+      return next;
+    });
+  }, []);
   const makeRaw = useCallback((): WalletClientInterface => demoMode.current
     ? deps.current.createDemoClient() : deps.current.createHostClient(), []);
 
@@ -143,13 +156,23 @@ export function useWalletSession(
     setDeviceHint(true);
     if (!demoMode.current) remember(wallet.id, false);
     callbacks.current.onCloseSheet(); callbacks.current.onTab('Wallet');
+    // A returning wallet opens on its last confirmed view while the engine
+    // starts. It reads disconnected, keeps its original time so it is stale
+    // and can authorize nothing, and only fills a page still empty for this
+    // wallet: a late cache read never covers a live one or another wallet.
+    if (!demoMode.current && typeof window !== 'undefined' && window.chicoryDesktop) {
+      void loadCachedSnapshot(wallet.id).then(cached => {
+        if (cached && cached.wallet.id === wallet.id && valid(token, adapter) && selectedId.current === wallet.id)
+          setSnapshot(old => old ?? cached);
+      });
+    }
     await adapter.startWallet();
     if (!valid(token, adapter)) return;
     const read = await adapter.snapshot();
     if (valid(token, adapter) && selectedId.current === wallet.id && read.wallet.id === wallet.id) {
-      setSnapshot(read); setError('');
+      land(wallet.id, read); setError('');
     }
-  }, [setProfile, valid]);
+  }, [land, setProfile, valid]);
 
   const wrapClient = useCallback((raw: WalletClientInterface): WalletClientInterface => {
     let exposed: WalletClientInterface;
@@ -279,11 +302,11 @@ export function useWalletSession(
     try {
       const read = await adapter.snapshot();
       if (stillCurrent() && read.wallet.id === id) {
-        setSnapshot(old => old?.wallet.id === id ? mergeSnapshot(old, read) : read); setError('');
+        land(id, read); setError('');
       }
     } catch (cause) { if (stillCurrent()) setError(errorMessage(cause)); }
     finally { if (reading.current === token) reading.current = null; }
-  }, []);
+  }, [land]);
   useEffect(() => {
     if (!client || !walletId) return;
     const wake = () => { if (document.visibilityState === 'visible') void refresh(); };
@@ -305,10 +328,10 @@ export function useWalletSession(
       if (!valid(token, adapter)) return;
       const read = await adapter.snapshot();
       if (valid(token, adapter) && selectedId.current === id && read.wallet.id === id)
-        setSnapshot(old => old?.wallet.id === id ? mergeSnapshot(old, read) : read);
+        land(id, read);
     } catch (cause) { if (valid(token, adapter)) setError(errorMessage(cause)); }
     finally { finish(token); }
-  }, [begin, finish, valid]);
+  }, [begin, finish, land, valid]);
   const createDefaultWallet = useCallback(async () => {
     const adapter = current.current;
     if (!adapter) return;
