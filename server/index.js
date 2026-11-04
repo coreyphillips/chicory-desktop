@@ -43,6 +43,7 @@ async function startManager({
 	// Subscribe to safe bootstrap progress before automatic wallet starts.
 	desktopNetwork.torStatus();
 	await manager.init();
+	if (desktopNetwork.enabled()) require('./desktop-diagnostics').installDesktopDiagnostics(manager);
 
 	const app = express();
 	app.disable('x-powered-by');

@@ -32,6 +32,8 @@ export const phase = {
   networkSettings: 'Network settings',
   changeNetwork: 'Change network or Bitcoin server',
   hideNetwork: 'Hide network settings',
+  showDiagnostics: 'Show diagnostics',
+  hideDiagnostics: 'Hide diagnostics',
   deviceSettings: 'Device connection settings',
   back: 'Back',
   tryAgain: 'Try again',

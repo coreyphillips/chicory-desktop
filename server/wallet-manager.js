@@ -2040,6 +2040,8 @@ class WalletManager {
 		this._stopDfWatch(rt);
 		this._stopEvents(rt);
 		this._log(id, `exited code=${code} signal=${signal}`);
+		// Read by the desktop support report to tell a crash from a stop.
+		rt.lastExit = { code, signal, at: nowIso(), expected: !!(this.shuttingDown || rt.stopping) };
 		this._maybeRestart(id, rt);
 	}
 

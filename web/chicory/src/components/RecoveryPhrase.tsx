@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet } from 'react-native';
 import Reanimated, { LayoutAnimationConfig } from 'react-native-reanimated';
 import { announce } from '../design/announce';
@@ -8,7 +8,7 @@ import { dropOut, riseIn } from '../motion/presets';
 import { HoldConfirm } from '../scenes/settings/HoldConfirm';
 import { RecoveryWords } from '../scenes/settings/RecoveryWords';
 import { Action, Body, Note, Section } from '../scenes/settings/ui';
-import { requireUnlock } from '../services/lock';
+import { onConceal, requireUnlock } from '../services/lock';
 import { duringSystemPrompt } from '../stage/systemPrompt';
 import { space } from '../theme';
 
@@ -73,15 +73,30 @@ export function RecoveryPhraseBody({
     onLanding(letGo);
     setLetGo(null);
   }, [letGo, onLanding]);
+  // Counts each time the words had to go. A reveal still loading when that
+  // happens drops what it loads, so the words cannot come back on their own.
+  const concealed = useRef(0);
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
       if (state !== 'active') {
+        concealed.current += 1;
         setPhrase('');
         setLetGo(null);
       }
     });
     return () => subscription.remove();
   }, []);
+  // A desktop window can lose the foreground, or the screen can lock, while
+  // it stays visible to the page. The main process says so here.
+  useEffect(
+    () =>
+      onConceal(() => {
+        concealed.current += 1;
+        setPhrase('');
+        setLetGo(null);
+      }),
+    [],
+  );
   async function reveal() {
     setBusy(true);
     setError('');
@@ -96,7 +111,13 @@ export function RecoveryPhraseBody({
         setError(words.refused);
         return;
       }
+      // Taken after the prompt, which the app raised itself. A conceal while
+      // it was open already voided the grant in the desktop main process.
+      const epoch = concealed.current;
       const value = initialPhrase || (await loadPhrase?.());
+      // The screen was concealed while this was loading: it is shown only to
+      // a fresh reveal.
+      if (epoch !== concealed.current) return;
       if (!value) {
         throw new Error(words.unavailable);
       }
