@@ -94,7 +94,9 @@ identities are configured and a release passes its qualification list.
 
 New funded Lightning/on-chain payments, full disaster recovery, physical camera
 hardware, OS protocol installation and Windows/Linux permissions remain release
-qualification work. The existing browser regtest results are useful inherited
+qualification work. [desktop-native-qualification.md](desktop-native-qualification.md)
+is the per-installation checklist for the camera, payment links, clipboard and
+accessibility, and lists what automated tests already prove. The existing browser regtest results are useful inherited
 evidence, not a substitute for these checks. The packaged regtest suite and its
 current gaps are described in [desktop-qualification.md](desktop-qualification.md).
 

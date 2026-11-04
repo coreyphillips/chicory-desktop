@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const {
-  APP_URL, CSP, isAppURL, isPaymentLink, isExternalURL,
+  APP_URL, CSP, isAppURL, isPaymentLink, linkFromArgv, createLinkGate, isExternalURL,
   staticPath, managerHeaders, windowBounds,
 } = require('./policy.cjs');
 
@@ -44,6 +44,32 @@ test('payment links are bounded and cannot carry control characters or other pro
     'bitcoin:address\u0000', 'bitcoin:address\u007f', 'bitcoin:one two',
     ' bitcoin:address', `bitcoin:${'a'.repeat(16377)}`, null, {},
   ]) assert.equal(isPaymentLink(value), false, String(value));
+});
+
+test('a second instance hands over its first payment link, never a flag or a malformed one', () => {
+  const invoice = 'lightning:lnbcrt1example';
+  assert.equal(linkFromArgv(['/Applications/Chicory.app/Contents/MacOS/Chicory', '--allow-file-access', invoice, 'bitcoin:bcrt1second']), invoice);
+  assert.equal(linkFromArgv(['Chicory.exe', `bitcoin:${'a'.repeat(16377)}`, 'lightning:with space', 'javascript:alert(1)']), null);
+  assert.equal(linkFromArgv(['Chicory.exe']), null);
+  assert.equal(linkFromArgv(undefined), null);
+});
+
+test('a payment link fills Send only for a ready, unlocked window, and once for a repeated delivery', () => {
+  let clock = 1000;
+  const accept = createLinkGate({ now: () => clock });
+  const link = 'bitcoin:bcrt1qexample?amount=0.001';
+  const ready = { window: true, loading: false, locked: false, erasing: false };
+  // Dropped, never queued, while nothing can take it safely.
+  for (const state of [{ ...ready, window: false }, { ...ready, loading: true }, { ...ready, locked: true }, { ...ready, erasing: true }])
+    assert.equal(accept(link, state), false, JSON.stringify(state));
+  assert.equal(accept('https://example.com', ready), false);
+  assert.equal(accept(`bitcoin:${'a'.repeat(16377)}`, ready), false);
+  assert.equal(accept(link, ready), true);
+  // An OS that delivers one click twice (open-url and argv) fills Send once.
+  assert.equal(accept(link, ready), false);
+  clock += 2500;
+  assert.equal(accept(link, ready), true, 'the same link clicked again later still works');
+  assert.equal(accept('lightning:lnbcrt1other', ready), true, 'another link is never held back');
 });
 
 test('demo assets cannot escape the generated build directory', () => {
