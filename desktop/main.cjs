@@ -203,14 +203,16 @@ function releaseWalletActions() {
   if (manager?.connected && !stopping) manager.send({ type: 'update:release' }, () => {});
 }
 
-async function installUpdate(file, offer) {
+async function installUpdate(file, offer, signal) {
   await gate.tryRun('update', async () => {
     if (!await holdWalletActions()) {
       releaseWalletActions();
       throw Object.assign(new Error('A wallet action is still running. Wait for it to finish, then install the update.'), { code: 'UPDATE_BUSY' });
     }
-    try { await verifyStaged(file, offer.artifact); }
-    catch (error) { releaseWalletActions(); throw error; }
+    try {
+      await verifyStaged(file, offer.artifact);
+      if (signal.aborted) throw Object.assign(new Error('The update was cancelled.'), { code: 'UPDATE_CANCELLED' });
+    } catch (error) { releaseWalletActions(); throw error; }
     // The same graceful stop as quitting: wallets drain, then Tor exits. The
     // encrypted profile and its OS-protected key are left exactly in place.
     stopping = true;
@@ -259,7 +261,7 @@ async function checkForUpdates() {
         ? 'Chicory will stop the wallet and Tor, quit, and show the verified AppImage. Replace your current AppImage with it.'
         : 'Chicory will pause wallet actions, stop the wallet and Tor, quit, and open the verified installer. Wallet files and the protected key stay in place.',
       buttons: ['Install and Quit', 'Later'], defaultId: 0, cancelId: 1 });
-    if (install.response === 0) await installUpdate(file, offer);
+    if (install.response === 0) await installUpdate(file, offer, controller.signal);
   } catch (error) {
     window?.setProgressBar(-1);
     if (error.code === 'UPDATE_CANCELLED' || controller.signal.aborted) {

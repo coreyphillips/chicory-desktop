@@ -11,6 +11,8 @@ extraMetadata:
   chicoryChannel: stable
 forceCodeSigning: true
 mac:
-  # null selects the Developer ID identity imported from CSC_LINK.
-  identity: null
+  # Matches the Developer ID Application certificate imported from CSC_LINK.
+  # electron-builder rejects the name with its trailing colon, and the
+  # development config's '-' would otherwise be inherited as an ad hoc identity.
+  identity: Developer ID Application
   notarize: true

@@ -116,6 +116,12 @@ test('fresh install has no staging directory and downloads a verified installer'
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
+test('a verified AppImage is staged executable', { skip: process.platform === 'win32' }, async (t) => {
+  const artifact = { file: 'Chicory-0.3.0-linux-x86_64.AppImage', sha256: digest, size: installer.length };
+  const file = await update.download({ body: Readable.from(chunks(installer)), artifact, directory: temporary(t), statfs: ample });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o700);
+});
+
 test('tampered or oversized downloads leave nothing installable', async (t) => {
   const directory = temporary(t);
   const { artifact } = update.verifyManifest(...Object.values(signed()), current);

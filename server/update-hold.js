@@ -35,8 +35,13 @@ function createUpdateHold() {
 			inFlight--;
 			settle();
 		};
-		res.once('finish', finish);
-		res.once('close', finish);
+		// A closed connection does not stop the handler, which may still be
+		// talking to the wallet. The action is over only once it ends its response.
+		const end = res.end;
+		res.end = function (...args) {
+			finish();
+			return end.apply(this, args);
+		};
 		next();
 	}
 

@@ -134,7 +134,9 @@ async function download({ body, artifact, directory, signal, statfs = fs.statfsS
   const partial = `${final}.partial`;
   const hash = createHash('sha256');
   let written = 0;
-  let descriptor = fs.openSync(partial, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  // The owner moves a staged AppImage over the installed one, so it must stay runnable.
+  const mode = artifact.file.endsWith('.AppImage') ? 0o700 : 0o600;
+  let descriptor = fs.openSync(partial, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode);
   try {
     for await (const chunk of body) {
       if (signal?.aborted) throw failure('UPDATE_CANCELLED', 'The update download was cancelled.');

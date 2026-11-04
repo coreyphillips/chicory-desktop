@@ -78,7 +78,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv "$app" 2>&1 | grep -q "Authority=Developer ID Application"
           spctl --assess --type execute --verbose "$app"
-          xcrun stapler validate release/*.dmg
+          # electron-builder notarizes and staples the app before packing it.
+          # The DMG itself carries no ticket, so validate the app inside it.
+          xcrun stapler validate "$app"
       - if: matrix.platform == 'win'
         name: Package and sign with Azure Trusted Signing
         shell: bash
