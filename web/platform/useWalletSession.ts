@@ -63,6 +63,18 @@ function remember(walletId: string, locked: boolean) {
 function pendingBackup(id: string): boolean {
   try { return localStorage.getItem(BACKUP + id) === 'true'; } catch { return true; }
 }
+/**
+ * Whether a first launch may create its wallet without asking. Only the
+ * desktop app does, never a plain browser, and not on a page loaded for
+ * first-run setup (`?setup`), as after Erase all wallets, where Restore is
+ * the question. The profile needs a server and a primary node: only mainnet
+ * ships with both, so a test network still lands on the picker.
+ */
+function createsOnFirstRun(profile: NetworkProfile): boolean {
+  if (typeof window === 'undefined' || !window.chicoryDesktop) return false;
+  if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('setup')) return false;
+  return !!profile.primaryUri.trim() && !!profile.electrum.host.trim();
+}
 
 /** The desktop service owns the engine and channel state. Unmounting detaches the view. */
 export function useWalletSession(
@@ -277,6 +289,32 @@ export function useWalletSession(
       if (restoring || !selected) {
         selectedId.current = ''; setWalletId(''); setSnapshot(null); setRememberedSession(null);
         callbacks.current.onCloseSheet();
+        // A first launch has nothing here and nothing ever chosen, so there is
+        // no question to put to anyone: the wallet makes itself, as on the
+        // phone, and its recovery phrase waits behind the backup banner. A
+        // failure leaves the picker, the manual way in, with the reason.
+        if (automatic && !restoring && !configured && records.length === 0 && !saved.walletId &&
+          !demoMode.current && createsOnFirstRun(profile.current)) {
+          const lockAt = locks.current;
+          const creator = makeRaw();
+          const first = profile.current;
+          const created = await creator.createWallet({
+            name: 'My wallet', network: first.network,
+            primaryUri: first.primaryUri, electrum: first.electrum,
+          });
+          if (typeof created.mnemonic === 'string') {
+            try { localStorage.setItem(BACKUP + created.id, 'true'); }
+            catch { /* The current session still requires acknowledgement. */ }
+          }
+          if (!valid(token, adapter)) {
+            // A lock can overtake the create. Stop a known late-created daemon.
+            if (locks.current !== lockAt && creator instanceof UmbrelWalletClient)
+              await creator.stopWallet().catch(() => {});
+            return;
+          }
+          const { mnemonic: _phrase, warnings: _warnings, ...record } = created;
+          await activate(adapter, record, true, token);
+        }
         return;
       }
       await activate(adapter, selected, options.backupPending ?? (!demoMode.current && pendingBackup(selected.id)), token);
@@ -471,7 +509,10 @@ export function useWalletSession(
     };
   }, []);
   useEffect(() => {
-    if (view.paused) void disconnect();
+    // A pause with nothing open or under way, as while the app lock is still
+    // being checked at launch, has nothing to close. Closing anyway would end
+    // the opening wait and draw first-run setup for a moment.
+    if (view.paused) { if (current.current || action.current) void disconnect(); }
     else void connect(undefined, {}, true).catch(() => {});
   }, [view.paused, connect, disconnect]);
 

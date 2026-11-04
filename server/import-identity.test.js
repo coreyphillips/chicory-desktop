@@ -104,6 +104,20 @@ test('an unreadable registry fails closed before a new identity is allocated', a
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'wallets')), false);
 });
 
+test('a new wallet is refused beside an unreadable registry before any phrase is written', async () => {
+  const manager = box();
+  manager.registry.loadError = { message: 'Unreadable registry' };
+  let probed = false;
+  manager._refuseWrongChain = async () => { probed = true; };
+  await assert.rejects(
+    manager.createWallet({ name: 'My wallet', network: 'regtest', electrum: ELECTRUM, onchainOnly: true }),
+    (error) => error.statusCode === 409 && error.code === 'REGISTRY_UNREADABLE'
+  );
+  assert.equal(probed, false, 'refused before any server is dialled');
+  assert.equal(manager.registry.list().length, 0);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'wallets')), false);
+});
+
 test('concurrent imports of one seed on one network produce exactly one wallet', async () => {
   const manager = box();
   let release;

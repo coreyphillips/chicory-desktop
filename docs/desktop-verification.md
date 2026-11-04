@@ -39,10 +39,14 @@ and early parent-disconnect cleanup against a local test endpoint.
 ## Native interaction checks
 
 The `scripts/desktop/smoke.mjs` runner uses a disposable demo profile and native
-Electron menus. It checks the normal and compact desktop workspace, physical
-amount entry, payment review, cancellation of an incomplete hold, Receive,
-Settings, reduced motion, renderer isolation and demo API denial. It never uses
-real wallet data or sends a real payment.
+Electron menus. It checks the normal and compact desktop workspace, that
+Overview's balance, Send, Scan and Receive answer a click, that a drag or triple
+click selects no text on Send or Receive while their fields still select,
+physical amount entry, payment review, cancellation of an incomplete hold,
+Receive, Settings without Stop wallet, the server prompt when switching to
+regtest without one, the sidebar without a wallet drop-down, reduced motion,
+renderer isolation and demo API denial. It never uses real wallet data or sends
+a real payment.
 
 The packaged macOS arm64 application also passed `scripts/desktop/live-smoke.mjs`
 with production developer tools disabled. Its real manager reported Beignet
@@ -57,7 +61,8 @@ No real wallet was created and no funds were used.
 Use `CHICORY_SMOKE_TOR=1 node scripts/desktop/live-smoke.mjs` for the live
 network variant. Set `CHICORY_ELECTRON_EXECUTABLE` to the packaged executable
 to test an installed build. The test uses a disposable profile and Tor Project
-public onion service, and never creates or funds a wallet.
+public onion service, and never creates or funds a wallet: it sets
+`CHICORY_MANUAL_SETUP=1`, so the app does not make its first wallet unasked.
 
 Detailed run results and screenshots are generated in `artifacts/smoke/`. That
 folder is excluded from source control. Selected screenshots in this repository

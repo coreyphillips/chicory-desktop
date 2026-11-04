@@ -1055,6 +1055,17 @@ class WalletManager {
 			});
 			return { record: created.record, seedFrom: source.from };
 		}
+		// A wallet list that could not be read is never written over, so a new
+		// wallet is refused before its phrase lands in a directory nothing would
+		// list. The app makes its first wallet unasked, which makes this the
+		// case to close. Imports are refused by their identity check.
+		if (this.registry.loadError) {
+			throw httpError(
+				409,
+				'REGISTRY_UNREADABLE',
+				'The wallet list here could not be read, so no new wallet is made beside it. Repair or remove it first.'
+			);
+		}
 		const strength = Number(wordCount) === 12 ? 128 : 256;
 		const mnemonic = bip39.generateMnemonic(strength);
 		return this._provision({

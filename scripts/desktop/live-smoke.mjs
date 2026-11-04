@@ -40,13 +40,14 @@ async function open() {
     executablePath: executable || electronPath,
     args: executable ? [] : [path.join(root, 'desktop/main.cjs')],
     cwd: root,
-    env: { ...process.env, CHICORY_PROFILE_DIR: profile },
+    // It checks an empty first run, so the app makes no wallet unasked.
+    env: { ...process.env, CHICORY_PROFILE_DIR: profile, CHICORY_MANUAL_SETUP: '1' },
     timeout: 30000,
   });
   page = await electron.firstWindow({ timeout: 30000 });
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
-  await page.waitForURL('chicory-app://wallet/', { timeout: 30000 });
+  await page.waitForURL('chicory-app://wallet/?setup', { timeout: 30000 });
   await expect(page.locator('.desktop-titlebar')).toBeVisible();
   await expect.poll(() => page.evaluate(async () => (await fetch('/api/config')).status)).toBe(200);
   const children = processTree().filter(item => item.parent === electron.process().pid);

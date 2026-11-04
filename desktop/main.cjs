@@ -22,6 +22,11 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'chicory-app', privileges: {
 } }]);
 
 const demo = process.argv.includes('--demo');
+// A first launch makes its wallet unasked. Erase all wallets, and harnesses
+// that need an empty first run (CHICORY_MANUAL_SETUP=1), load the page for
+// first-run setup instead, where Restore is offered.
+const SETUP_URL = `${APP_URL}?setup`;
+const manualSetup = process.env.CHICORY_MANUAL_SETUP === '1';
 app.setName('Chicory');
 const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), demo ? 'Chicory Desktop Demo' : 'Chicory Desktop');
 app.setPath('userData', profile);
@@ -579,9 +584,10 @@ function createEraser(desktopSession) {
     clearRendererState: () => desktopSession.clearStorageData(),
     startOver: async () => {
       erasing = false;
-      // A new storage key and an empty wallet service, then first-run setup.
+      // A new storage key and an empty wallet service, then first-run setup,
+      // which creates nothing until asked.
       await ensureManager();
-      if (window && !window.isDestroyed()) await window.loadURL(APP_URL);
+      if (window && !window.isDestroyed()) await window.loadURL(SETUP_URL);
     },
     record: message => diagnostics.record('erase', message),
   });
@@ -653,7 +659,7 @@ else app.whenReady().then(async () => {
   const deferred = appLock.required();
   if (!deferred) await ensureManager();
   if (stopping) return diagnostics.startupEnded('cancelled');
-  await window.loadURL(`${APP_URL}${demo ? '?demo' : ''}`);
+  await window.loadURL(demo ? `${APP_URL}?demo` : manualSetup ? SETUP_URL : APP_URL);
   loaded = true;
   // A locked launch records its startup once the lock opens and the wallet starts.
   if (deferred) diagnostics.state('app', 'locked');
