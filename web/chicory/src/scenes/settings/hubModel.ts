@@ -31,7 +31,6 @@ export type HubRow =
   | 'haptics'
   | 'autopay'
   | 'empty'
-  | 'leave'
   | 'erase'
   | 'diagnostics';
 
@@ -110,7 +109,6 @@ export function rowsOf(group: HubGroup, shape: HubShape): HubRow[] {
     case 'funds':
       return [
         ...(shape.drain ? (['empty'] as const) : []),
-        'leave',
         ...(shape.erase ? (['erase'] as const) : []),
       ];
     case 'help':
@@ -135,7 +133,8 @@ export const joinedBelow = (edge: HubEdge) =>
 
 /**
  * Settings' items, top to bottom: the card, the recovery phrase to save
- * when there is one, then each group's header and rows, and the versions.
+ * when there is one, then each group's header and rows, a group with no
+ * rows left out whole, and the versions.
  * The recovery phrase keeps the key `recovery` whether it leads the page or
  * sits at the top of the Wallet group, so it moves as itself.
  */
@@ -164,6 +163,9 @@ export function hubItems(shape: HubShape): HubEntry[] {
   }
   for (const group of GROUPS) {
     const rows = rowsOf(group, shape);
+    // A group with nothing to offer draws no header either: Funds and exits
+    // holds only rows the engine or the phone may not have.
+    if (rows.length === 0) continue;
     items.push({
       key: `header:${group}`,
       kind: 'header',

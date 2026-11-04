@@ -36,6 +36,21 @@ async function nativeMenu(label) {
   await page.waitForTimeout(1000);
 }
 
+/** Drags across the open form and triple-clicks inside it; nothing outside a field may end up selected. */
+async function assertNothingSelects() {
+  const form = await page.getByTestId('slot-top').boundingBox();
+  assert.ok(form, 'The open form has a box');
+  // Down the middle, across the figures and keys, which is where a stray
+  // drag used to paint the selection.
+  await page.mouse.move(form.x + form.width / 2, form.y + form.height * 0.05);
+  await page.mouse.down();
+  await page.mouse.move(form.x + form.width / 2, form.y + form.height * 0.95, { steps: 20 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => getSelection().toString()), '', 'A drag selects nothing');
+  await page.mouse.click(form.x + 12, form.y + 12, { clickCount: 3 });
+  assert.equal(await page.evaluate(() => getSelection().toString()), '', 'A triple click selects nothing');
+}
+
 async function screenshot(name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), animations: 'allow' });
 }
@@ -77,6 +92,10 @@ try {
   }));
   assert.equal(sizes.desktop, 'true');
   assert.ok(sizes.width > 1000);
+  // The sidebar says which network is open; it offers no wallet drop-down.
+  await expect(page.locator('.browser-sidebar select')).toHaveCount(0);
+  await expect(page.locator('.browser-wallet-identity')).toHaveAttribute('data-wallet', /.+/);
+  await expect(page.locator('.browser-network')).toBeVisible();
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(960, 720));
   await page.waitForTimeout(700);
   await screenshot('desktop-compact');
@@ -84,10 +103,37 @@ try {
   assert.equal(await page.locator('.browser-nav-label').first().isVisible(), false);
   checks.push('Full navigation at 1320px and compact desktop rail at 960px');
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1320, 860));
+  await page.waitForTimeout(700);
+
+  // Overview's own controls answer a pointer, not only the rail and menus.
+  const hero = page.getByTestId('home-hero').getByRole('button').first();
+  const shownIn = await hero.getAttribute('aria-label');
+  await hero.click();
+  await expect.poll(() => hero.getAttribute('aria-label')).not.toBe(shownIn);
+  const homeAction = name => page.getByTestId('home-slot').getByRole('button', { name, exact: true });
+  for (const [name, scene] of [['Send', 'send'], ['Receive', 'receive']]) {
+    await homeAction(name).click();
+    await expect(page.locator(`.browser-sidebar button[data-scene="${scene}"]`)).toHaveAttribute('aria-current', 'page');
+    await page.waitForTimeout(800);
+    await nativeMenu('Overview');
+  }
+  await homeAction('Scan a payment request').click();
+  await expect(page.getByTestId('scan-disc')).toBeVisible();
+  await page.waitForTimeout(800);
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('scan-disc')).toHaveCount(0);
+  await page.waitForTimeout(800);
+  checks.push('Overview balance, Send, Receive and Scan answer a click');
 
   await nativeMenu('Send');
+  await assertNothingSelects();
   const address = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);
-  await page.getByRole('textbox', { name: 'Payment request or address', exact: true }).fill(address);
+  const request = page.getByRole('textbox', { name: 'Payment request or address', exact: true });
+  await request.fill(address);
+  await request.click({ clickCount: 3 });
+  assert.deepEqual(await request.evaluate(field => [field.selectionStart, field.selectionEnd]), [0, address.length],
+    'A field still selects its text');
+  checks.push('A drag or triple click selects nothing on Send, and its field still selects');
   const amount = page.locator('[data-amount-entry]').first();
   await amount.focus();
   await page.keyboard.type('1251');
@@ -109,6 +155,8 @@ try {
   checks.push('Physical amount entry and backspace, payment review, short hold cancels');
 
   await nativeMenu('Receive');
+  await assertNothingSelects();
+  checks.push('A drag or triple click selects nothing on Receive');
   const receiveAmount = page.locator('[data-amount-entry]').first();
   await receiveAmount.focus();
   await page.keyboard.type('2500');
@@ -116,7 +164,21 @@ try {
   await screenshot('desktop-receive');
   await nativeMenu('Settings');
   await expect(page.getByText('This computer', { exact: true })).toBeVisible();
+  // The page is drawn through to Help, below Funds and exits, which no longer offers Stop wallet.
+  await expect(page.getByRole('button', { name: 'Diagnostics', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Stop wallet', exact: true })).toHaveCount(0);
   await screenshot('desktop-settings');
+  // A network that ships without a server opens its servers and says what is missing.
+  await page.getByRole('button', { name: 'Change network or Bitcoin server', exact: true }).click();
+  await page.getByRole('radio', { name: 'regtest', exact: true }).click();
+  await page.getByRole('button', { name: 'Switch to regtest', exact: true }).click();
+  await expect(page.getByText('Add an Electrum server for regtest.', { exact: true })).toBeVisible();
+  const useRegtest = page.getByRole('button', { name: 'Use regtest', exact: true });
+  await expect(useRegtest).toBeDisabled();
+  await page.getByRole('textbox', { name: 'Default Electrum server', exact: true }).fill('127.0.0.1');
+  await expect(useRegtest).toBeEnabled();
+  await expect(page.getByText('Add an Electrum server for regtest.', { exact: true })).toHaveCount(0);
+  checks.push('Switching to regtest without a server opens its servers and says what is missing');
   await nativeMenu('Activity');
   checks.push('Native Send, Receive, Settings, Activity and Overview menus');
 

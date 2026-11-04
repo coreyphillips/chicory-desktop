@@ -38,11 +38,17 @@ const words = copy.settings.network;
  */
 export function NetworkSettings({
   initialNetwork,
+  showNetwork,
   busy = false,
   defaultPrimary = true,
   onApply,
 }: {
   initialNetwork?: Network;
+  /**
+   * The network whose servers show first, when it is not the one the wallet
+   * is on, as when a switch to it was refused for want of a server.
+   */
+  showNetwork?: Network;
   busy?: boolean;
   defaultPrimary?: boolean;
   onApply: (profile: NetworkProfile) => Promise<void>;
@@ -69,7 +75,9 @@ export function NetworkSettings({
       .then(value => {
         if (!active) return;
         setPreferences(value);
-        setProfile(value.profiles[initialNetwork || value.selectedNetwork]);
+        setProfile(
+          value.profiles[showNetwork || initialNetwork || value.selectedNetwork],
+        );
       })
       .catch(e => {
         if (active) setError(e.message);
@@ -77,7 +85,7 @@ export function NetworkSettings({
     return () => {
       active = false;
     };
-  }, [initialNetwork]);
+  }, [initialNetwork, showNetwork]);
   useEffect(() => {
     let active = true;
     seedSourceNetwork()
@@ -185,6 +193,9 @@ export function NetworkSettings({
               />
             ) : null}
           </View>
+          {profile.electrum.host.trim() ? null : (
+            <Note glyph="info">{words.needsServer(profile.network)}</Note>
+          )}
           <Action
             label={
               initialNetwork === profile.network

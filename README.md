@@ -9,7 +9,7 @@ The Beignet wallet runs on this computer.
 
 ## A desktop workspace
 
-- A persistent navigation rail, wallet selector and Activity column. The rail
+- A persistent navigation rail, network status and Activity column. The rail
   becomes compact in narrower windows, while payment forms keep readable widths.
 - Native window controls and menus, remembered window placement, standard text
   editing and keyboard navigation. Use Command on macOS or Control elsewhere:
@@ -45,8 +45,14 @@ needs Visual Studio or its Build Tools with the C++ tools and a Windows SDK.
 Packaged apps include these components and need no Node, npm or separate Tor
 installation.
 
-On first launch, create or restore a wallet and choose its network, Electrum
-server and primary node. Bundled Tor starts on demand for onion peers, guardians
+On first launch, Chicory creates a mainnet wallet with its default Electrum
+server and primary node, and its recovery phrase waits behind the backup banner
+until it is saved. Erase all wallets, in Settings, returns to setup, where a
+wallet can be restored from its phrase instead. Change the network or servers
+in Settings > Network & servers; testnet and regtest need a server entered there
+first, and a new wallet on either asks for its primary node. Set
+`CHICORY_MANUAL_SETUP=1` to start in setup without creating a wallet. Bundled
+Tor starts on demand for onion peers, guardians
 and onion Electrum servers. Its bootstrap must succeed before wallet connections
 use that route, and onion failures never fall back to a direct connection.
 Clearnet peers continue to connect directly; this is not an all-traffic VPN.

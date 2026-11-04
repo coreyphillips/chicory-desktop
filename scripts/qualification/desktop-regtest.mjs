@@ -108,11 +108,12 @@ class DesktopApp {
   async open() {
     this.electron = await _electron.launch({
       executablePath: executable || electronPath, args: [...(executable ? [] : [path.join(root, 'desktop/main.cjs')]), ...electronArgs],
-      cwd: root, env: { ...process.env, CHICORY_PROFILE_DIR: this.profile }, timeout: 30000,
+      // Only regtest wallets the suite makes itself: the app makes no mainnet wallet unasked.
+      cwd: root, env: { ...process.env, CHICORY_PROFILE_DIR: this.profile, CHICORY_MANUAL_SETUP: '1' }, timeout: 30000,
     });
     this.page = await this.electron.firstWindow({ timeout: 30000 });
     this.page.setDefaultTimeout(20000);
-    await this.page.waitForURL('chicory-app://wallet/', { timeout: 30000 });
+    await this.page.waitForURL('chicory-app://wallet/?setup', { timeout: 30000 });
     await expect.poll(() => this.page.evaluate(async () => (await fetch('/api/config')).status), { timeout: 30000 }).toBe(200);
     return this;
   }
@@ -157,7 +158,7 @@ class DesktopApp {
   /** The renderer selects a wallet only when it connects, so a wallet created outside it needs a reload. */
   async activate(walletId) {
     await this.page.reload();
-    await expect(this.page.locator('#browser-wallet-selector')).toHaveValue(walletId, { timeout: 60000 });
+    await expect(this.page.locator(`.browser-wallet-identity[data-wallet="${walletId}"]`)).toBeAttached({ timeout: 60000 });
     await expect(this.page.locator('[data-scene="send"]')).toBeEnabled({ timeout: 60000 });
   }
 

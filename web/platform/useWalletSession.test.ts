@@ -278,6 +278,22 @@ test('a delayed network switch cannot change profile or selection after lock', a
   assert.equal(host.events.includes(`start:${testRecord.id}`), false);
 });
 
+test('a switch to a network with no server says why and leaves the wallet as it was', async () => {
+  const host = new Host([record, testRecord]);
+  const app = await mount(host);
+  await act(async () => {
+    await assert.rejects(app.session.switchNetwork({
+      ...app.session.activeProfile, network: 'regtest',
+      electrum: { host: ' ', port: 60401, tls: false },
+    }), /Add an Electrum server for regtest/);
+  });
+  assert.match(app.session.switchError, /Add an Electrum server for regtest/);
+  assert.equal(app.session.activeProfile.network, 'mainnet');
+  assert.equal(app.session.walletId, record.id);
+  assert.equal(app.session.switching, false);
+  assert.equal(host.events.some(item => item.startsWith('stop:')), false, 'nothing was stopped for a switch that cannot start');
+});
+
 test('lock overtakes creation and stops a known late-created wallet without selecting it', async () => {
   const records = [record];
   const host = new Host(records);
@@ -494,4 +510,111 @@ test('a wallet that reuses a phrase the owner already holds is not marked for a 
   const app = await mount(host, [new Host([record, related])]);
   await act(async () => { await app.session.client!.createWallet({ name: 'Related', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI }); });
   assert.equal(local.getItem(`chicory:backup-pending:${related.id}`), null, 'no phrase came back, so there is nothing new to write down');
+});
+
+test('a first desktop launch creates its one wallet and opens it with the phrase still to save', async () => {
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const records: WalletRecord[] = [];
+  const host = new Host(records);
+  const creator = new Host(records);
+  const first = { ...record, id: 'wallet-first' };
+  let input: CreateWalletInput | undefined;
+  creator.provision = async value => { input = value; return { ...first, mnemonic: PHRASE }; };
+  const app = await mount(host, [creator]);
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.equal(creator.events.filter(item => item === 'create').length, 1);
+  assert.equal(input?.name, 'My wallet');
+  assert.equal(input?.network, 'mainnet');
+  assert.ok(input?.primaryUri, 'mainnet ships with a primary node');
+  assert.ok(input?.electrum?.host, 'and with a server');
+  assert.equal(app.session.walletId, first.id);
+  assert.ok(host.events.includes(`start:${first.id}`));
+  assert.equal(app.session.initializing, false);
+  assert.equal(app.session.rememberedSession?.backupPending, true);
+  assert.equal(local.getItem(`chicory:backup-pending:${first.id}`), 'true');
+  assert.ok(![...local.entries.values(), ...sessionStore.entries.values()].join('').includes(PHRASE));
+  await app.unmount();
+  // The next launch opens the wallet it made; it never makes another.
+  const next = new Host(records);
+  const again = await mount(next);
+  assert.equal(again.session.walletId, first.id);
+  assert.equal(next.events.includes('create'), false);
+});
+
+test('a first launch creates nothing in a browser, on a setup page, after a choice, or without a primary', async () => {
+  const opened = async (setup: () => void, host = new Host([])) => {
+    setup();
+    const creator = new Host([]);
+    const app = await mount(host, [creator]);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    assert.ok(app.session.client, 'the picker is the way in');
+    assert.equal(app.session.walletId, '');
+    assert.equal(creator.events.includes('create'), false);
+    assert.equal(host.events.includes('create'), false);
+    await app.unmount();
+  };
+  const desktop = () => Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  await opened(() => {});
+  await opened(() => {
+    desktop();
+    Object.defineProperty(globalThis, 'location', { configurable: true, value: { search: '?setup' } });
+  });
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { search: '' } });
+  await opened(() => {
+    desktop();
+    // A wallet that was chosen and is gone is never quietly replaced.
+    local.setItem('chicory:host-selection', JSON.stringify({ walletId: 'wallet-gone', locked: false }));
+  });
+  local.entries.clear();
+  const regtest = new Host([]);
+  regtest.config = async () => ({ defaultNetwork: 'regtest' } as HostConfig);
+  await opened(desktop, regtest);
+});
+
+test('a first launch whose create fails stays on the picker and says why', async () => {
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const creator = new Host([]);
+  creator.provision = async () => { throw new Error('The Electrum server could not be reached.'); };
+  const app = await mount(new Host([]), [creator]);
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.ok(app.session.client);
+  assert.equal(app.session.walletId, '');
+  assert.equal(app.session.initializing, false);
+  assert.match(app.session.error, /could not be reached/);
+});
+
+test('a lock that overtakes the first-launch create stops the late wallet without opening it', async () => {
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const records: WalletRecord[] = [];
+  const creator = new Host(records);
+  const created = deferred<CreatedWallet>();
+  creator.provision = () => created.promise;
+  const app = await mount(new Host(records), [creator]);
+  assert.equal(app.session.initializing, true, 'the opening wait holds while the wallet is made');
+  await act(async () => { await app.session.disconnect(); });
+  const late = { ...record, id: 'wallet-late' };
+  await act(async () => { created.resolve({ ...late, mnemonic: PHRASE }); await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.equal(app.session.walletId, '');
+  assert.ok(creator.events.includes(`stop:${late.id}`));
+});
+
+test('a launch paused for the app lock keeps its opening wait and opens once resumed', async () => {
+  let session!: Session;
+  let resume!: () => void;
+  const host = new Host();
+  const dependencies = { createHostClient: () => host, createDemoClient: () => new DemoWalletClient() };
+  function Harness() {
+    const [paused, setPaused] = React.useState(true);
+    resume = () => setPaused(false);
+    session = useWalletSession({ tab: 'Wallet', onTab() {}, onCloseSheet() {}, paused }, dependencies);
+    return null;
+  }
+  let root!: ReactTestRenderer;
+  await act(async () => { root = create(React.createElement(Harness)); });
+  roots.add(root);
+  assert.equal(session.initializing, true, 'nothing was open, so nothing closed and setup is not drawn');
+  assert.equal(host.events.length, 0);
+  await act(async () => { resume(); });
+  assert.equal(session.walletId, record.id);
+  assert.equal(session.initializing, false);
 });
