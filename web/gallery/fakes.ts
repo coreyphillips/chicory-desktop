@@ -435,7 +435,7 @@ export function sessionOf(
   const wallet = snapshot?.wallet ?? walletOf();
   return {
     // Desktop wallets live in the local manager, so a session is always a
-    // host session, and there is no device to erase.
+    // host session. Erase removes every wallet in the profile through it.
     rememberedSession: {
       mode: 'host',
       network: wallet.network,
@@ -473,7 +473,7 @@ export function sessionOf(
     createDefaultWallet: done,
     switchNetwork: done,
     disconnect: done,
-    eraseDevice: undefined,
+    eraseDevice: done,
     acknowledgeBackup: idle,
     ...over,
   };

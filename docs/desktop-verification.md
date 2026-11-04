@@ -105,6 +105,21 @@ biometric approval, encrypted renderer drafts and portable full channel backups
 remain tracked work. Bundled Tor starts on demand and refuses direct onion
 fallback. Clearnet connections retain their normal routing.
 
+Settings > Funds and exits > Erase all wallets from this computer erases every
+wallet in the active Chicory profile. After a second confirmation, and the app
+lock's fresh authentication when the lock is on, the main process stops the
+wallet service and refuses to delete anything unless every engine exited
+cleanly. It then removes `storage-key.json` first, followed by `wallets/`
+(every network's seeds, databases, journals, activity metadata and service
+settings), `tor/` (Tor's cached state) and `updates/`. It also clears the
+window's stored state: saved selections, pending-backup flags, offline drafts
+and preferences. The app lock setting (`app-lock.json`) and the redacted
+`diagnostics.json` are kept. Symbolic links are removed as links and never
+followed, and nothing outside the profile is touched. An `erase-pending.json`
+marker is written before deletion and removed only after everything succeeds,
+so a failed or interrupted erase is retried, or finished at the next launch,
+before any key opens. Erase does not send or rescue funds.
+
 Encryption regression checks include wrong and missing keys, tampered files and
 pages, live WAL contents, crash recovery, cross-process file access, encrypted
 backups, real Beignet and guardian schemas, and refusal of plaintext database

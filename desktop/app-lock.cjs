@@ -254,6 +254,19 @@ class AppLock {
     if (since !== null && this.now() - since > this.graceMs) this.relock('grace');
   }
 
+  /**
+   * Spends the one-shot grant from a fresh prompt, for a recovery phrase, a
+   * backup or an erase. With the lock off there is nothing to spend.
+   */
+  takeGrant() {
+    if (!this.enabled) return true;
+    this.expire();
+    if (this.required()) return false;
+    const grant = this.grant;
+    this.grant = null;
+    return !!grant && grant.expires >= this.now() && grant.generation === this.generation && grant.concealed === this.concealed;
+  }
+
   /** Admits a renderer request for a wallet route, or refuses it while locked. */
   admit(pathname) {
     if (!WALLET_ROUTE.test(pathname)) return { ok: true, ticket: null };
@@ -262,12 +275,7 @@ class AppLock {
     if (this.required()) return { ok: false };
     // Concealment drops a phrase in flight whether or not the lock is on.
     const secret = isSecret(pathname);
-    if (secret && this.enabled) {
-      const grant = this.grant;
-      this.grant = null;
-      if (!grant || grant.expires < this.now() || grant.generation !== this.generation || grant.concealed !== this.concealed)
-        return { ok: false };
-    }
+    if (secret && !this.takeGrant()) return { ok: false };
     const signals = [this.controller.signal, ...(secret ? [this.concealController.signal] : [])];
     return { ok: true, ticket: { generation: this.generation, concealed: secret ? this.concealed : null,
       signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) } };

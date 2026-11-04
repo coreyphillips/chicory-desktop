@@ -391,3 +391,40 @@ test('desktop defaults use the mobile primary and preserve custom profiles', asy
   await saveNetworkPreferences(preferences);
   assert.equal((await loadNetworkPreferences()).profiles.mainnet.primaryUri, customPrimary);
 });
+
+test('erase is offered only by a desktop host that can erase, never in a plain browser', async () => {
+  const browser = await mount(new Host());
+  assert.equal(browser.session.eraseDevice, undefined);
+  await browser.unmount();
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const older = await mount(new Host());
+  assert.equal(older.session.eraseDevice, undefined, 'a host without the erase call shows no row');
+  await older.unmount();
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: { erase: async () => ({ ok: true }) } } });
+  const desktop = await mount(new Host());
+  assert.equal(typeof desktop.session.eraseDevice, 'function');
+});
+
+test('erasing draws the erase transit until the host answers, and a refusal is shown and retryable', async () => {
+  const answer = deferred<{ ok: boolean; code?: string; error?: string }>();
+  let calls = 0;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {
+    erase: () => { calls += 1; return answer.promise; },
+  } } });
+  const app = await mount(new Host());
+  let pending!: Promise<void>;
+  await act(async () => { pending = app.session.eraseDevice!(); });
+  assert.equal(app.session.erasing, true);
+  assert.equal(app.session.closing, true, 'closing and erasing together draw the erase transit');
+  const message = 'Erasing did not finish. Some wallet files could not be removed.';
+  await act(async () => {
+    answer.resolve({ ok: false, code: 'ERASE_INCOMPLETE', error: message });
+    await assert.rejects(pending, (error: Error & { code?: string }) => error.message === message && error.code === 'ERASE_INCOMPLETE');
+  });
+  assert.equal(app.session.erasing, false);
+  assert.equal(app.session.closing, false);
+  assert.equal(app.session.error, message, 'the session says it too, in case the transit replaced the panel');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: { erase: async () => { calls += 1; return { ok: true }; } } } });
+  await act(async () => { await app.session.eraseDevice!(); });
+  assert.equal(calls, 2);
+});

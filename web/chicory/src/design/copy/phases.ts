@@ -16,7 +16,7 @@ export const phase = {
   closing: 'Closing your wallet…',
   switching: (network: string | null) =>
     `Closing this wallet and opening ${network || 'the selected network'}…`,
-  erasing: 'Erasing your wallet from this computer…',
+  erasing: 'Erasing your wallets from this computer…',
   saved: 'This wallet is still on this computer. It could not be opened just now.',
   openDevice: 'Open wallet',
   /** Said for a wallet whose name has not been read yet. */

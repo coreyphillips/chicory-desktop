@@ -31,9 +31,8 @@ Object.assign(globalThis, { Buffer });
 /** How long a walked state holds once its steps have brought it about. */
 const DWELL_MS = 1200;
 
-// Desktop wallets are erased by the local manager, not from this computer's
-// Settings, so the device erase confirmation has no desktop counterpart.
-const ABSENT = new Set(['settings, confirming an erase']);
+// States from the shared scene list that this desktop build does not draw.
+const ABSENT = new Set<string>();
 
 export const SHOTS = [...GLYPHS, ...SCENES, ...PAYMENTS].filter(shot => !ABSENT.has(shot.name));
 

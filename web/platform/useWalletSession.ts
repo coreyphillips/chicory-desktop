@@ -87,6 +87,7 @@ export function useWalletSession(
   const [selecting, setSelecting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [erasing, setErasing] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [switchTarget, setSwitchTarget] = useState<Network | null>(null);
   const [networkEditor, setNetworkEditor] = useState(false);
@@ -391,6 +392,33 @@ export function useWalletSession(
     }
     setRememberedSession(old => old?.walletId === id ? { ...old, backupPending: false } : old);
   }, []);
+  /**
+   * Erases every wallet in this profile through the desktop host, which
+   * stops the engines, deletes the profile's wallet data and stored state,
+   * and reloads into first-run setup. A refusal or partial erase is thrown
+   * for the panel to show, and the erase can be retried.
+   */
+  const eraseDevice = useCallback(async () => {
+    const erase = typeof window !== 'undefined' ? window.chicoryDesktop?.erase : undefined;
+    if (!erase) throw new WalletError('Erasing is not available here.', 'ERASE_UNAVAILABLE');
+    // Overtakes any read, create or switch, so none of them writes after this.
+    const token = begin(true);
+    // Closing and erasing together draw the erase transit over every scene.
+    setErasing(true); setClosing(true); setError('');
+    try {
+      const result = await erase();
+      if (!result?.ok)
+        throw new WalletError(result?.error || 'Could not erase the wallets.', result?.code || 'ERASE_FAILED');
+      // The host reloads this page into first-run setup once it is done.
+    } catch (cause) {
+      // The transit may have replaced the panel that asked, so the session says it too.
+      if (mounted.current) setError(errorMessage(cause));
+      throw cause;
+    } finally {
+      if (mounted.current) setErasing(false);
+      finish(token);
+    }
+  }, [begin, finish]);
   const retrySetup = useCallback(async () => {
     const adapter = current.current;
     if (!adapter || !selectedId.current) return;
@@ -421,11 +449,12 @@ export function useWalletSession(
 
   return {
     client, wallets, walletId, snapshot, activeProfile, rememberedSession, deviceHint,
-    initializing, connecting, selecting, refreshing, closing, erasing: false,
+    initializing, connecting, selecting, refreshing, closing, erasing,
     switching, switchTarget, switchError, networkEditor, deviceVisible, error,
     setError, setSwitchError, setNetworkEditor, setDeviceVisible, refresh, manualRefresh,
     retrySetup, selectWallet, openDevice, openWallet, createDefaultWallet,
     switchNetwork, disconnect, acknowledgeBackup,
-    eraseDevice: undefined,
+    eraseDevice: !demoMode.current && typeof window !== 'undefined' && window.chicoryDesktop?.erase
+      ? eraseDevice : undefined,
   };
 }
