@@ -103,6 +103,15 @@ SQLCipher-compatible wallet/guardian databases and encrypted engine backups.
 Fresh profiles are supported without legacy migration code. Biometric approval
 on real hardware remains tracked work.
 
+A new wallet on another network can reuse the open wallet's recovery phrase.
+The page sends only a reference to that wallet. The wallet service reads the
+phrase from its encrypted storage, checks that the reference still matches the
+wallet and its network, and refuses the same seed twice on one network. It
+records the related wallets as one family (`familyId`). A missing, mismatched
+or unreadable source stops creation instead of making a new phrase in its
+place. Make a separate wallet with a new phrase starts a family of its own.
+Each related wallet keeps its own channel databases, activity and balances.
+
 Private interface state is kept by the wallet service in its encrypted storage
 (`wallets/secure-store/`), never in browser storage: offline request drafts,
 each wallet's cached view, auto-pay policy and network profiles. The app lock

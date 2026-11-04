@@ -1,5 +1,10 @@
 import { WalletClient, WalletError } from '@beignet/wallet-core';
-import type { ActivityStore, ElectrumServer } from '@beignet/wallet-core';
+import type { ActivityStore, CreatedWallet, CreateWalletInput, ElectrumServer, Network } from '@beignet/wallet-core';
+
+/** The wallet whose recovery phrase a new wallet on another network reuses. */
+export interface SeedReference { walletId: string; network: Network; nodeId?: string }
+/** One client's create request, for the transport to send its seed reference. */
+interface PendingCreate { seedFrom?: SeedReference }
 
 // These satisfy wallet-core's remote-host connection shape. Neither value is a
 // credential or a network destination: the injected transport consumes both.
@@ -16,6 +21,7 @@ export interface HostWalletClientOptions {
 /** Keep wallet-core's request handling over the authenticated local session. */
 export function createSameOriginWalletFetch(
   request: typeof globalThis.fetch = globalThis.fetch,
+  pending: PendingCreate = {},
 ): typeof globalThis.fetch {
   return async (input, init = {}) => {
     // WalletClient always supplies its synthetic origin plus an API path.
@@ -50,6 +56,10 @@ export function createSameOriginWalletFetch(
       const inputBody = JSON.parse(body);
       if (Object.prototype.hasOwnProperty.call(inputBody, 'mnemonic')) {
         path = '/api/wallets/import';
+      } else if (pending.seedFrom) {
+        // The service reads the named wallet's phrase itself. Only the
+        // reference travels, never the phrase.
+        body = JSON.stringify({ ...inputBody, seedFrom: pending.seedFrom });
       }
     }
 
@@ -99,7 +109,10 @@ export class UmbrelWalletClient extends WalletClient {
     readOnly?: boolean,
   ) => Promise<unknown>;
 
+  private readonly pendingCreate: PendingCreate;
+
   constructor(options: HostWalletClientOptions = {}) {
+    const pending: PendingCreate = {};
     super(
       {
         url: TRANSPORT_ORIGIN,
@@ -107,11 +120,28 @@ export class UmbrelWalletClient extends WalletClient {
         ...(options.walletId ? { walletId: options.walletId } : {}),
       },
       {
-        fetch: createSameOriginWalletFetch(options.fetch),
+        fetch: createSameOriginWalletFetch(options.fetch, pending),
         now: options.now,
         store: options.store,
       },
     );
+    this.pendingCreate = pending;
+  }
+
+  /**
+   * With `seedFrom`, the new wallet reuses that wallet's recovery phrase
+   * inside the local service, for a wallet on another network. The reference
+   * applies to this one request only.
+   */
+  override async createWallet(input?: CreateWalletInput & { seedFrom?: SeedReference }): Promise<CreatedWallet> {
+    const { seedFrom, ...rest } = input ?? {};
+    if (!seedFrom) return super.createWallet(rest);
+    if (rest.mnemonic !== undefined)
+      throw new WalletError('A restored phrase and a reused phrase cannot be combined.', 'INVALID_PARAMS');
+    if (this.pendingCreate.seedFrom) throw new WalletError('Wait for the current wallet to be created.', 'ACTION_IN_PROGRESS');
+    this.pendingCreate.seedFrom = { walletId: seedFrom.walletId, network: seedFrom.network, ...(seedFrom.nodeId ? { nodeId: seedFrom.nodeId } : {}) };
+    try { return await super.createWallet(rest); }
+    finally { this.pendingCreate.seedFrom = undefined; }
   }
 
   async stopWallet(): Promise<void> {
