@@ -62,7 +62,8 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | payments | Pending and confirmed on-chain receive channelized into the home channel, Lightning receive (over a just-in-time channel from the primary, mined until it settles, when the wallet has no inbound capacity), Lightning send through the UI review and hold (a short press must not submit, the deliberate hold must commit), on-chain send at two fee rates with the broadcast fee within review, one Activity row per payment |
 | restart | Full app quit with every child process exited, reopen, same wallet and completed rows |
 | crash | Freeze the peer so the payment cannot settle, then kill the whole process tree while the engine holds it as pending and the send has not returned. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the same invoice resubmitted through the manager refused or coming to nothing with the payee credited exactly once, the held receive request still saved and paid by the peer. Skipped on Windows, which has no SIGSTOP to freeze the peer |
-| offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary then enables settlement: offline request, full app quit, peer pays, reopen twice, one credit and one row |
+| persistence | Five small payments are sent to the wallet while the whole app is killed, so the engine's encrypted database and the manager's vault files are being written when it dies. On reopen the wallet opens intact, every payment settles one way or the other, and each payment the payer saw complete is credited exactly once |
+| offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary enables settlement. It also opens a channel to the wallet with nothing on the wallet's side, because the engine carries an offline receive only on such a channel unless concurrent receive is negotiated. Then: an offline request, saved with its offline flag, a full app quit, the peer pays, two reopenings, one credit and one row |
 | drain | Send-max quote. Where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
 | transport | Records whether the bundled engine advertises Iroh |
@@ -92,10 +93,12 @@ passed:
   diagnostics and relocks the app lock on suspend, but the harness cannot put
   the host to sleep, and a simulated event would not test the engine or Tor.
   Check this manually per platform.
-- Two-leg drain. The manager's `/api/config` does not advertise
-  `drainAvailable`, so the stage records it as unsupported.
-- Crash during encrypted persistence. The crash stage kills during payment
-  submission only.
+- Two-leg drain. The bundled engine's daemon has no `/drain` routes and the
+  manager implements none, so `/api/config` never advertises `drainAvailable`
+  and the stage records it as unsupported. Send max does work. Tracked in #29.
+- A crash at a chosen point inside one encrypted write. The persistence stage
+  kills the app while payments are being written, which is not the same as
+  stopping it between two specific writes.
 - Windows, Linux and Intel macOS native runs. The harness's process handling
   supports each, but only the Linux workflow exists, and the crash stage is
   skipped on Windows. Record each manual run's report with its package digests.

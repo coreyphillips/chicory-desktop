@@ -246,7 +246,7 @@ async function startPeer() {
   // The wallet client receives only into Lightning-first wallets, so a plain
   // wallet takes its deposit address from its own daemon.
   const address = async walletId => (await call(`/wallets/${encodeURIComponent(walletId)}/api/address/new`, {})).address;
-  return { child, api, address, client: walletId => createHostWalletClient({ walletId, fetch: fetchPeer }) };
+  return { child, api, call, address, client: walletId => createHostWalletClient({ walletId, fetch: fetchPeer }) };
 }
 
 const healthy = (api, id, lightning = true) => until(`wallet ${id} ready`, () => api(`/wallets/${id}`),
@@ -475,12 +475,18 @@ try {
       record.pass('offline receive refused by a primary without settlement, no online downgrade', { refusal: refusal.code ?? refusal.message });
       await peer.api(`/wallets/${primary.id}`, { ffor: { settle: { enabled: true } } }, 'PATCH');
       await healthy(peer.api, primary.id, false);
-      // An offline receive needs remaining inbound capacity on a channel with
-      // the primary. Paying out makes that room on the home channel.
-      const room = await payer.receive(await payer.quoteReceive({ amountSats: 30000, description: 'qualify inbound room' }));
-      checkSent('payment that makes inbound room', await wallet().send(await wallet().prepareSend({ request: room.bolt11 })));
-      await until('inbound room payment settled', () => payer.getReceiveStatus(room), status => status.phase === 'completed');
-      const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: OFFLINE_SATS, mode: 'offline', description: 'qualify offline' }));
+      // The engine carries an offline receive on a channel where this wallet
+      // holds nothing and the primary holds the amount plus a 50,000 sat
+      // buffer, unless concurrent receive is negotiated. The primary opens one.
+      const id = state.walletId;
+      const listChannels = async () => (await (await subject.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;
+      const nodeId = (await subject.api(`/wallets/${id}`)).nodeId;
+      await until('primary opens a channel to the wallet', () => peer.call(`/wallets/${primary.id}/api/channel/open`, { pubkey: nodeId, amountSats: 150000 }));
+      await until('the primary-opened channel is usable', mining(listChannels), list => Array.isArray(list) &&
+        list.some(channel => channel.state === 'NORMAL' && channel.htlcUsable && channel.localBalanceSats === 0 && channel.remoteBalanceSats >= OFFLINE_SATS + 50000), 240000);
+      const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: OFFLINE_SATS, mode: 'offline', description: 'qualify offline' }))
+        .catch(async error => { throw new Error(`${error.message}; channels ${JSON.stringify((await listChannels()).map(channel => ({ state: channel.state,
+          usable: channel.htlcUsable, local: channel.localBalanceSats, remote: channel.remoteBalanceSats })))}`); });
       const request = await wallet().receive(quote);
       assert.equal(request.offlineReceive, true, 'Offline request is not downgraded');
       const balance = (await wallet().snapshot()).balance.totalSats;
