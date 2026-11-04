@@ -119,7 +119,20 @@ class DesktopApp {
     return packet.result;
   }
 
-  client(walletId) { return createHostWalletClient({ ...(walletId ? { walletId } : {}), fetch: this.fetch }); }
+  // Quotes and reviews live in the client that made them, so each app session
+  // keeps one client per wallet. A reopened app is a new DesktopApp.
+  clients = new Map();
+  client(walletId) {
+    if (!this.clients.has(walletId)) this.clients.set(walletId, createHostWalletClient({ ...(walletId ? { walletId } : {}), fetch: this.fetch }));
+    return this.clients.get(walletId);
+  }
+
+  /** The renderer selects a wallet only when it connects, so a wallet created outside it needs a reload. */
+  async activate(walletId) {
+    await this.page.reload();
+    await expect(this.page.locator('#browser-wallet-selector')).toHaveValue(walletId, { timeout: 60000 });
+    await expect(this.page.locator('[data-scene="send"]')).toBeEnabled({ timeout: 60000 });
+  }
 
   /** A complete application quit, waiting until every child process has exited. */
   async quit() {
@@ -167,14 +180,18 @@ async function startPeer() {
   } });
   const url = `http://127.0.0.1:${peerPort}`;
   const fetchPeer = (input, init) => fetch(new URL(String(input), url), init);
-  const api = async (route, body) => {
-    const response = await fetchPeer(`/api${route}`, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const call = async (route, body, method = 'POST') => {
+    const response = await fetchPeer(route, body === undefined ? {} : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const packet = await response.json();
     if (!response.ok || packet.ok === false) throw new Error(packet.error?.message ?? `HTTP ${response.status}`);
     return packet.result;
   };
+  const api = (route, body, method) => call(`/api${route}`, body, method);
   await until('peer manager', () => api('/config'));
-  return { child, api, client: walletId => createHostWalletClient({ walletId, fetch: fetchPeer }) };
+  // The wallet client receives only into Lightning-first wallets, so a plain
+  // wallet takes its deposit address from its own daemon.
+  const address = async walletId => (await call(`/wallets/${encodeURIComponent(walletId)}/api/address/new`, {})).address;
+  return { child, api, address, client: walletId => createHostWalletClient({ walletId, fetch: fetchPeer }) };
 }
 
 const healthy = (api, id, lightning = true) => until(`wallet ${id} ready`, () => api(`/wallets/${id}`),
@@ -224,7 +241,7 @@ try {
   const run = Date.now().toString(36);
   const primary = (await peer.api('/wallets', { name: `qualify primary ${run}`, network: 'regtest', networkMode: 'clearnet', publicHost: '127.0.0.1', announce: true })).record;
   await healthy(peer.api, primary.id, false);
-  gate.fund((await peer.client(primary.id).receive(await peer.client(primary.id).quoteReceive({ amountSats: 5_000_000 }))).address, 5_000_000);
+  gate.fund(await peer.address(primary.id), 5_000_000);
   gate.mine(1);
   const primaryRecord = await until('primary funded', () => peer.api(`/wallets/${primary.id}`), value => value.healthy && value.nodeId && value.listenPort);
   const primaryUri = `${primaryRecord.nodeId}@127.0.0.1:${primaryRecord.listenPort}`;
@@ -232,11 +249,15 @@ try {
   await healthy(peer.api, payerId);
   const payer = peer.client(payerId);
   gate.mine(1);
+  // The primary opens the payer's channel with nothing on the payer's side.
+  await fundWallet(payer, 200000);
+  await until('payer spendable', () => payer.snapshot(), snap => snap.balance.availableSats >= 150000);
 
   // Subject: created through the app's own wallet client, as onboarding does.
   const created = await subject.client().createWallet({ name: `Qualify ${run}`, network: 'regtest', primaryUri, electrum });
   assertRegtestWallets(await subject.api('/wallets'));
   await healthy(subject.api.bind(subject), created.id);
+  await subject.activate(created.id);
   wallet = () => subject.client(created.id);
   state = { walletId: created.id, primaryUri, payerId };
 
@@ -290,20 +311,25 @@ try {
     const held = await wallet().receive(await wallet().quoteReceive({ amountSats: 2100, description: 'qualify held request' }));
     const invoice = await payer.receive(await payer.quoteReceive({ amountSats: 3000, description: 'qualify crash send' }));
     const review = await wallet().prepareSend({ request: invoice.bolt11 });
-    // Do not await. The process tree dies while the submission is in flight.
-    void wallet().send(review).catch(() => {});
-    await wait(Number(process.env.CHICORY_QUALIFY_CRASH_DELAY_MS ?? '150'));
+    const hash = invoice.paymentHash.toLowerCase();
+    // Not awaited. The process tree dies once the engine has recorded the payment.
+    let refused;
+    void wallet().send(review).catch(error => { refused = error; });
+    await until('engine records the submission', async () => {
+      if (refused) throw refused;
+      const packet = await (await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api/payments`)).json();
+      return packet.result.some(item => item.direction === 'OUTGOING' && item.paymentHash?.toLowerCase() === hash);
+    }, Boolean, 30000);
     await subject.kill();
     subject = await new DesktopApp(subject.profile).open();
     const wallets = await subject.api('/wallets');
     assert.deepEqual(wallets.map(item => item.id), [state.walletId], 'No silent replacement wallet');
     await healthy(subject.api.bind(subject), state.walletId);
-    const payee = await until('crash outcome resolved', () => payer.getReceiveStatus(invoice), () => true, 30000);
     const rows = await until('outcome reconciled', async () => onePer((await wallet().snapshot()).activity, 'paymentHash', invoice.paymentHash),
-      found => found.length === 0 || found.every(item => item.status !== 'pending') || payee.phase !== 'completed', 120000);
-    assert.ok(rows.length <= 1, 'At most one outgoing record');
-    if (payee.phase === 'completed') assert.equal(rows[0]?.status, 'completed', 'A credited payment is recorded once');
-    else assert.ok(rows.every(item => item.status !== 'completed'), 'No premature completion');
+      found => found.length > 0 && found.every(item => item.status !== 'pending'), 120000);
+    assert.equal(rows.length, 1, 'One outgoing record for the submitted payment');
+    const credited = rows[0].status === 'completed';
+    const payee = await until('payee agrees with the recorded outcome', () => payer.getReceiveStatus(invoice), status => (status.phase === 'completed') === credited, 30000);
     await assert.rejects(() => wallet().send(review), 'A reviewed payment cannot be resent after a crash');
     const status = await wallet().getReceiveStatus(held);
     assert.equal(status.phase, 'waiting', 'Held request survives the crash');
@@ -311,14 +337,19 @@ try {
   }
 
   if (stages.has('offline')) {
+    // The primary does not settle offline receives yet, so this must refuse whatever the engine supports.
+    await assert.rejects(() => wallet().quoteReceive({ amountSats: 4000, mode: 'offline' }), 'Unsupported offline receive refuses');
+    const snap = await wallet().snapshot();
+    assert.ok(!snap.offlineReservations?.length, 'Refusal leaves no reservation');
     const offline = (await subject.api('/config')).offlineReceiveAvailable === true;
     if (!offline) {
-      await assert.rejects(() => wallet().quoteReceive({ amountSats: 4000, mode: 'offline' }), 'Unsupported offline receive refuses');
-      const snap = await wallet().snapshot();
-      assert.ok(!snap.offlineReservations?.length, 'Refusal leaves no reservation');
-      record.unsupported('offline receive', 'Provider or engine does not advertise offline receive; request refused without online downgrade');
+      record.unsupported('offline receive', 'Engine does not advertise offline receive; request refused without online downgrade');
     } else {
-      const request = await wallet().receive(await wallet().quoteReceive({ amountSats: 4000, mode: 'offline', description: 'qualify offline' }));
+      record.pass('offline receive refused by a primary without settlement, no online downgrade');
+      await peer.api(`/wallets/${primary.id}`, { ffor: { settle: { enabled: true } } }, 'PATCH');
+      await healthy(peer.api, primary.id, false);
+      const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: 4000, mode: 'offline', description: 'qualify offline' }));
+      const request = await wallet().receive(quote);
       assert.equal(request.offlineReceive, true, 'Offline request is not downgraded');
       await subject.quit();
       const paid = await payer.send(await payer.prepareSend({ request: request.bolt11 }));
@@ -339,17 +370,21 @@ try {
     const destination = rpc('getnewaddress');
     const max = await wallet().quoteMax({ request: destination });
     record.pass('send max quoted', max);
-    const review = await wallet().prepareDrain({ address: destination });
-    const late = await fundWallet(wallet(), 7000, false);
-    const result = await wallet().send(review);
-    const drain = await until('two-leg drain completes', async () => { gate.mine(1); return wallet().getDrain(result.drain?.requestId ?? review.drain?.requestId); },
-      progress => progress.phase === 'completed', 300000);
-    const after = await until('late deposit kept', () => wallet().snapshot(), snap => snap.balance.totalSats >= 7000);
-    assert.ok(after.balance.totalSats < 7000 + 1000, 'Only the later deposit remains');
-    assert.ok(drain.txids?.length >= 2, 'Both drain legs have confirmed transaction references');
-    for (const txid of drain.txids) assert.ok(rpc('getrawtransaction', txid, true).confirmations > 0, `Drain leg ${txid} confirmed`);
-    state.drain = drain;
-    record.pass('two-leg drain completed, later deposit excluded', { drain, lateDeposit: late.txid, remainingSats: after.balance.totalSats });
+    if ((await subject.api('/config')).drainAvailable !== true) {
+      record.unsupported('two-leg drain', 'The manager does not advertise drainAvailable, so the wallet refuses to prepare a drain');
+    } else {
+      const review = await wallet().prepareDrain({ address: destination });
+      const late = await fundWallet(wallet(), 7000, false);
+      const result = await wallet().send(review);
+      const drain = await until('two-leg drain completes', async () => { gate.mine(1); return wallet().getDrain(result.drain?.requestId ?? review.drain?.requestId); },
+        progress => progress.phase === 'completed', 300000);
+      const after = await until('late deposit kept', () => wallet().snapshot(), snap => snap.balance.totalSats >= 7000);
+      assert.ok(after.balance.totalSats < 7000 + 1000, 'Only the later deposit remains');
+      assert.ok(drain.txids?.length >= 2, 'Both drain legs have confirmed transaction references');
+      for (const txid of drain.txids) assert.ok(rpc('getrawtransaction', txid, true).confirmations > 0, `Drain leg ${txid} confirmed`);
+      state.drain = drain;
+      record.pass('two-leg drain completed, later deposit excluded', { drain, lateDeposit: late.txid, remainingSats: after.balance.totalSats });
+    }
   }
 
   if (stages.has('recovery')) {

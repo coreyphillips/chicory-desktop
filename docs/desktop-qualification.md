@@ -50,9 +50,9 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | --- | --- |
 | payments | Pending and confirmed on-chain receive, direct funding into the home channel, Lightning receive, Lightning send through the UI review and hold (a short press must not submit), on-chain send at two fee rates with the broadcast fee within review, one Activity row per payment |
 | restart | Full app quit with every child process exited, reopen, same wallet and completed rows |
-| crash | Kill the whole process tree during a Lightning submission. On reopen: one wallet with the same ID, at most one outgoing row, no completion unless the payee was credited, the consumed review refused, the held receive request still waiting |
-| offline | Offline request, full app quit, peer pays, reopen twice, one credit and one row. Where offline receive is not advertised, the request must be refused rather than issued as an online request |
-| drain | Send-max quote, drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
+| crash | Kill the whole process tree once the engine has recorded a Lightning payment. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the consumed review refused, the held receive request still waiting |
+| offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary then enables settlement: offline request, full app quit, peer pays, reopen twice, one credit and one row |
+| drain | Send-max quote. Where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
 | transport | Records whether the bundled engine advertises Iroh |
 
@@ -74,6 +74,8 @@ passed:
   evidence.
 - Suspend and resume. The main process does not observe power events, so a
   simulated event would test nothing. Check this manually per platform.
+- Two-leg drain. The manager's `/api/config` does not advertise
+  `drainAvailable`, so the stage records it as unsupported.
 - Crash during encrypted persistence. The crash stage kills during payment
   submission only.
 - Windows, Linux and Intel macOS native runs. The harness's process handling
