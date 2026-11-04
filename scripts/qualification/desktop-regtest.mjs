@@ -204,6 +204,10 @@ async function fundWallet(client, sats, confirm = true) {
   return { address: request.address, txid };
 }
 
+// Channelizing starts once a deposit confirms, but its funding locks only at
+// the engine's depth (three blocks by default), so blocks must keep coming.
+const mining = read => () => { gate.mine(1); return read(); };
+
 function mempoolPayment(address, sats) {
   for (const txid of rpc('getrawmempool')) {
     const tx = rpc('getrawtransaction', txid, true);
@@ -251,7 +255,7 @@ try {
   gate.mine(1);
   // The primary opens the payer's channel with nothing on the payer's side.
   await fundWallet(payer, 200000);
-  await until('payer spendable', () => payer.snapshot(), snap => snap.balance.availableSats >= 150000);
+  await until('payer spendable', mining(() => payer.snapshot()), snap => snap.balance.availableSats >= 150000);
 
   // Subject: created through the app's own wallet client, as onboarding does.
   const created = await subject.client().createWallet({ name: `Qualify ${run}`, network: 'regtest', primaryUri, electrum });
@@ -265,8 +269,9 @@ try {
     const deposit = await fundWallet(wallet(), 400000, false);
     await until('pending on-chain receive', () => wallet().snapshot(), snap => snap.activity.some(item => item.txid === deposit.txid && item.status === 'pending'));
     gate.mine(1);
-    const funded = await until('direct funding channelized', () => wallet().snapshot(), snap => snap.balance.availableSats >= 350000);
-    record.pass('on-chain receive and direct funding into the home channel', { txid: deposit.txid, availableSats: funded.balance.availableSats });
+    const funded = await until('deposit channelized', mining(() => wallet().snapshot()), snap => snap.balance.availableSats >= 350000);
+    record.pass('on-chain receive channelized into the home channel', { txid: deposit.txid, availableSats: funded.balance.availableSats });
+    record.skip('direct funding', 'No payer here holds a confirmed coin outside its channel, so no send uses the request\'s funding envelope.');
 
     const incoming = await wallet().receive(await wallet().quoteReceive({ amountSats: 15000, description: 'qualify incoming' }));
     await payer.send(await payer.prepareSend({ request: incoming.bolt11 }));
@@ -331,8 +336,11 @@ try {
     const credited = rows[0].status === 'completed';
     const payee = await until('payee agrees with the recorded outcome', () => payer.getReceiveStatus(invoice), status => (status.phase === 'completed') === credited, 30000);
     await assert.rejects(() => wallet().send(review), 'A reviewed payment cannot be resent after a crash');
-    const status = await wallet().getReceiveStatus(held);
-    assert.equal(status.phase, 'waiting', 'Held request survives the crash');
+    // getReceiveStatus reports waiting even for a request the wallet no longer has.
+    const saved = await (await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api/receive/requests`)).json();
+    assert.ok(saved.result.requests.some(item => item.id === held.id && item.bolt11 === held.bolt11), 'Held request is still saved after the crash');
+    await payer.send(await payer.prepareSend({ request: held.bolt11 }));
+    await until('held request paid after the crash', () => wallet().getReceiveStatus(held), status => status.phase === 'completed');
     record.pass('crash during submission leaves one outcome and the held request', { payee: payee.phase, rows: rows.map(item => item.status) });
   }
 
@@ -395,7 +403,8 @@ try {
     const restored = await new DesktopApp(await profile('restore')).open();
     const imported = await restored.client().createWallet({ name: 'Qualify restore', network: 'regtest', primaryUri: state.primaryUri, electrum, mnemonic: phrase });
     await healthy(restored.api.bind(restored), imported.id, false);
-    const snap = await until('restored on-chain balance', () => restored.client(imported.id).snapshot(), value => value.balance.totalSats > 0 && value.balance.totalSats >= before.balance.totalSats - before.balance.availableSats);
+    const onchain = before.balance.pending.unconfirmedSats + before.balance.pending.confirmedSats;
+    const snap = await until('restored on-chain balance', () => restored.client(imported.id).snapshot(), value => value.balance.totalSats > 0 && value.balance.totalSats >= onchain);
     record.pass('recovery phrase import in a fresh profile restores on-chain funds', { totalSats: snap.balance.totalSats, previousTotalSats: before.balance.totalSats });
     record.unsupported('Lightning channel recovery from seed only', 'A seed restore recovers on-chain funds. Channel state needs the engine Recovery Protocol or an encrypted backup.', { recoveryStatus });
     subject = restored;

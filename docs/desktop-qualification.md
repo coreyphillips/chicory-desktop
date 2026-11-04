@@ -48,9 +48,9 @@ against the Linux x64 package on manual dispatch and uploads the report.
 
 | Stage | Checks |
 | --- | --- |
-| payments | Pending and confirmed on-chain receive, direct funding into the home channel, Lightning receive, Lightning send through the UI review and hold (a short press must not submit), on-chain send at two fee rates with the broadcast fee within review, one Activity row per payment |
+| payments | Pending and confirmed on-chain receive channelized into the home channel, Lightning receive, Lightning send through the UI review and hold (a short press must not submit), on-chain send at two fee rates with the broadcast fee within review, one Activity row per payment |
 | restart | Full app quit with every child process exited, reopen, same wallet and completed rows |
-| crash | Kill the whole process tree once the engine has recorded a Lightning payment. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the consumed review refused, the held receive request still waiting |
+| crash | Kill the whole process tree once the engine has recorded a Lightning payment. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the consumed review refused, the held receive request still saved and paid by the peer |
 | offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary then enables settlement: offline request, full app quit, peer pays, reopen twice, one credit and one row |
 | drain | Send-max quote. Where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
@@ -72,6 +72,9 @@ passed:
   The manager can enable Iroh on an engine that advertises it, but the engine
   does not report its active path, so the harness cannot record transport
   evidence.
+- Direct funding. No payer in the harness holds a confirmed coin outside its
+  channel, so no send uses a request's funding envelope. The payments stage
+  records it as skipped.
 - Suspend and resume. The main process does not observe power events, so a
   simulated event would test nothing. Check this manually per platform.
 - Two-leg drain. The manager's `/api/config` does not advertise
