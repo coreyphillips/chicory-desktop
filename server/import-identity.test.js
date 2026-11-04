@@ -24,6 +24,8 @@ function box(existing = []) {
   manager.registry.load();
   manager._refuseWrongChain = async () => {};
   manager.startWallet = async () => {};
+  // Host port probing has its own tests; these are about seed identity.
+  manager._portsFree = async () => true;
   for (const rec of existing) {
     const { mnemonic, ...record } = rec;
     manager.registry.upsert({ id: ID, port: 3101, name: 'Existing', running: false, network: 'regtest', ...record });

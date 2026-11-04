@@ -46,6 +46,8 @@ function harness() {
 	m.token = () => 't';
 	m._daemonEnv = () => ({});
 	m._clearStaleInstanceLock = () => {};
+	// Host port probing has its own tests; these are about stop ordering.
+	m._busyPort = async () => null;
 	m._startEvents = () => {};
 	m._stopEvents = () => {};
 	m._stopLfbwWatch = () => {};

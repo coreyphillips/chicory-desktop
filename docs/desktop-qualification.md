@@ -48,8 +48,9 @@ Linux the app refuses plaintext key storage, so run it with an unlocked keyring
 and `--password-store=gnome-libsecret`, as the workflow does.
 
 The separate regtest peer is a headless manager on port 3920 using the same
-bundled runtime. A second desktop app cannot be the peer: managers allocate
-wallet ports from a fixed base, so two instances on one host collide.
+bundled runtime, with its own wallet port range. Managers skip wallet ports
+another program already holds, and a wallet whose port another engine answers
+stops with `PORT_IN_USE`, but a headless peer keeps the run to one app window.
 
 The `Regtest qualification` workflow runs `preflight,payments,restart,crash`
 against the Linux x64 package on manual dispatch and uploads the report.
