@@ -306,6 +306,8 @@ export const settings = {
     relayToken: 'Relay token',
     save: 'Save network settings',
     use: (network: string) => `Use ${network}`,
+    /** Beside the switch while it waits for a server, in the same words the switch refuses with. */
+    needsServer: (network: string) => `Add an Electrum server for ${network}.`,
     loading: 'Loading saved network settings…',
     failed: 'Could not change networks.',
   },

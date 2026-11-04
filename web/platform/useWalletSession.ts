@@ -354,7 +354,10 @@ export function useWalletSession(
   }, [selectWallet]);
 
   const switchNetwork = useCallback(async (next: NetworkProfile) => {
-    validateProfile(next, true);
+    // A network with no server is refused before anything stops, and the
+    // reason is kept where Settings shows it, not only thrown at the button.
+    try { validateProfile(next, true); }
+    catch (cause) { if (mounted.current) setSwitchError(errorMessage(cause)); throw cause; }
     const adapter = current.current;
     if (!adapter) throw new WalletError('Open your wallet first.', 'NO_WALLET');
     const token = begin();

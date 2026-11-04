@@ -278,6 +278,22 @@ test('a delayed network switch cannot change profile or selection after lock', a
   assert.equal(host.events.includes(`start:${testRecord.id}`), false);
 });
 
+test('a switch to a network with no server says why and leaves the wallet as it was', async () => {
+  const host = new Host([record, testRecord]);
+  const app = await mount(host);
+  await act(async () => {
+    await assert.rejects(app.session.switchNetwork({
+      ...app.session.activeProfile, network: 'regtest',
+      electrum: { host: ' ', port: 60401, tls: false },
+    }), /Add an Electrum server for regtest/);
+  });
+  assert.match(app.session.switchError, /Add an Electrum server for regtest/);
+  assert.equal(app.session.activeProfile.network, 'mainnet');
+  assert.equal(app.session.walletId, record.id);
+  assert.equal(app.session.switching, false);
+  assert.equal(host.events.some(item => item.startsWith('stop:')), false, 'nothing was stopped for a switch that cannot start');
+});
+
 test('lock overtakes creation and stops a known late-created wallet without selecting it', async () => {
   const records = [record];
   const host = new Host(records);

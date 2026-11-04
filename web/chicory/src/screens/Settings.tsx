@@ -222,6 +222,8 @@ function NetworkPanel({
   // the editor.
   const [target, setTarget] = useState<Network>(current);
   const [switching, setSwitching] = useState(false);
+  // The network the editor opens on, when a switch sent it there.
+  const [shown, setShown] = useState<Network | undefined>(undefined);
   useEffect(() => {
     setTarget(current);
   }, [current]);
@@ -230,7 +232,17 @@ function NetworkPanel({
     setSwitching(true);
     try {
       const preferences = await loadNetworkPreferences();
-      await onNetwork(preferences.profiles[network]);
+      const profile = preferences.profiles[network];
+      // A network nobody has given a server (testnet and regtest ship
+      // without one) cannot be switched to. Its servers open instead, where
+      // the server goes and the editor says what is missing.
+      if (!profile.electrum.host.trim()) {
+        setTarget(current);
+        setShown(network);
+        setEditing(true);
+        return;
+      }
+      await onNetwork(profile);
     } catch {
       // The reason is held by the session, which outlives this screen: a
       // switch replaces it with a full-page wait, so anything set here would
@@ -272,12 +284,16 @@ function NetworkPanel({
         glyph="cog"
         label={words.wallet.editServers}
         expanded={editing}
-        onPress={() => setEditing(!editing)}
+        onPress={() => {
+          setShown(undefined);
+          setEditing(!editing);
+        }}
       />
       {editing ? (
         <Reanimated.View entering={riseIn()} exiting={dropOut(8)}>
           <NetworkSettings
             initialNetwork={current}
+            showNetwork={shown}
             busy={busy}
             defaultPrimary={false}
             onApply={onNetwork}

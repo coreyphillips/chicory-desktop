@@ -161,6 +161,17 @@ try {
   await nativeMenu('Settings');
   await expect(page.getByText('This computer', { exact: true })).toBeVisible();
   await screenshot('desktop-settings');
+  // A network that ships without a server opens its servers and says what is missing.
+  await page.getByRole('button', { name: 'Change network or Bitcoin server', exact: true }).click();
+  await page.getByRole('radio', { name: 'regtest', exact: true }).click();
+  await page.getByRole('button', { name: 'Switch to regtest', exact: true }).click();
+  await expect(page.getByText('Add an Electrum server for regtest.', { exact: true })).toBeVisible();
+  const useRegtest = page.getByRole('button', { name: 'Use regtest', exact: true });
+  await expect(useRegtest).toBeDisabled();
+  await page.getByRole('textbox', { name: 'Default Electrum server', exact: true }).fill('127.0.0.1');
+  await expect(useRegtest).toBeEnabled();
+  await expect(page.getByText('Add an Electrum server for regtest.', { exact: true })).toHaveCount(0);
+  checks.push('Switching to regtest without a server opens its servers and says what is missing');
   await nativeMenu('Activity');
   checks.push('Native Send, Receive, Settings, Activity and Overview menus');
 
