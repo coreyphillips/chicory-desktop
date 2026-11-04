@@ -84,6 +84,27 @@ try {
   assert.equal(await page.locator('.browser-nav-label').first().isVisible(), false);
   checks.push('Full navigation at 1320px and compact desktop rail at 960px');
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1320, 860));
+  await page.waitForTimeout(700);
+
+  // Overview's own controls answer a pointer, not only the rail and menus.
+  const hero = page.getByTestId('home-hero').getByRole('button').first();
+  const shownIn = await hero.getAttribute('aria-label');
+  await hero.click();
+  await expect.poll(() => hero.getAttribute('aria-label')).not.toBe(shownIn);
+  const homeAction = name => page.getByTestId('home-slot').getByRole('button', { name, exact: true });
+  for (const [name, scene] of [['Send', 'send'], ['Receive', 'receive']]) {
+    await homeAction(name).click();
+    await expect(page.locator(`.browser-sidebar button[data-scene="${scene}"]`)).toHaveAttribute('aria-current', 'page');
+    await page.waitForTimeout(800);
+    await nativeMenu('Overview');
+  }
+  await homeAction('Scan a payment request').click();
+  await expect(page.getByTestId('scan-disc')).toBeVisible();
+  await page.waitForTimeout(800);
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('scan-disc')).toHaveCount(0);
+  await page.waitForTimeout(800);
+  checks.push('Overview balance, Send, Receive and Scan answer a click');
 
   await nativeMenu('Send');
   const address = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);

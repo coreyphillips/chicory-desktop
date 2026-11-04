@@ -640,7 +640,15 @@ export function Canvas({
                 style={[styles.topSlot, { top: belowStatus, right: sideWidth }]}
                 pointerEvents={blocking ? 'none' : 'box-none'}
               >
-                <View style={[styles.flex, desktop ? styles.browserForm : null]}>{top}</View>
+                {/* The desktop's centred column passes touches through as
+                the slot does. It is always drawn, so without this it would
+                catch every press on Home while Send and Receive are closed. */}
+                <View
+                  style={[styles.flex, desktop ? styles.browserForm : null]}
+                  pointerEvents={blocking ? 'none' : 'box-none'}
+                >
+                  {top}
+                </View>
               </View>
               {desktop ? (
                 <Pane key="browser-activity" active={!state.busy && !overlay && (overview || shown === 'detail')}
