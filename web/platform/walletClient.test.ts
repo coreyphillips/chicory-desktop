@@ -254,3 +254,22 @@ test('contradictory explicit debit and fee fields fail rather than inventing a r
   ]));
   await assert.rejects(transport('http://127.0.0.1/wallets/wallet-1/api/payments'), { code: 'INVALID_RESPONSE' });
 });
+
+test('a related wallet sends only the reference to the wallet whose phrase it reuses, for that one request', async () => {
+  const { client, calls } = fixture(path => {
+    if (path === '/api/wallets') return response({ record: { ...record, id: 'wallet-2', network: 'regtest' } });
+    return response({});
+  });
+  const created = await client.createWallet({ name: 'Testnet twin', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI, seedFrom: { walletId: 'wallet-1', network: 'mainnet' } });
+  assert.equal(created.id, 'wallet-2');
+  assert.equal(created.mnemonic, undefined);
+  const create = calls.find(call => call.path === '/api/wallets')!;
+  const body = JSON.parse(String(create.init.body));
+  assert.deepEqual(body.seedFrom, { walletId: 'wallet-1', network: 'mainnet' });
+  assert.equal(body.mnemonic, undefined, 'no phrase travels');
+  calls.length = 0;
+  await client.createWallet({ name: 'Separate', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI });
+  assert.equal(JSON.parse(String(calls.find(call => call.path === '/api/wallets')!.init.body)).seedFrom, undefined, 'the reference is not reused');
+  await assert.rejects(client.createWallet({ name: 'Both', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI, mnemonic: PHRASE, seedFrom: { walletId: 'wallet-1', network: 'mainnet' } }),
+    { code: 'INVALID_PARAMS' });
+});

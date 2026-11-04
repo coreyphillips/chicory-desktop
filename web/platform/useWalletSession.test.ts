@@ -485,3 +485,13 @@ test('a cached view that arrives after the live read never covers it', async () 
     assert.equal(app.session.snapshot?.balance.totalSats, 100, 'the late cache read is ignored');
   } finally { secureDelay = null; }
 });
+
+test('a wallet that reuses a phrase the owner already holds is not marked for a new backup', async () => {
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const host = new Host();
+  const related = { ...record, id: 'wallet-related', network: 'regtest' as const };
+  host.provision = async () => related as CreatedWallet;
+  const app = await mount(host, [new Host([record, related])]);
+  await act(async () => { await app.session.client!.createWallet({ name: 'Related', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI }); });
+  assert.equal(local.getItem(`chicory:backup-pending:${related.id}`), null, 'no phrase came back, so there is nothing new to write down');
+});

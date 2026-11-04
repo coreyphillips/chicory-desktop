@@ -265,7 +265,8 @@ export const settings = {
     primary: 'Primary node',
     desktopPrimary: 'Use a reachable primary node. Onion nodes need a local Tor service configured before opening Chicory.',
     reuses: (source: string) =>
-      `Uses the same recovery phrase as your ${source} wallet.`,
+      `Uses the same recovery phrase as your ${source} wallet. You do not need to write it down again.`,
+    separatePhrase: 'Make a separate wallet with a new phrase',
     mainnet:
       'This creates a real mainnet wallet. The primary node is trusted for instant funding.',
     testnet: 'Use a primary node on this test network.',

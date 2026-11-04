@@ -191,7 +191,9 @@ export function useWalletSession(
           if (!valid(token, exposed)) throw new WalletError('The selected wallet changed.', 'WALLET_CHANGED');
         }
         const created = await creator.createWallet(input);
-        if (!demoMode.current && input?.mnemonic === undefined) {
+        // Only a phrase the service has just made is still to be saved. A
+        // restored or reused phrase is one the owner already holds.
+        if (!demoMode.current && typeof created.mnemonic === 'string') {
           try { localStorage.setItem(BACKUP + created.id, 'true'); }
           catch { /* The current session still requires acknowledgement. */ }
         }

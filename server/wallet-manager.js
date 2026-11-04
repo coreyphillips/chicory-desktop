@@ -1039,8 +1039,22 @@ class WalletManager {
 		recoveryAutoApply,
 		guardianServe,
 		lfbw: lfbwInput,
-		ffor: fforInput
+		ffor: fforInput,
+		seedFrom
 	} = {}) {
+		if (seedFrom !== undefined) {
+			// A related wallet on another network reuses its family's phrase,
+			// read here and never sent through the page. It goes through the
+			// import identity check, so one seed never owns two wallets on one
+			// chain, and the phrase is not returned: there is nothing new to save.
+			const source = this._seedSource(seedFrom, network);
+			const created = await this._provision({
+				name, network: source.network, imported: true, familyId: source.familyId, electrum, allowChainMismatch,
+				mnemonic: source.mnemonic, tor, networkMode, iroh, publicHost, announce, onchainOnly, recoveryMode,
+				recoveryAutoApply, guardianServe, lfbw: lfbwInput, ffor: fforInput
+			});
+			return { record: created.record, seedFrom: source.from };
+		}
 		const strength = Number(wordCount) === 12 ? 128 : 256;
 		const mnemonic = bip39.generateMnemonic(strength);
 		return this._provision({
@@ -1061,6 +1075,36 @@ class WalletManager {
 			lfbw: lfbwInput,
 			ffor: fforInput
 		});
+	}
+
+	/**
+	 * The phrase a related wallet reuses, from the wallet it names. The
+	 * reference must match that wallet's identity and network, and the new
+	 * wallet must be on another network. A missing, mismatched or unreadable
+	 * source stops creation; a new phrase is never made in its place.
+	 */
+	_seedSource(seedFrom, network) {
+		const refused = (code, message) => httpError(409, code, `${message} Nothing was created.`);
+		if (!seedFrom || typeof seedFrom !== 'object' || typeof seedFrom.walletId !== 'string' ||
+				!/^[A-Za-z0-9-]{1,64}$/.test(seedFrom.walletId) || typeof seedFrom.network !== 'string')
+			throw httpError(400, 'BAD_SEED_SOURCE', 'Name the wallet whose recovery phrase to reuse.');
+		const target = this._validateNetwork(network);
+		const rec = this.registry.get(seedFrom.walletId);
+		if (!rec) throw refused('SEED_SOURCE_MISSING', 'The wallet whose recovery phrase this would reuse is not on this computer.');
+		if (rec.network !== seedFrom.network || (seedFrom.nodeId && rec.nodeId && seedFrom.nodeId !== rec.nodeId))
+			throw refused('SEED_SOURCE_MISMATCH', 'The wallet whose recovery phrase this would reuse has changed.');
+		if (rec.network === target)
+			throw refused('SEED_SOURCE_SAME_NETWORK', 'A recovery phrase is reused only for a wallet on another network.');
+		let mnemonic;
+		try {
+			mnemonic = fs.readFileSync(this.paths(rec.id).mnemonicFile, 'utf8').trim().toLowerCase().replace(/\s+/g, ' ');
+		} catch (_) {
+			mnemonic = '';
+		}
+		if (!bip39.validateMnemonic(mnemonic))
+			throw refused('SEED_SOURCE_UNREADABLE', `The recovery phrase of "${rec.name}" could not be read.`);
+		return { mnemonic, network: target, familyId: rec.familyId || rec.id,
+			from: { walletId: rec.id, name: rec.name, network: rec.network } };
 	}
 
 	/**
@@ -1159,6 +1203,7 @@ class WalletManager {
 	}
 
 	async _provisionOn({
+		familyId,
 		name,
 		network,
 		electrum,
@@ -1228,6 +1273,9 @@ class WalletManager {
 			jit: lfbw.normalizeJit(undefined),
 			swaps: lfbw.normalizeSwaps(undefined),
 			port,
+			// The wallets that share one recovery phrase across networks. A
+			// wallet made with its own phrase starts a family of its own.
+			familyId: familyId || id,
 			running: true,
 			createdAt: nowIso()
 		};
@@ -4064,6 +4112,8 @@ class WalletManager {
 			id: rec.id,
 			name: rec.name,
 			network: rec.network,
+			// Wallets with one family share a recovery phrase across networks.
+			familyId: rec.familyId || rec.id,
 			electrum: rec.electrum,
 			// The network mode (umbrel #193): tor, clearnet or hybrid, the public
 			// host the record holds, the host port peers dial it at, and the two

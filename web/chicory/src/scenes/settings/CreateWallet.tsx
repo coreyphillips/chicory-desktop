@@ -11,7 +11,8 @@ import { announce } from '../../design/announce';
 import { copy } from '../../design/copy';
 import { haptics } from '../../design/haptics';
 import { riseIn, smooth } from '../../motion/presets';
-import { seedSourceNetwork } from '../../embedded/seed';
+import { seedSourceNetwork, seedSourceWallet } from '../../embedded/seed';
+import type { SeedSourceWallet } from '../../embedded/seed';
 import { defaultProfile } from '../../services/networks';
 import type { NetworkProfile } from '../../services/networks';
 import type { WalletAdapter } from '../../services/wallet';
@@ -87,18 +88,31 @@ export function CreateWalletScreen({
   const [fullRestore, setFullRestore] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const working = useRef(false);
+  // On desktop, the open wallet whose phrase a wallet on another network
+  // reuses, unless the owner asks for a separate one.
+  const [sourceWallet, setSourceWallet] = useState<SeedSourceWallet | null>(null);
+  const [separate, setSeparate] = useState(false);
   useEffect(() => {
     let active = true;
     seedSourceNetwork()
-      .then(value => active && setSeedSource(value))
+      .then(value => active && value && setSeedSource(value))
+      .catch(() => {});
+    seedSourceWallet(client)
+      .then(value => {
+        if (!active || !value) return;
+        setSourceWallet(value);
+        setSeedSource(value.network as DeviceNetwork);
+      })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, []);
+  }, [client]);
   // The wallet whose phrase a new one here would reuse, if any.
   const source =
-    !restoring && seedSource && seedSource !== network ? seedSource : null;
+    !restoring && !separate && seedSource && seedSource !== network ? seedSource : null;
+  // How the source is named: the wallet and its network on desktop.
+  const sourceLabel = source && sourceWallet ? `${sourceWallet.name} (${sourceWallet.network})` : source;
   useEffect(() => {
     let active = true;
     client
@@ -153,7 +167,9 @@ export function CreateWalletScreen({
           ? { electrum: profile.electrum }
           : {}),
         ...(restoring ? { mnemonic: phrase } : {}),
-      });
+        // The service reads the phrase itself; only the reference is sent.
+        ...(source && sourceWallet ? { seedFrom: { walletId: sourceWallet.walletId, network: sourceWallet.network } } : {}),
+      } as Parameters<WalletAdapter['createWallet']>[0]);
       if (restoring) {
         // The phrase came from the owner; there is nothing new to write down.
         setPhrase('');
@@ -391,7 +407,15 @@ export function CreateWalletScreen({
           }
         />
       </Section>
-      {source ? <Note glyph="key">{words.reuses(source)}</Note> : null}
+      {source && sourceLabel ? <Note glyph="key">{words.reuses(sourceLabel)}</Note> : null}
+      {source && sourceWallet ? (
+        <Link
+          label={words.separatePhrase}
+          glyph="sprout"
+          disabled={busy}
+          onPress={() => setSeparate(true)}
+        />
+      ) : null}
       {test ? (
         <Note glyph="flask">{words.testnet}</Note>
       ) : (
