@@ -38,8 +38,10 @@ function redactText(value, { paths = [], limit = MESSAGE_LIMIT, input = 16384 } 
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
     .replace(/\b(bearer|basic)\s+[\w.~+/=-]+/gi, '$1 [redacted]')
     // Before the assignment rule, which would take a phrase's first word and
-    // leave the rest too short to match.
-    .replace(/\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b/g, '[redacted words]')
+    // leave the rest too short to match. The first word may be capitalised,
+    // and words may be set apart by spaces, commas, quotes, brackets or list
+    // numbers such as '2.' or '3)', as in a JSON array or a numbered list.
+    .replace(/\b[A-Za-z][a-z]{2,7}(?:(?:[\s,;'"()[\]{}]|\d{1,2}[.)])+[a-z]{3,8}){11,23}\b/g, '[redacted words]')
     .replace(/\b([\w-]*(?:key|token|secret|password|passphrase|mnemonic|seed|cookie|auth)[\w-]*"?\s*[=:]\s*)(?!\[redacted)("[^"]*"|'[^']*'|[^\s,;&]+)/gi, '$1[redacted]')
     .replace(/\bln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]{20,}/gi, '[redacted invoice]')
     .replace(/\blnurl[0-9a-z]{20,}/gi, '[redacted lnurl]')
@@ -203,15 +205,19 @@ class DesktopDiagnostics {
    */
   managerOutput(chunk) {
     const lines = (this.partial + String(chunk)).split(/\r?\n/);
-    this.partial = lines.pop().slice(-1024);
+    // The head is kept, as for a complete line, so a cut never leaves a
+    // phrase's later words at the start of what is shown.
+    this.partial = lines.pop().slice(0, 1024);
     for (const line of lines) if (line.trim()) this.output.push(line.slice(0, 1024));
     const keep = OUTPUT_LIMIT + CONTEXT_LINES;
     if (this.output.length > keep) this.output.splice(0, this.output.length - keep);
   }
 
   outputTail() {
-    if (!this.output.length) return [];
-    const text = redactText(this.output.join('\n'), { ...this.options, limit: Infinity, input: Infinity });
+    // A last line without a newline is often the error that ended the process.
+    const lines = this.partial.trim() ? [...this.output, this.partial] : this.output;
+    if (!lines.length) return [];
+    const text = redactText(lines.join('\n'), { ...this.options, limit: Infinity, input: Infinity });
     return text.split('\n').slice(-OUTPUT_LIMIT).map(line => clip(line, MESSAGE_LIMIT));
   }
 

@@ -136,9 +136,10 @@ test('reports corrupt encrypted storage with the manager error tail', t => {
   const report = diagnostics.report();
   assert.equal(report.lifecycle.storage.code, 'STORAGE_UNAVAILABLE');
   assert.equal(report.lifecycle.manager.state, 'crashed');
-  assert.deepEqual(report.managerOutput, ['vault open failed at <profile>/wallets/x.db', 'key=[redacted]']);
+  // The last line had no newline. It is often the error that ended the process, so it is kept.
+  assert.deepEqual(report.managerOutput, ['vault open failed at <profile>/wallets/x.db', 'key=[redacted]', 'partial']);
   const persisted = saved(file);
-  assert.equal(persisted.managerOutput.length, 2);
+  assert.equal(persisted.managerOutput.length, 3);
   assert.equal(JSON.stringify(persisted).includes(KEY), false);
 });
 
@@ -151,6 +152,43 @@ test('redacts a recovery phrase wrapped across stderr lines and chunks', t => {
   assert.deepEqual(diagnostics.report().managerOutput, ['mnemonic: [redacted words]', 'Error: vault open failed']);
   for (const text of [fs.readFileSync(file, 'utf8'), diagnostics.text()])
     for (const word of words) assert.doesNotMatch(text, new RegExp(`\\b${word}\\b`), word);
+});
+
+test('redacts recovery phrases written as lists, arrays or with a capital first word', () => {
+  const words = PHRASE.split(' ');
+  const forms = [
+    JSON.stringify({ words }),
+    JSON.stringify(words),
+    words.map((word, index) => `${index + 1}. ${word}`).join(' '),
+    words.map((word, index) => `${index + 1}) ${word}`).join('\n'),
+    `Mnemonic: ${words[0][0].toUpperCase()}${words[0].slice(1)} ${words.slice(1).join(' ')}`,
+    words.join(', '),
+  ];
+  for (const form of forms) {
+    const text = redactText(form, { limit: 2000 });
+    for (const word of words) assert.doesNotMatch(text, new RegExp(`\\b${word}\\b`, 'i'), `${word} in ${text}`);
+  }
+  assert.equal(redactText('Tor bootstrap failed: could not connect to the guard relay'),
+    'Tor bootstrap failed: could not connect to the guard relay', 'ordinary messages are left alone');
+});
+
+test('keeps the head of an overlong stderr line so a phrase is never cut into what is shown', t => {
+  const { diagnostics } = diagnosticsFor(t);
+  // A long line arrives in chunks, with a phrase near its start and its newline much later.
+  diagnostics.managerOutput(`fatal: ${PHRASE} `);
+  for (let index = 0; index < 20; index += 1) diagnostics.managerOutput('x '.repeat(100));
+  diagnostics.managerOutput('end\n');
+  const [line] = diagnostics.report().managerOutput;
+  assert.match(line, /^fatal: \[redacted words\]/);
+  for (const word of PHRASE.split(' ')) assert.doesNotMatch(line, new RegExp(`\\b${word}\\b`), word);
+});
+
+test('keeps a final error line that has no newline', t => {
+  const { diagnostics, file } = diagnosticsFor(t);
+  diagnostics.managerOutput('starting wallets\nError: SQLITE_CORRUPT: database disk image is malformed');
+  diagnostics.managerExited({ code: 1, signal: null, expected: false });
+  assert.deepEqual(diagnostics.report().managerOutput, ['starting wallets', 'Error: SQLITE_CORRUPT: database disk image is malformed']);
+  assert.match(fs.readFileSync(file, 'utf8'), /SQLITE_CORRUPT/);
 });
 
 test('reports a crashed manager and engine exits without wallet identifiers', t => {
