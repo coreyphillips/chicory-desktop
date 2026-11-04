@@ -113,12 +113,21 @@ function audit() {
   // horizontally by a clipping ancestor. Rolling digits stack vertically
   // inside their clip by design, so only the horizontal edge is checked.
   const figure = /(₿|\bsats?\b|\bBTC\b)/;
+  const ownDigits = el => [...el.childNodes].some(node => node.nodeType === 3 && /\d/.test(node.textContent));
   for (const el of document.querySelectorAll('body *')) {
     if (el.closest('svg') || !live(el)) continue;
-    const own = [...el.childNodes].some(node => node.nodeType === 3 && /\d/.test(node.textContent));
+    const own = ownDigits(el);
     const text = el.textContent || '';
-    if (!own || !figure.test(text) || text.length > 80) continue;
-    const rect = el.getBoundingClientRect();
+    // An odometer names its amount on a wrapper and draws each digit in its
+    // own cell, so it is measured by the span of those cells.
+    const label = el.getAttribute('aria-label') || '';
+    const digits = !own && /\d/.test(label) && figure.test(label)
+      ? [...el.querySelectorAll('*')].filter(d => shown(d) && ownDigits(d)).map(d => d.getBoundingClientRect())
+      : [];
+    if (!digits.length && (!own || !figure.test(text) || text.length > 80)) continue;
+    const rect = digits.length
+      ? { left: Math.min(...digits.map(r => r.left)), right: Math.max(...digits.map(r => r.right)) }
+      : el.getBoundingClientRect();
     if (rect.left < -1 || rect.right > vw + 1) problems.push(`clipped figure (window) ${describe(el)}`);
     for (let at = el.parentElement; at && at !== document.body; at = at.parentElement) {
       const style = getComputedStyle(at);
@@ -148,7 +157,7 @@ function audit() {
   // as a copy chip's check, are transparent by design and are not controls.
   const painted = shape => {
     const style = getComputedStyle(shape);
-    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0.01) return false;
+    if (style.display === 'none' || style.visibility === 'hidden' || opacityOf(shape) <= 0.01) return false;
     const fill = style.fill !== 'none' && Number(style.fillOpacity) > 0.01 && !/rgba\(.*, 0\)$/.test(style.fill);
     let stroke = style.stroke !== 'none' && Number(style.strokeOpacity) > 0.01 && parseFloat(style.strokeWidth) > 0;
     if (stroke && style.strokeDasharray !== 'none' && typeof shape.getTotalLength === 'function') {
@@ -160,7 +169,9 @@ function audit() {
   };
   for (const control of document.querySelectorAll('button, [role="button"], a[href]')) {
     if (!live(control) || control.disabled || control.getAttribute('aria-disabled') === 'true') continue;
-    const svgs = [...control.querySelectorAll('svg')].filter(shown);
+    // Laid out, whatever its opacity: a control whose only glyph is
+    // transparent still has to fail below.
+    const svgs = [...control.querySelectorAll('svg')].filter(svg => svg.getClientRects().length > 0);
     if (!svgs.length || (control.innerText || '').trim()) continue;
     const shapes = svgs.flatMap(svg => [...svg.querySelectorAll('path, circle, rect, line, polyline, polygon, ellipse, text')]);
     if (!shapes.some(painted)) problems.push(`invisible glyph in ${describe(control)}`);
@@ -193,7 +204,8 @@ async function sweep(config, indices, names) {
       problems = await reach(index);
       if (REAL_HOLD.has(name)) {
         problems = problems.filter(line => !/: hold (down|complete|up) "/.test(line));
-        await holdDown(name === 'hold, let go early');
+        // Past the 700 ms hold, so the committing state seals.
+        await holdDown(name === 'hold, let go early', name === 'hold, committing' ? 900 : 250);
       }
       problems.push(...await page.evaluate(audit));
     } catch (error) {
@@ -218,14 +230,14 @@ async function sweep(config, indices, names) {
 // The browser hold reads real pointer and key events, not the gesture
 // handler the mobile gallery's hold steps call, so these states are pressed
 // with the pointer here.
-const REAL_HOLD = new Set(['send, review, held down', 'hold, held', 'hold, let go early']);
+const REAL_HOLD = new Set(['send, review, held down', 'hold, held', 'hold, let go early', 'hold, committing']);
 
-async function holdDown(release = false) {
+async function holdDown(release = false, ms = 250) {
   const hold = page.locator('[data-hold-confirmation]').first();
   const box = await hold.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(ms);
   if (release) {
     await page.mouse.up();
     await page.waitForTimeout(400);
@@ -278,13 +290,14 @@ async function interactions(names) {
   checks.push('Pointer hold cancels on early release and on leaving the control');
 
   // Focus moves into the newly opened scene and never stays on an exiting pane.
-  const focusTarget = names.findIndex(name => /^send, (sending|sent)$/.test(name));
+  const focusTarget = names.indexOf('send, sent');
   if (focusTarget >= 0) {
     await reach(focusTarget);
     const where = await page.evaluate(() => {
       const el = document.activeElement;
       return { body: !el || el === document.body, hidden: !!el?.closest('[inert], [aria-hidden="true"]') };
     });
+    assert.equal(where.body, false, 'Focus moves into the payment outcome');
     assert.equal(where.hidden, false, 'Focus is not left inside an exiting pane');
     checks.push('Focus transfer after the payment outcome stays out of exiting panes');
   }

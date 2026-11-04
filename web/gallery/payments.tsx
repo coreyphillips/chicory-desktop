@@ -505,6 +505,8 @@ const arriving = (name: string, snapshot?: () => WalletSnapshot) =>
           () => {
             paid = true;
           },
+          // Past the next 2 s poll, as driven runs drop the dwell.
+          wait(2_500),
         ],
       };
     },
