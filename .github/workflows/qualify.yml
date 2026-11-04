@@ -1,0 +1,57 @@
+name: Regtest qualification
+# Funded flows against a disposable regtest chain only. The harness refuses to
+# fund or mine until Bitcoin RPC and Electrum both report the regtest genesis.
+on:
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: Comma-separated stages
+        default: preflight,payments,restart,crash
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            build/runtime/package-lock.json
+      - name: Use HTTPS for public Git dependencies
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+      - run: npm ci
+      - run: npm --prefix server ci --omit=dev
+      - run: npm run runtime:prepare
+      - run: npm run test:qualification
+      - run: npm run package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Start the isolated regtest chain
+        run: |
+          docker compose -f scripts/regtest/compose.yml up -d --wait
+          docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest createwallet chicory-test
+          test "$(docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest getblockchaininfo | jq -r .chain)" = regtest
+          address=$(docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest -rpcwallet=chicory-test getnewaddress)
+          case "$address" in bcrt1*) ;; *) echo "refusing non-regtest address"; exit 1 ;; esac
+          docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest generatetoaddress 101 "$address" > /dev/null
+      - name: Qualify the packaged app
+        run: xvfb-run --auto-servernum npm run qualify:regtest
+        env:
+          CHICORY_ELECTRON_EXECUTABLE: ${{ github.workspace }}/release/linux-unpacked/chicory-desktop
+          CHICORY_QUALIFY_STAGES: ${{ inputs.stages }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regtest-qualification-linux-x64
+          path: artifacts/qualification
+          retention-days: 30
+      - if: always()
+        run: docker compose -f scripts/regtest/compose.yml down -v
