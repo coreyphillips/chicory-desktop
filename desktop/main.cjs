@@ -14,7 +14,8 @@ const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
 const fs = require('node:fs');
 const path = require('node:path');
-const { APP_URL, CSP, isAppURL, isPaymentLink, isExternalURL, staticPath, managerHeaders, windowBounds } = require('./policy.cjs');
+const { APP_URL, CSP, isAppURL, isPaymentLink, linkFromArgv, createLinkGate, isExternalURL, staticPath, managerHeaders, windowBounds } = require('./policy.cjs');
+const linkGate = createLinkGate();
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'chicory-app', privileges: {
   standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true,
@@ -87,14 +88,15 @@ function showWindow() {
 
 function paymentLink(url) {
   // Never queue a payment link across startup, wallet selection or the lock.
-  if (!isPaymentLink(url) || !window || window.webContents.isLoading() || appLock?.required() || erasing) return;
+  if (!linkGate(url, { window: !!window && !window.isDestroyed(), loading: !!window?.webContents.isLoading(),
+    locked: !!appLock?.required(), erasing })) return;
   showWindow();
   command('payment-link', url);
 }
 
 app.on('second-instance', (_event, argv) => {
   showWindow();
-  const link = argv.find(isPaymentLink);
+  const link = linkFromArgv(argv);
   if (link) paymentLink(link);
 });
 app.on('open-url', (event, url) => { event.preventDefault(); paymentLink(url); });

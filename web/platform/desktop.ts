@@ -27,6 +27,17 @@ declare global {
   interface Window { chicoryDesktop?: DesktopBridge }
 }
 
+/**
+ * Whether a native menu, shortcut or payment link may act now. Each is
+ * dropped, never queued, while no wallet is ready, a wallet is being chosen,
+ * opened or switched, a payment is under way or an overlay is open, so a link
+ * can never land in a wallet other than the one on screen or replace a
+ * payment in review.
+ */
+export function commandAccepted(state: { ready: boolean; choosing: boolean; busy: boolean; overlay: unknown }): boolean {
+  return state.ready && !state.choosing && !state.busy && !state.overlay;
+}
+
 export function desktopScene(command: string): DesktopScene | null {
   return ['home', 'send', 'receive', 'activity', 'settings'].includes(command)
     ? command as DesktopScene : null;

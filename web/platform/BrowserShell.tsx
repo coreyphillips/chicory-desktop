@@ -7,7 +7,7 @@ import { useStage } from '../chicory/src/stage/StageContext';
 import type { useWalletSession } from './useWalletSession';
 import type { Phase } from '../chicory/src/stage/phase';
 import { normalizePaymentLink } from '../chicory/src/services/links';
-import { desktopScene, desktopShortcut } from './desktop';
+import { commandAccepted, desktopScene, desktopShortcut } from './desktop';
 import { editableTarget } from './keyboard';
 
 const navigation: { name: 'home' | 'send' | 'receive' | 'activity' | 'settings'; label: string; glyph: GlyphName }[] = [
@@ -33,7 +33,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
     const command = (name: string, value?: string) => {
       // The same guard covers native menus, shortcuts and external payment links.
       // A link only fills Send and is dropped while a wallet is not ready.
-      if (!ready || choosing || state.busy || state.overlay) return;
+      if (!commandAccepted({ ready, choosing, busy: state.busy, overlay: state.overlay })) return;
       if (name === 'payment-link') {
         const request = normalizePaymentLink(value);
         if (request) dispatch({ type: 'link', request });
