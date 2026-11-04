@@ -1,8 +1,9 @@
-name: Package desktop apps
+# Development and CI test packages: ad hoc signed on macOS, unsigned on
+# Windows, labelled "development" and never published. Signed releases are
+# built by release.yml.
+name: Package development builds
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
 permissions:
   contents: read
 jobs:
@@ -48,7 +49,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - uses: actions/upload-artifact@v4
         with:
-          name: Chicory-${{ matrix.platform }}-${{ matrix.arch }}
+          name: Chicory-development-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.dmg
             release/*.zip

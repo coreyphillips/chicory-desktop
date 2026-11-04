@@ -1,10 +1,12 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, screen, session, shell, protocol, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, net, screen, session, shell, protocol, safeStorage } = require('electron');
 const { fork } = require('node:child_process');
 const { loadStorageKey } = require('./storage-key.cjs');
 const { BundledTor } = require('./tor.cjs');
-const { randomBytes } = require('node:crypto');
+const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
+const { randomBytes, randomUUID } = require('node:crypto');
+const { Readable } = require('node:stream');
 const fs = require('node:fs');
 const path = require('node:path');
 const { APP_URL, CSP, isAppURL, isPaymentLink, isExternalURL, staticPath, managerHeaders, windowBounds } = require('./policy.cjs');
@@ -31,6 +33,19 @@ const token = randomBytes(32).toString('hex');
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const runtime = path.join(root, app.isPackaged ? 'runtime' : '.runtime');
 const publicDirectory = path.join(root, 'dist');
+const RELEASES = 'https://github.com/coreyphillips/chicory-desktop/releases';
+// electron-builder writes the channel into the packaged package.json. Source
+// checkouts and CI test packages are development builds and never update.
+const channel = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')).chicoryChannel; } catch {}
+})() === 'stable' && app.isPackaged ? 'stable' : 'development';
+const updateKeys = channel === 'stable'
+  ? loadPublicKeys(JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'build/update-keys.json'), 'utf8')).keys) : [];
+const updatesEnabled = channel === 'stable' && updateKeys.length > 0 && !demo;
+const updateDirectory = path.join(profile, 'updates');
+const gate = new UpdateGate();
+const holdRequests = new Map();
+let updateTask;
 
 function command(name, value) {
   if (!window || window.isDestroyed() || stopping || !isAppURL(window.webContents.getURL())) return;
@@ -77,7 +92,8 @@ async function startManager() {
     throw new Error('The local wallet runtime is missing. For a source checkout, run npm run runtime:prepare.');
   }
   fs.mkdirSync(path.join(profile, 'wallets'), { recursive: true, mode: 0o700 });
-  const key = await loadStorageKey({ profile, safeStorage, platform: process.platform });
+  // Opening the key may re-wrap it for the OS. An update must not interrupt that.
+  const key = await gate.run('storage-key', () => loadStorageKey({ profile, safeStorage, platform: process.platform }));
   if (stopping) { key.fill(0); return; }
   tor = new BundledTor({ bundleDirectory: path.join(runtime, 'tor'), dataDirectory: path.join(profile, 'tor'),
     onStatus: status => {
@@ -106,6 +122,10 @@ async function startManager() {
       if (message?.type === 'startup-error') {
         clearTimeout(timeout);
         reject(new Error(message.code === 'STORAGE_UNAVAILABLE' ? String(message.message).slice(0, 300) : 'The local wallet could not start.'));
+        return;
+      }
+      if (message?.type === 'update:hold-result' && holdRequests.has(message.requestId)) {
+        holdRequests.get(message.requestId)(message.ok === true);
         return;
       }
       if (message?.type === 'tor:ensure' || message?.type === 'tor:bridge') {
@@ -154,6 +174,109 @@ async function stopManager() {
   });
 }
 
+async function fetchBounded(url, limit) {
+  const reply = await net.fetch(url, { cache: 'no-store', redirect: 'follow' });
+  if (!reply.ok || !reply.body) throw Object.assign(new Error('The release server did not answer.'), { code: 'UPDATE_FETCH' });
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of reply.body) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error('The release server sent too much data.'), { code: 'UPDATE_INVALID' });
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Asks the manager to pause wallet actions. Resolves false if one is still running. */
+function holdWalletActions() {
+  if (!manager?.connected || !origin || stopping) return Promise.resolve(false);
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const done = (ok) => { clearTimeout(timer); holdRequests.delete(requestId); resolve(ok); };
+    const timer = setTimeout(() => done(false), 20000);
+    holdRequests.set(requestId, done);
+    manager.send({ type: 'update:hold', requestId }, error => { if (error) done(false); });
+  });
+}
+
+function releaseWalletActions() {
+  if (manager?.connected && !stopping) manager.send({ type: 'update:release' }, () => {});
+}
+
+async function installUpdate(file, offer) {
+  await gate.tryRun('update', async () => {
+    if (!await holdWalletActions()) {
+      releaseWalletActions();
+      throw Object.assign(new Error('A wallet action is still running. Wait for it to finish, then install the update.'), { code: 'UPDATE_BUSY' });
+    }
+    try { await verifyStaged(file, offer.artifact); }
+    catch (error) { releaseWalletActions(); throw error; }
+    // The same graceful stop as quitting: wallets drain, then Tor exits. The
+    // encrypted profile and its OS-protected key are left exactly in place.
+    stopping = true;
+    await stopManager();
+    await tor?.stop();
+    stopped = true;
+    if (process.platform === 'linux') shell.showItemInFolder(file);
+    else {
+      const problem = await shell.openPath(file);
+      if (problem) shell.showItemInFolder(file);
+    }
+    app.quit();
+  });
+}
+
+async function checkForUpdates() {
+  if (updateTask) {
+    updateTask.abort();
+    return;
+  }
+  const controller = new AbortController();
+  updateTask = controller;
+  installMenu();
+  try {
+    const [bytes, signature] = await Promise.all([
+      fetchBounded(`${RELEASES}/latest/download/update-manifest.json`, 256 * 1024),
+      fetchBounded(`${RELEASES}/latest/download/update-manifest.json.sig`, 4096),
+    ]);
+    const offer = verifyManifest(bytes, signature, { keys: updateKeys, version: app.getVersion(),
+      platform: process.platform, arch: process.arch, channel });
+    const { manifest } = offer;
+    const detail = [`Version ${manifest.version} from source revision ${manifest.revision.slice(0, 12)}.`,
+      `Bundled Tor ${manifest.components?.tor}, wallet engine ${manifest.components?.engine}.`,
+      offer.required ? 'This build is no longer supported. Install the update before making payments.' : '',
+      'The download is checked against the signed release before anything is installed.'].filter(Boolean).join('\n');
+    const answer = await dialog.showMessageBox(window, { type: 'info', title: 'Chicory', message: `Chicory ${manifest.version} is available.`,
+      detail, buttons: ['Download', 'Not Now'], defaultId: 0, cancelId: 1 });
+    if (answer.response !== 0 || controller.signal.aborted) return;
+    const reply = await net.fetch(`${RELEASES}/download/v${manifest.version}/${offer.artifact.file}`, { signal: controller.signal, redirect: 'follow' });
+    if (!reply.ok || !reply.body) throw Object.assign(new Error('The release server did not answer.'), { code: 'UPDATE_FETCH' });
+    const file = await download({ body: Readable.fromWeb(reply.body), artifact: offer.artifact, directory: updateDirectory,
+      signal: controller.signal, onProgress: value => window?.setProgressBar(value) });
+    window?.setProgressBar(-1);
+    const install = await dialog.showMessageBox(window, { type: 'question', title: 'Chicory', message: `Install Chicory ${manifest.version}?`,
+      detail: process.platform === 'linux'
+        ? 'Chicory will stop the wallet and Tor, quit, and show the verified AppImage. Replace your current AppImage with it.'
+        : 'Chicory will pause wallet actions, stop the wallet and Tor, quit, and open the verified installer. Wallet files and the protected key stay in place.',
+      buttons: ['Install and Quit', 'Later'], defaultId: 0, cancelId: 1 });
+    if (install.response === 0) await installUpdate(file, offer);
+  } catch (error) {
+    window?.setProgressBar(-1);
+    if (error.code === 'UPDATE_CANCELLED' || controller.signal.aborted) {
+      cleanStaging(updateDirectory);
+      return;
+    }
+    const current = error.code === 'UPDATE_DOWNGRADE';
+    await dialog.showMessageBox(window, { type: current ? 'info' : 'warning', title: 'Chicory',
+      message: current ? 'Chicory is up to date.' : 'The update was not installed.',
+      detail: current ? `Version ${app.getVersion()} is the latest release.` :
+        `${error.code?.startsWith('UPDATE_') ? error.message : 'The update could not be checked.'} Your wallet was not changed. Verified installers are also listed at ${RELEASES}.` });
+  } finally {
+    updateTask = undefined;
+    if (!stopping) installMenu();
+  }
+}
+
 function response(body, status = 200, type = 'text/plain') {
   return new Response(body, { status, headers: {
     'Content-Type': type, 'Content-Security-Policy': CSP, 'X-Content-Type-Options': 'nosniff',
@@ -193,9 +316,12 @@ async function handleRequest(request) {
 
 function installMenu() {
   const go = (label, accelerator, scene) => ({ label, accelerator, click: () => command(scene) });
+  const update = updatesEnabled
+    ? { label: updateTask ? 'Cancel Update' : 'Check for Updates…', click: () => void checkForUpdates() }
+    : { label: 'Development Build: Updates Disabled', enabled: false };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ label: 'Chicory', submenu: [
-      { role: 'about' }, { type: 'separator' }, go('Settings', 'CommandOrControl+,', 'settings'),
+      { role: 'about' }, update, { type: 'separator' }, go('Settings', 'CommandOrControl+,', 'settings'),
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
     ] }] : []),
     { label: 'Wallet', submenu: [go('Overview', 'CommandOrControl+1', 'home'), go('Send', 'CommandOrControl+2', 'send'),
@@ -205,9 +331,11 @@ function installMenu() {
     { label: 'View', submenu: [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' },
       ...(!app.isPackaged ? [{ role: 'toggleDevTools' }] : [])] },
     { role: 'windowMenu' },
-    { label: 'Help', submenu: [{ label: 'Chicory Desktop on GitHub', click: () => shell.openExternal('https://github.com/coreyphillips/chicory-desktop') }] },
+    { label: 'Help', submenu: [...(process.platform !== 'darwin' ? [update, { type: 'separator' }] : []),
+      { label: 'Chicory Desktop on GitHub', click: () => shell.openExternal('https://github.com/coreyphillips/chicory-desktop') }] },
   ]));
-  app.setAboutPanelOptions({ applicationName: 'Chicory', applicationVersion: app.getVersion(),
+  app.setAboutPanelOptions({ applicationName: 'Chicory',
+    applicationVersion: channel === 'stable' ? app.getVersion() : `${app.getVersion()} (development build)`,
     copyright: 'Copyright © 2026 Corey Phillips', iconPath: path.join(__dirname, '../build/icon.png') });
 }
 
@@ -296,6 +424,9 @@ if (!locked) app.quit();
 else app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark';
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  // A download interrupted by a crash, cancellation or a full disk leaves
+  // nothing worth keeping. Installed or skipped installers are not reused.
+  try { cleanStaging(updateDirectory); } catch {}
   const desktopSession = session.fromPartition(demo ? 'persist:chicory-demo' : 'persist:chicory');
   desktopSession.protocol.handle('chicory-app', handleRequest);
   createWindow(desktopSession);

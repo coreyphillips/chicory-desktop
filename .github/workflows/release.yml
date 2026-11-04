@@ -1,0 +1,161 @@
+# Signed releases. Secrets live only in the protected "release" environment,
+# which should require an owner's approval. See docs/releases.md.
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: node scripts/release/manifest.mjs check
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+
+  build:
+    needs: preflight
+    environment: release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-14
+            platform: mac
+            arch: arm64
+          - os: macos-15-intel
+            platform: mac
+            arch: x64
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - os: windows-2025
+            platform: win
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            build/runtime/package-lock.json
+      - name: Use HTTPS for public Git dependencies
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+      - run: npm ci
+      - run: npm --prefix server ci --omit=dev
+      - run: npm run runtime:prepare
+      - run: npm run check
+      - if: matrix.platform == 'mac'
+        name: Package, sign with Developer ID and notarize
+        shell: bash
+        run: |
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          APPLE_API_KEY="$RUNNER_TEMP/notary.p8" npx electron-builder --config build/electron-builder.release.yml \
+            --mac --${{ matrix.arch }} --publish never
+          rm -f "$RUNNER_TEMP/notary.p8"
+        env:
+          CSC_LINK: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER }}
+      - if: matrix.platform == 'mac'
+        name: Verify Developer ID signature and notarization
+        shell: bash
+        run: |
+          app="$(find release -maxdepth 2 -name Chicory.app -type d | head -1)"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -q "Authority=Developer ID Application"
+          spctl --assess --type execute --verbose "$app"
+          xcrun stapler validate release/*.dmg
+      - if: matrix.platform == 'win'
+        name: Package and sign with Azure Trusted Signing
+        shell: bash
+        run: |
+          npx electron-builder --config build/electron-builder.release.yml --win --${{ matrix.arch }} --publish never \
+            -c.win.azureSignOptions.publisherName="$WIN_PUBLISHER_NAME" \
+            -c.win.azureSignOptions.endpoint="$WIN_SIGNING_ENDPOINT" \
+            -c.win.azureSignOptions.codeSigningAccountName="$WIN_SIGNING_ACCOUNT" \
+            -c.win.azureSignOptions.certificateProfileName="$WIN_CERTIFICATE_PROFILE"
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WIN_PUBLISHER_NAME: ${{ vars.WIN_PUBLISHER_NAME }}
+          WIN_SIGNING_ENDPOINT: ${{ vars.WIN_SIGNING_ENDPOINT }}
+          WIN_SIGNING_ACCOUNT: ${{ vars.WIN_SIGNING_ACCOUNT }}
+          WIN_CERTIFICATE_PROFILE: ${{ vars.WIN_CERTIFICATE_PROFILE }}
+      - if: matrix.platform == 'win'
+        name: Verify Authenticode signature
+        shell: pwsh
+        run: |
+          foreach ($file in @(Get-ChildItem release/*.exe) + @(Get-Item release/win-unpacked/Chicory.exe)) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'Valid') { throw "$($file.Name) is not validly signed: $($signature.Status)" }
+          }
+      - if: matrix.platform == 'linux'
+        name: Package AppImage
+        run: npx electron-builder --config build/electron-builder.release.yml --linux --${{ matrix.arch }} --publish never
+        env:
+          # AppImages carry no platform signature. Integrity comes from the
+          # signed update manifest and SHA256SUMS.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - run: node scripts/release/manifest.mjs part release "release/part-${{ matrix.platform }}-${{ matrix.arch }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.AppImage
+            release/part-*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    environment: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: release-*
+          merge-multiple: true
+      - name: Write and sign the release manifest
+        run: |
+          mkdir -p staged/parts && mv staged/part-*.json staged/parts/
+          node scripts/release/manifest.mjs publish staged/parts staged
+        env:
+          CHICORY_UPDATE_SIGNING_KEY: ${{ secrets.CHICORY_UPDATE_SIGNING_KEY }}
+          CHICORY_UPDATE_KEY_ID: ${{ vars.CHICORY_UPDATE_KEY_ID }}
+          RELEASE_MINIMUM_VERSION: ${{ vars.RELEASE_MINIMUM_VERSION }}
+      - name: Confirm every artifact matches its checksum
+        working-directory: staged
+        run: sha256sum --check --strict SHA256SUMS
+      # A draft lets the owner install and test before the update channel sees it.
+      - name: Create draft release
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "Chicory $GITHUB_REF_NAME" \
+            --notes "Source revision $GITHUB_SHA. Component and storage format versions are listed in update-manifest.json." \
+            staged/Chicory-* staged/SHA256SUMS staged/update-manifest.json staged/update-manifest.json.sig
+        env:
+          GH_TOKEN: ${{ github.token }}

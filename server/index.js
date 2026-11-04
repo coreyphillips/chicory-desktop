@@ -10,6 +10,7 @@ const { createAccessGuard } = require('./access-control');
 const { releaseUpstreamOnClose } = require('./proxy-release');
 const { mountBrowserWalletApi } = require('./browser-wallet');
 const { createDesktopAccessGuard } = require('./desktop-access');
+const { createUpdateHold } = require('./update-hold');
 
 // Cap on how much of a failed daemon response is buffered before logging it.
 // Error bodies are small; this only stops a large one from being held in memory.
@@ -52,6 +53,8 @@ async function startManager({
 	app.use((_req, res, next) => closing
 		? res.status(503).json({ ok: false, error: { code: 'SHUTTING_DOWN', message: 'Chicory is closing.' } })
 		: next());
+	const updateHold = createUpdateHold();
+	app.use(updateHold.middleware);
 
 	// Restrict the API to what fronts the browser with Umbrel's SSO (app_proxy,
 	// or umbrelOS 2's app gateway on the host) and loopback, so other apps on
@@ -625,7 +628,7 @@ async function startManager({
 		})();
 		return closePromise;
 	};
-	return { app, server, manager, close };
+	return { app, server, manager, close, updateHold };
 }
 
 async function main() {
@@ -650,6 +653,15 @@ async function main() {
 	process.on('SIGINT', shutdown);
 	process.on('message', (message) => {
 		if (message && message.type === 'shutdown') void shutdown();
+		// The desktop shell asks before installing an update. It shuts the
+		// manager down next, so a granted hold is never released here.
+		if (message && message.type === 'update:hold' && typeof message.requestId === 'string') {
+			const reply = (ok) => process.connected &&
+				process.send({ type: 'update:hold-result', requestId: message.requestId, ok }, () => {});
+			if (!service || shuttingDown) reply(false);
+			else void service.updateHold.hold().then(reply, () => reply(false));
+		}
+		if (message && message.type === 'update:release') service?.updateHold.release();
 	});
 	// Closing or crashing the parent must not leave unattended wallet daemons.
 	if (process.connected) process.on('disconnect', shutdown);

@@ -115,14 +115,16 @@ npm run dist
 ```
 
 `package` creates an unpacked application in `release/`; `dist` builds the host's
-DMG/ZIP, NSIS installer or AppImage. Packaging checks that the bundled Node,
+development-labelled DMG/ZIP, NSIS installer or AppImage. Packaging checks that the bundled Node,
 engine, encrypted SQLite driver and Tor match the target. On macOS without a Developer ID,
 add `-c.mac.identity=-` to an `electron-builder` command for an ad hoc local build.
 
-The [package workflow](.github/workflows/package.yml) builds macOS Apple Silicon,
-macOS Intel, Windows x64 and Linux x64 artifacts on their respective hosts. It
-does not publish GitHub releases. Developer ID signing, notarization, Windows
-signing and automatic updates are not configured for this initial repository.
+The [package workflow](.github/workflows/package.yml) builds development
+artifacts for macOS Apple Silicon, macOS Intel, Windows x64 and Linux x64 on
+their respective hosts. They are not notarized or Windows signed, and they never
+update. The [release workflow](.github/workflows/release.yml) builds signed
+releases with a verified update manifest once the owner configures signing. No
+signed release has been published yet. See [releases](docs/releases.md).
 
 ## Verification
 
