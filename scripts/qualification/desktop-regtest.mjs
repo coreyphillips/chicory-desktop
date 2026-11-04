@@ -18,6 +18,9 @@ import { Recorder, dependencyVersions, hostEvidence, packageEvidence, resourcesD
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const executable = process.env.CHICORY_ELECTRON_EXECUTABLE;
+// Extra Chromium switches for the app, such as --password-store=gnome-libsecret
+// on a CI keyring or --use-mock-keychain on a developer Mac.
+const electronArgs = (process.env.CHICORY_ELECTRON_ARGS || '').split(/\s+/).filter(Boolean);
 const runtime = process.env.CHICORY_RUNTIME_DIR || (executable ? path.join(resourcesDirectory(executable), 'runtime') : path.join(root, '.runtime'));
 const bitcoin = process.env.REGTEST_BITCOIN_CONTAINER ?? 'chicory-browser-regtest-bitcoin-1';
 const electrum = { host: '127.0.0.1', port: Number(process.env.REGTEST_ELECTRUM_PORT ?? '62401'), tls: false };
@@ -32,12 +35,20 @@ const profiles = [];
 let peer;
 
 async function until(label, read, okay = Boolean, timeout = 180000) {
-  const start = Date.now(); let last;
+  const start = Date.now(); let last; let seen;
   while (Date.now() - start < timeout) {
-    try { const value = await read(); if (okay(value)) return value; } catch (error) { last = error; }
+    try { const value = await read(); if (okay(value)) return value; seen = value; last = undefined; } catch (error) { last = error; }
     await wait(1000);
   }
-  throw new Error(`Timed out waiting for ${label}${last ? `: ${last.message}` : ''}`);
+  // The last value read says why it never became ready, so it goes in the failure.
+  const detail = last ? `: ${last.message}` : seen === undefined ? '' : `; last seen ${JSON.stringify(seen)?.slice(0, 2000)}`;
+  throw new Error(`Timed out waiting for ${label}${detail}`);
+}
+
+/** A Lightning send that the engine already reports as failed stops the run with its reason. */
+function checkSent(label, result) {
+  if (result?.status === 'failed') throw new Error(`${label} failed: ${JSON.stringify(result).slice(0, 1000)}`);
+  return result;
 }
 
 function rpc(method, ...params) {
@@ -93,7 +104,7 @@ class DesktopApp {
 
   async open() {
     this.electron = await _electron.launch({
-      executablePath: executable || electronPath, args: executable ? [] : [path.join(root, 'desktop/main.cjs')],
+      executablePath: executable || electronPath, args: [...(executable ? [] : [path.join(root, 'desktop/main.cjs')]), ...electronArgs],
       cwd: root, env: { ...process.env, CHICORY_PROFILE_DIR: this.profile }, timeout: 30000,
     });
     this.page = await this.electron.firstWindow({ timeout: 30000 });
@@ -161,13 +172,27 @@ class DesktopApp {
     await page.getByRole('button', { name: 'Review payment', exact: true }).click();
     const hold = page.locator('[data-hold-confirmation]');
     await expect(hold).toBeVisible();
-    await hold.focus();
+    const focused = () => page.evaluate(() => {
+      const element = document.activeElement;
+      return element ? `${element.tagName} ${element.getAttribute('aria-label') ?? ''}`.trim() : 'none';
+    });
+    // Press only once the hold itself has focus, and say where focus went if it moved.
+    const press = async ms => {
+      await hold.focus();
+      await expect(hold, `hold focus (focus is on ${await focused()})`).toBeFocused();
+      await page.keyboard.down('Enter'); await wait(ms); await page.keyboard.up('Enter');
+    };
+    // A Lightning review fills in its route fee after it appears. Let it settle.
+    await wait(1500);
     // A short press must not submit. The deliberate hold below submits once.
-    await page.keyboard.down('Enter'); await wait(150); await page.keyboard.up('Enter');
+    await press(150);
     await wait(1200);
     await expect(hold).toBeVisible();
-    await page.keyboard.down('Enter'); await wait(1600); await page.keyboard.up('Enter');
+    const before = await focused();
+    await press(1600);
     await page.screenshot({ path: path.join(output, 'ui-hold-sent.png') });
+    await expect(hold, `the deliberate hold commits (focus was on ${before} before it)`).toBeHidden({ timeout: 15000 });
+    return { focusAfterShortPress: before };
   }
 }
 
@@ -288,16 +313,19 @@ try {
     record.skip('direct funding', 'No payer here holds a confirmed coin outside its channel, so no send uses the request\'s funding envelope.');
 
     const incoming = await wallet().receive(await wallet().quoteReceive({ amountSats: 15000, description: 'qualify incoming' }));
-    await payer.send(await payer.prepareSend({ request: incoming.bolt11 }));
-    await until('Lightning receive settled', () => wallet().getReceiveStatus(incoming), status => status.phase === 'completed');
+    const paying = checkSent('payer Lightning send', await payer.send(await payer.prepareSend({ request: incoming.bolt11 })));
+    // With no inbound capacity the primary opens a just-in-time channel on this
+    // payment, which settles only once its funding confirms, so blocks keep coming.
+    await until('Lightning receive settled', mining(async () => ({ status: await wallet().getReceiveStatus(incoming), paying,
+      payer: onePer((await payer.snapshot()).activity, 'paymentHash', incoming.paymentHash) })), value => value.status.phase === 'completed');
     record.pass('Lightning receive settled', { paymentHash: incoming.paymentHash });
 
     const outgoing = await payer.receive(await payer.quoteReceive({ amountSats: 5000, description: 'qualify outgoing' }));
-    await subject.holdToSend(outgoing.bolt11);
+    const ui = await subject.holdToSend(outgoing.bolt11);
     await until('payee credited', () => payer.getReceiveStatus(outgoing), status => status.phase === 'completed');
     const sent = await until('sent row settled', () => wallet().snapshot(), snap => onePer(snap.activity, 'paymentHash', outgoing.paymentHash).some(item => item.status === 'completed'));
     assert.equal(onePer(sent.activity, 'paymentHash', outgoing.paymentHash).length, 1, 'One Activity row per payment');
-    record.pass('Lightning send through the UI review and hold, one Activity row', { paymentHash: outgoing.paymentHash });
+    record.pass('Lightning send through the UI review and hold, one Activity row', { paymentHash: outgoing.paymentHash, ...ui });
 
     const destination = rpc('getnewaddress');
     const review = await wallet().prepareSend({ request: destination, amountSats: 20000, feeRate: 1 });
@@ -326,7 +354,9 @@ try {
     record.pass('complete app restart preserves wallet identity and history', { rows: after.activity.length });
   }
 
-  if (stages.has('crash')) {
+  if (stages.has('crash') && process.platform === 'win32') {
+    record.skip('crash during submission', 'Windows has no SIGSTOP, so the peer cannot be frozen to hold a payment in flight.');
+  } else if (stages.has('crash')) {
     const held = await wallet().receive(await wallet().quoteReceive({ amountSats: 2100, description: 'qualify held request' }));
     const invoice = await payer.receive(await payer.quoteReceive({ amountSats: 3000, description: 'qualify crash send' }));
     const review = await wallet().prepareSend({ request: invoice.bolt11 });
@@ -356,13 +386,27 @@ try {
     assert.equal(rows.length, 1, 'One outgoing record for the submitted payment');
     const credited = rows[0].status === 'completed';
     const payee = await until('payee agrees with the recorded outcome', () => payer.getReceiveStatus(invoice), status => (status.phase === 'completed') === credited, 30000);
-    await assert.rejects(() => wallet().send(review), 'A reviewed payment cannot be resent after a crash');
+    // The reopened app starts with a fresh client, so the old review would be
+    // refused locally. Submit the same invoice again through the manager: it
+    // must be refused or come to nothing, and the payee is paid exactly once.
+    let resend;
+    try { resend = await wallet().send(await wallet().prepareSend({ request: invoice.bolt11 })); resend = { submitted: resend?.status ?? true }; }
+    catch (error) { resend = { refused: error.code ?? error.message }; }
+    const once = await until('the payee holds exactly one credit', async () => {
+      const outgoing = onePer((await wallet().snapshot()).activity, 'paymentHash', invoice.paymentHash);
+      const incoming = onePer((await payer.snapshot()).activity, 'paymentHash', invoice.paymentHash);
+      return outgoing.some(item => item.status === 'pending') ? null : { outgoing, incoming };
+    }, Boolean, 120000);
+    assert.equal(once.incoming.filter(item => item.status === 'completed').length, 1, 'The payee is credited once');
+    assert.equal(once.outgoing.filter(item => item.status === 'completed').length, 1, 'One completed outgoing payment');
+    if (credited) assert.ok(resend.refused || once.outgoing.length === 1, 'A paid invoice is not paid again after a crash');
     // getReceiveStatus reports waiting even for a request the wallet no longer has.
     const saved = await (await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api/receive/requests`)).json();
     assert.ok(saved.result.requests.some(item => item.id === held.id && item.bolt11 === held.bolt11), 'Held request is still saved after the crash');
     await payer.send(await payer.prepareSend({ request: held.bolt11 }));
     await until('held request paid after the crash', () => wallet().getReceiveStatus(held), status => status.phase === 'completed');
-    record.pass('crash during submission leaves one outcome and the held request', { payee: payee.phase, rows: rows.map(item => item.status) });
+    record.pass('crash during submission leaves one outcome and the held request', { payee: payee.phase, rows: rows.map(item => item.status), resend,
+      paidOnce: { outgoing: once.outgoing.map(item => item.status), incoming: once.incoming.map(item => item.status) } });
   }
 
   if (stages.has('offline')) {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { GuardError, PROFILE_PREFIX, REGTEST_GENESIS, RegtestGate, assertDisposableProfile, assertLoopback,
   assertRegtestAddress, assertRegtestChain, assertRegtestWallets, headerHash, productionProfiles } from './guards.mjs';
-import { Recorder, dependencyVersions, packageFiles, redact } from './evidence.mjs';
+import { Recorder, dependencyVersions, packageEvidence, packageFiles, redact } from './evidence.mjs';
 
 // Regtest genesis header, and mainnet's, as Electrum returns them.
 const REGTEST_HEADER = '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000';
@@ -133,4 +133,34 @@ test('package files resolve per platform', () => {
     ['/A/Chicory.app/Contents/Resources/app.asar', '/A/Chicory.app/Contents/Resources/runtime/node/bin/node']);
   assert.equal(packageFiles('/opt/chicory/chicory', 'linux')[1], '/opt/chicory/resources/app.asar');
   assert.deepEqual(packageFiles(undefined), []);
+});
+
+test('package evidence changes when any bundled engine file changes', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chicory-package-evidence-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const write = (relative, text) => {
+    fs.mkdirSync(path.dirname(path.join(directory, relative)), { recursive: true });
+    fs.writeFileSync(path.join(directory, relative), text);
+  };
+  write('chicory-desktop', 'electron');
+  write('resources/app.asar', 'asar');
+  write('resources/server/desktop-bootstrap.js', 'bootstrap');
+  write('resources/runtime/node/bin/node', 'node');
+  write('resources/runtime/engine/node_modules/beignet/package.json', '{"version":"0.36.1"}');
+  write('resources/runtime/engine/node_modules/beignet/dist/cli/cli.js', 'engine one');
+  write('resources/runtime/tor/tor/tor', 'tor');
+  const executable = path.join(directory, 'chicory-desktop');
+  const before = packageEvidence(executable, 'linux');
+  write('resources/runtime/engine/node_modules/beignet/dist/cli/cli.js', 'engine two');
+  const after = packageEvidence(executable, 'linux');
+  assert.notEqual(after.components['runtime/engine'].sha256, before.components['runtime/engine'].sha256);
+  assert.notEqual(after.application.sha256, before.application.sha256);
+  for (const name of ['app.asar', 'server', 'runtime/node', 'runtime/tor'])
+    assert.equal(after.components[name].sha256, before.components[name].sha256, name);
+  assert.equal(after.components['runtime/engine'].files, 2);
+  assert.deepEqual(after.components.dist, { missing: true });
+  assert.deepEqual(after.files.map(entry => entry.file), ['chicory-desktop', 'resources/app.asar', 'resources/runtime/node/bin/node',
+    'resources/runtime/engine/node_modules/beignet/package.json']);
+  assert.equal(JSON.stringify(after).includes(directory), false, 'no absolute local paths');
+  assert.equal(packageEvidence(undefined), null);
 });

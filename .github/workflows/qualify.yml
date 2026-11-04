@@ -42,10 +42,17 @@ jobs:
           address=$(docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest -rpcwallet=chicory-test getnewaddress)
           case "$address" in bcrt1*) ;; *) echo "refusing non-regtest address"; exit 1 ;; esac
           docker exec chicory-browser-regtest-bitcoin-1 bitcoin-cli -datadir=/data -regtest generatetoaddress 101 "$address" > /dev/null
+      # Electron's sandbox needs unprivileged user namespaces on Ubuntu 24.04.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Wallet storage refuses plaintext key storage, so the app needs a real
+      # keyring. It runs in a D-Bus session with an unlocked gnome-keyring.
+      - run: sudo apt-get update && sudo apt-get install -y gnome-keyring dbus-x11
       - name: Qualify the packaged app
-        run: xvfb-run --auto-servernum npm run qualify:regtest
+        run: |
+          dbus-run-session -- sh -c 'printf qualify | gnome-keyring-daemon --unlock --components=secrets > /dev/null && xvfb-run --auto-servernum npm run qualify:regtest'
         env:
           CHICORY_ELECTRON_EXECUTABLE: ${{ github.workspace }}/release/linux-unpacked/chicory-desktop
+          CHICORY_ELECTRON_ARGS: --password-store=gnome-libsecret
           CHICORY_QUALIFY_STAGES: ${{ inputs.stages }}
       - if: always()
         uses: actions/upload-artifact@v4

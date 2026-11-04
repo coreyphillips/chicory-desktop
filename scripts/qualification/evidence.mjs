@@ -55,10 +55,68 @@ export function packageFiles(executable, platform = process.platform) {
     path.join(resources, 'runtime/engine/node_modules/beignet/package.json')];
 }
 
+export function applicationDirectory(executable, platform = process.platform) {
+  return platform === 'darwin' ? path.resolve(path.dirname(executable), '../..') : path.dirname(executable);
+}
+
+function walk(directory, prefix = '') {
+  const found = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) found.push(...walk(path.join(directory, entry.name), relative));
+    else found.push(relative);
+  }
+  return found;
+}
+
+/**
+ * One digest over every file under a path: its relative name and content
+ * hash, in sorted order, with symbolic links recorded by their target. Any
+ * changed, added or removed file changes it.
+ */
+export function treeDigest(target) {
+  if (!fs.existsSync(target)) return { missing: true };
+  const hash = createHash('sha256');
+  let files = 0;
+  let bytes = 0;
+  const stat = fs.lstatSync(target);
+  const entries = stat.isDirectory() ? walk(target) : [''];
+  for (const relative of entries) {
+    const full = relative ? path.join(target, relative) : target;
+    const item = fs.lstatSync(full);
+    if (item.isSymbolicLink()) hash.update(`link ${relative} ${fs.readlinkSync(full)}\n`);
+    else { hash.update(`file ${relative} ${sha256File(full)}\n`); files += 1; bytes += item.size; }
+  }
+  return { sha256: hash.digest('hex'), files, bytes };
+}
+
+// What the qualification exercises. Everything else under resources is Electron's own.
+const COMPONENTS = ['app.asar', 'dist', 'server'];
+
+/**
+ * Identifies the exact package that was qualified: a digest of the whole
+ * application, and of each part that carries code under test, including the
+ * bundled engine, Node runtime and Tor. Missing parts are recorded, not guessed.
+ */
 export function packageEvidence(executable, platform = process.platform) {
-  return packageFiles(executable, platform).map(file => fs.existsSync(file)
-    ? { file, bytes: fs.statSync(file).size, sha256: sha256File(file) }
-    : { file, missing: true });
+  if (!executable) return null;
+  const resources = resourcesDirectory(executable, platform);
+  const components = {};
+  for (const name of COMPONENTS) components[name] = treeDigest(path.join(resources, name));
+  const runtime = path.join(resources, 'runtime');
+  if (fs.existsSync(runtime)) for (const part of fs.readdirSync(runtime).sort()) components[`runtime/${part}`] = treeDigest(path.join(runtime, part));
+  else components.runtime = { missing: true };
+  const application = applicationDirectory(executable, platform);
+  // Paths are relative to the application, so a report kept as public
+  // evidence does not carry the local account name.
+  const relative = file => path.relative(application, file).split(path.sep).join('/');
+  return {
+    application: treeDigest(application),
+    components,
+    files: packageFiles(executable, platform).map(file => fs.existsSync(file)
+      ? { file: relative(file), bytes: fs.statSync(file).size, sha256: sha256File(file) }
+      : { file: relative(file), missing: true }),
+  };
 }
 
 export function hostEvidence() {
