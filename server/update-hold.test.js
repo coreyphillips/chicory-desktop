@@ -78,3 +78,25 @@ test('a client that disconnects does not end the wallet action it started', asyn
 	assert.equal(granted, true);
 	assert.equal(hold.inFlight, 0);
 });
+
+test('a request abandoned by its client stops counting after a bound', async (t) => {
+	const hold = createUpdateHold({ abandonedMs: 30 });
+	let started;
+	const handlerStarted = new Promise((resolve) => { started = resolve; });
+	// Like a proxied request whose client went away: the handler never ends the response.
+	const server = http.createServer((req, res) => hold.middleware(req, res, () => started(res)));
+	await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+	t.after(() => server.close());
+	const client = http.request({ host: '127.0.0.1', port: server.address().port, method: 'POST', path: '/' });
+	client.on('error', () => {});
+	client.end();
+	const res = await handlerStarted;
+	const closed = new Promise((resolve) => res.once('close', resolve));
+	client.destroy();
+	await closed;
+	assert.equal(hold.inFlight, 1, 'still counted right after the disconnect');
+	assert.equal(await hold.hold(1000), true, 'granted once the bound passes');
+	assert.equal(hold.inFlight, 0);
+	res.end();
+	assert.equal(hold.inFlight, 0, 'a late end is not counted twice');
+});

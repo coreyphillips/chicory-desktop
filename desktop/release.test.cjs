@@ -31,6 +31,18 @@ test('release artifacts are hashed and development-labelled files are refused', 
   await assert.rejects(release.describeArtifacts(directory, '0.3.0'), /release version/);
 });
 
+test('Linux and Windows artifacts are described with the names electron-builder gives them', async (t) => {
+  const directory = temporary(t);
+  // electron-builder spells an x64 AppImage 'x86_64'; the manifest uses Node's 'x64'.
+  fs.writeFileSync(path.join(directory, 'Chicory-0.3.0-linux-x86_64.AppImage'), 'appimage');
+  fs.writeFileSync(path.join(directory, 'Chicory-0.3.0-win-x64.exe'), 'exe');
+  const artifacts = await release.describeArtifacts(directory, '0.3.0');
+  assert.deepEqual(artifacts.map(({ platform, arch, file, installer }) => [platform, arch, file, installer]), [
+    ['linux', 'x64', 'Chicory-0.3.0-linux-x86_64.AppImage', true],
+    ['win32', 'x64', 'Chicory-0.3.0-win-x64.exe', true],
+  ]);
+});
+
 test('merged manifests record revision, components and storage formats', () => {
   const part = { version: '0.3.0', revision, components: { tor: '0.4.9.15' }, artifacts: [{ file: 'Chicory-0.3.0-win-x64.exe' }] };
   const manifest = release.mergeManifests([part, { ...part, artifacts: [{ file: 'Chicory-0.3.0-linux-x64.AppImage' }] }], { version: '0.3.0', revision });
@@ -51,9 +63,11 @@ test('platform builds from different sources or components cannot be merged', ()
 });
 
 test('storage formats match what this build writes', () => {
-  const { MAGIC } = require('../server/vault-files');
+  const { MAGIC, VAULT_FORMAT } = require('../server/vault-files');
+  const { ENVELOPE_VERSION } = require('./storage-key.cjs');
   assert.equal(MAGIC.toString(), release.STORAGE_FORMATS.vault);
-  assert.match(fs.readFileSync(path.join(root, 'desktop/storage-key.cjs'), 'utf8'), /version: 1, provider: 'electron.safeStorage'/);
+  assert.equal(VAULT_FORMAT, release.STORAGE_FORMATS.vaultLayout);
+  assert.equal(ENVELOPE_VERSION, release.STORAGE_FORMATS.keyEnvelope);
 });
 
 test('development packages are labelled and only the release config can drop the label', () => {

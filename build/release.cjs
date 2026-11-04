@@ -5,8 +5,10 @@ const path = require('node:path');
 const { createPrivateKey, sign } = require('node:crypto');
 const { PRODUCT, MANIFEST_SCHEMA, compareVersions, hashFile } = require('../desktop/update.cjs');
 
-const ARTIFACT = /^Chicory-(.+)-(mac|win|linux)-(arm64|x64)\.(dmg|zip|exe|AppImage)$/;
+// electron-builder names an x64 AppImage 'x86_64'. Manifests use Node's arch names.
+const ARTIFACT = /^Chicory-(.+)-(mac|win|linux)-(arm64|x64|x86_64)\.(dmg|zip|exe|AppImage)$/;
 const PLATFORM = { mac: 'darwin', win: 'win32', linux: 'linux' };
+const ARCH = { arm64: 'arm64', x64: 'x64', x86_64: 'x64' };
 // The format an installed build reads at startup. Bump the matching entry
 // whenever a release changes what it writes, so owners see it before updating.
 const STORAGE_FORMATS = Object.freeze({ keyEnvelope: 1, vault: 'CHICORYVAULT1', vaultLayout: 1, database: 'sqlcipher-aes256' });
@@ -27,7 +29,7 @@ async function describeArtifacts(directory, version) {
     if (!match) continue;
     if (match[1] !== version) throw new Error(`Artifact ${file} does not carry release version ${version}.`);
     const { sha256, size } = await hashFile(path.join(directory, file));
-    artifacts.push({ platform: PLATFORM[match[2]], arch: match[3], file, sha256, size, installer: match[4] !== 'zip' });
+    artifacts.push({ platform: PLATFORM[match[2]], arch: ARCH[match[3]], file, sha256, size, installer: match[4] !== 'zip' });
   }
   if (!artifacts.length) throw new Error('No release artifacts were found.');
   return artifacts;

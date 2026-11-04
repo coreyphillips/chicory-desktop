@@ -116,6 +116,20 @@ test('fresh install has no staging directory and downloads a verified installer'
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
+test('a Linux AppImage named the way electron-builder names it passes verification', () => {
+  const value = manifest();
+  value.artifacts.push({ platform: 'linux', arch: 'x64', file: 'Chicory-0.3.0-linux-x86_64.AppImage', sha256: digest, size: installer.length, installer: true });
+  const { bytes, signature } = signed(value);
+  const offer = update.verifyManifest(bytes, signature, { ...current, platform: 'linux', arch: 'x64' });
+  assert.equal(offer.artifact.file, 'Chicory-0.3.0-linux-x86_64.AppImage');
+  for (const file of ['../Chicory-0.3.0-linux-x86_64.AppImage', 'Chicory-0.3.0-linux-x86_64.AppImage/x', 'Chicory-0.3.0 linux.AppImage']) {
+    const bad = manifest();
+    bad.artifacts.push({ platform: 'linux', arch: 'x64', file, sha256: digest, size: installer.length, installer: true });
+    const forged = signed(bad);
+    assert.throws(() => update.verifyManifest(forged.bytes, forged.signature, { ...current, platform: 'linux', arch: 'x64' }), { code: 'UPDATE_INVALID' }, file);
+  }
+});
+
 test('a verified AppImage is staged executable', { skip: process.platform === 'win32' }, async (t) => {
   const artifact = { file: 'Chicory-0.3.0-linux-x86_64.AppImage', sha256: digest, size: installer.length };
   const file = await update.download({ body: Readable.from(chunks(installer)), artifact, directory: temporary(t), statfs: ample });

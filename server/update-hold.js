@@ -3,13 +3,17 @@
 // Requests that can move funds or change wallet state. Reads keep working
 // while an update waits, so the owner can still see the wallet.
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// A proxied wallet request whose client went away may never end its response,
+// because the proxy drops it. It stops counting this long after the disconnect,
+// so one abandoned request cannot block every later update.
+const ABANDONED_MS = 2 * 60 * 1000;
 
 /**
  * Lets the desktop shell pause wallet actions before it installs an update.
  * A hold refuses new actions and succeeds only once in-flight actions finish,
  * so an installer never starts between a payment request and its answer.
  */
-function createUpdateHold() {
+function createUpdateHold({ abandonedMs = ABANDONED_MS } = {}) {
 	let inFlight = 0;
 	let held = false;
 	let drained = [];
@@ -29,9 +33,11 @@ function createUpdateHold() {
 		}
 		inFlight++;
 		let done = false;
+		let abandoned;
 		const finish = () => {
 			if (done) return;
 			done = true;
+			clearTimeout(abandoned);
 			inFlight--;
 			settle();
 		};
@@ -42,6 +48,11 @@ function createUpdateHold() {
 			finish();
 			return end.apply(this, args);
 		};
+		res.once('close', () => {
+			if (done) return;
+			abandoned = setTimeout(finish, abandonedMs);
+			abandoned.unref?.();
+		});
 		next();
 	}
 
@@ -65,4 +76,4 @@ function createUpdateHold() {
 	return { middleware, hold, release, get inFlight() { return inFlight; }, get held() { return held; } };
 }
 
-module.exports = { createUpdateHold };
+module.exports = { createUpdateHold, ABANDONED_MS };

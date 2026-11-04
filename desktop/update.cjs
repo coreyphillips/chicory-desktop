@@ -11,7 +11,8 @@ const MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 // Leave room for the installer to unpack next to the staged download.
 const FREE_SPACE_MARGIN = 256 * 1024 * 1024;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$/;
-const ARTIFACT_NAME = /^Chicory-[0-9A-Za-z.-]+\.(dmg|zip|exe|AppImage)$/;
+// Underscores appear in electron-builder's 'x86_64' AppImage names.
+const ARTIFACT_NAME = /^Chicory-[0-9A-Za-z._-]+\.(dmg|zip|exe|AppImage)$/;
 const PLATFORMS = new Set(['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64']);
 
 function failure(code, message) {
