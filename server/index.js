@@ -162,6 +162,9 @@ async function startManager({
 	// A restore carries the whole archive in its body (base64), which on a box
 	// with many wallets is larger than any other request here. Mounted first so
 	// the general parser below leaves an already-parsed body alone.
+	// A full backup also carries every channel database, base64 in the body,
+	// up to the format's 256 MiB archive cap.
+	app.use('/api/backup/full', express.json({ limit: '360mb' }));
 	app.use('/api/backup', express.json({ limit: '32mb' }));
 	app.use(express.json({ limit: '1mb' }));
 
@@ -302,6 +305,34 @@ async function startManager({
 		'/backup/restore',
 		asyncHandler(async (req, res) => {
 			res.json({ ok: true, result: manager.restoreBackup(req.body || {}) });
+		})
+	);
+
+	// The portable full backup: every wallet with its channel databases,
+	// under a passphrase, for a fresh profile on another computer or OS
+	// account. Distinct from the settings archive above and from a recovery
+	// phrase. On desktop these routes also need the app lock's fresh grant.
+	api.post(
+		'/backup/full/export',
+		asyncHandler(async (req, res) => {
+			const { archive, filename } = await manager.exportFullBackup(req.body || {});
+			res.setHeader('Content-Type', 'application/octet-stream');
+			res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+			res.setHeader('Content-Length', String(archive.length));
+			res.setHeader('Cache-Control', 'no-store');
+			res.end(archive);
+		})
+	);
+	api.post(
+		'/backup/full/inspect',
+		asyncHandler(async (req, res) => {
+			res.json({ ok: true, result: manager.inspectFullBackup(req.body || {}) });
+		})
+	);
+	api.post(
+		'/backup/full/restore',
+		asyncHandler(async (req, res) => {
+			res.json({ ok: true, result: await manager.restoreFullBackup(req.body || {}) });
 		})
 	);
 

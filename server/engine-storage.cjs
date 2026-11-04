@@ -205,6 +205,39 @@ function backupDatabase(source, destination, key, options = {}) {
   }
 }
 
+/**
+ * Copies a database from one key to another with no plaintext on disk: the
+ * source is read under its key in one read transaction, so a live writer's
+ * later commits do not tear the copy, and SQLite writes every page of the
+ * destination under the new key. Used to move wallet databases into and out
+ * of a portable backup without exposing a profile's own database key.
+ */
+function rekeyDatabase(source, sourceKey, destination, destinationKey, options = {}) {
+  const from = checkedKey(sourceKey);
+  const to = checkedKey(destinationKey);
+  let database;
+  const staged = `${destination}.chicory-rekey-${crypto.randomUUID()}`;
+  try {
+    if (path.resolve(source) === path.resolve(destination) || fs.existsSync(destination)) throw new Error();
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      if (fs.existsSync(`${destination}${suffix}`)) throw new Error();
+    }
+    if (isPlaintextDatabase(source)) throw new Error();
+    database = keyedDatabase(source, from, { ...options, readonly: true, fileMustExist: true });
+    checkIntegrity(database);
+    exportEncrypted(database, staged, to, options);
+    database.close();
+    database = undefined;
+    fs.renameSync(staged, destination);
+    fsyncDirectory(path.dirname(destination));
+  } catch {
+    throw storageError('WALLET_STORAGE_REKEY_FAILED', 'The wallet database could not be copied under its new key. Nothing was replaced.');
+  } finally {
+    if (database?.open) database.close();
+    try { fs.rmSync(staged, { force: true }); } catch {}
+  }
+}
+
 function openEncryptedDatabase(filename, inputKey, options = {}) {
   const key = checkedKey(inputKey);
   if (typeof filename !== 'string' || !filename || filename.startsWith('file:')) {
@@ -262,7 +295,7 @@ function EncryptedDatabase(filename, options) {
 }
 
 module.exports = {
-  EncryptedDatabase, openEncryptedDatabase, verifyDatabase,
+  EncryptedDatabase, openEncryptedDatabase, verifyDatabase, rekeyDatabase,
   isDatabaseFile, isDatabaseSidecar, isPlaintextDatabase, isUnlockedDatabase,
 };
 
