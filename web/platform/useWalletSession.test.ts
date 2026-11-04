@@ -98,6 +98,22 @@ class Host extends UmbrelWalletClient {
   }
   override async updateWalletSettings() { this.events.push('settings'); }
 }
+/** The desktop wallet service's encrypted store, in memory. */
+let secureDelay: Promise<unknown> | null = null;
+const secureEntries = new Map<string, { service: string; username: string; password: string }>();
+Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: async (input: string, init: RequestInit = {}) => {
+  const url = String(input);
+  if (!url.startsWith('/api/secure-store')) throw new Error(`Unexpected request ${url}`);
+  const service = url === '/api/secure-store' ? undefined : decodeURIComponent(url.slice('/api/secure-store/'.length));
+  const method = init.method ?? 'GET';
+  let result: unknown = true;
+  if (method === 'GET' && service && secureDelay) await secureDelay;
+  if (service === undefined) result = [...secureEntries.keys()];
+  else if (method === 'GET') result = secureEntries.get(service) ?? null;
+  else if (method === 'PUT') secureEntries.set(service, { service, ...JSON.parse(String(init.body)) });
+  else if (method === 'DELETE') secureEntries.delete(service);
+  return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+} });
 const roots = new Set<ReactTestRenderer>();
 beforeEach(() => {
   local.entries.clear(); sessionStore.entries.clear();
@@ -427,4 +443,45 @@ test('erasing draws the erase transit until the host answers, and a refusal is s
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: { erase: async () => { calls += 1; return { ok: true }; } } } });
   await act(async () => { await app.session.eraseDevice!(); });
   assert.equal(calls, 2);
+});
+
+test('a returning desktop wallet opens on its encrypted cached view until the live read lands', async () => {
+  const { cacheEntry } = await import('../chicory/src/services/snapshotCache.ts');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  // Its own wallet, so no earlier test's in-memory entry stands in for the store.
+  const returning = { ...record, id: 'wallet-returning' };
+  const cachedAt = Date.now() - 3_600_000;
+  const service = `com.beignet.wallet.last-snapshot.${returning.id}`;
+  secureEntries.set(service, { service, username: 'beignet-snapshot',
+    password: cacheEntry(returning.id, { ...snapshot(returning, 777), updatedAt: cachedAt }).stored });
+  const host = new Host([returning]);
+  const live = deferred<WalletSnapshot>();
+  host.read = () => live.promise;
+  const app = await mount(host);
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.equal(app.session.snapshot?.balance.totalSats, 777, 'the cached view is shown while the engine starts');
+  assert.equal(app.session.snapshot?.primary.connected, false, 'a cached connection is never claimed');
+  assert.equal(app.session.snapshot?.updatedAt, cachedAt, 'it keeps its original time, so the staleness gate holds');
+  await act(async () => { live.resolve(snapshot(returning, 100)); await live.promise; });
+  assert.equal(app.session.snapshot?.balance.totalSats, 100);
+  assert.equal(app.session.snapshot?.primary.connected, true);
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  assert.match(secureEntries.get(service)!.password, /"totalSats":100/, 'the live read becomes the next cached view');
+});
+
+test('a cached view that arrives after the live read never covers it', async () => {
+  const { cacheEntry } = await import('../chicory/src/services/snapshotCache.ts');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
+  const racing = { ...record, id: 'wallet-racing' };
+  const service = `com.beignet.wallet.last-snapshot.${racing.id}`;
+  secureEntries.set(service, { service, username: 'beignet-snapshot', password: cacheEntry(racing.id, snapshot(racing, 777)).stored });
+  const slow = deferred<void>();
+  secureDelay = slow.promise;
+  try {
+    const app = await mount(new Host([racing]));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    assert.equal(app.session.snapshot?.balance.totalSats, 100, 'the live read landed first');
+    await act(async () => { slow.resolve(); await new Promise(resolve => setTimeout(resolve, 10)); });
+    assert.equal(app.session.snapshot?.balance.totalSats, 100, 'the late cache read is ignored');
+  } finally { secureDelay = null; }
 });

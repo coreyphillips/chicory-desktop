@@ -101,7 +101,18 @@ current gaps are described in [desktop-qualification.md](desktop-qualification.m
 Version 0.2 adds OS-protected storage keys, authenticated encrypted wallet files,
 SQLCipher-compatible wallet/guardian databases and encrypted engine backups.
 Fresh profiles are supported without legacy migration code. Biometric approval
-on real hardware and encrypted renderer drafts remain tracked work. Bundled Tor starts on demand and refuses direct onion
+on real hardware remains tracked work.
+
+Private interface state is kept by the wallet service in its encrypted storage
+(`wallets/secure-store/`), never in browser storage: offline request drafts,
+each wallet's cached view, auto-pay policy and network profiles. The app lock
+gates it with the rest of `/api`, and an erase removes it. Only display
+preferences and the selected wallet stay in browser storage, and private
+entries left there by an earlier build are deleted, not imported. A returning
+wallet opens on its cached view while the engine starts. That view is shown
+disconnected, keeps its original time so the staleness rules still refuse
+payments against it, and is merged under each live read so known history is
+never dropped. Bundled Tor starts on demand and refuses direct onion
 fallback. Clearnet connections retain their normal routing.
 
 Settings > Funds and exits > Erase all wallets from this computer erases every

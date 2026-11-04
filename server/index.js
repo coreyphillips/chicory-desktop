@@ -11,6 +11,7 @@ const { releaseUpstreamOnClose } = require('./proxy-release');
 const { mountBrowserWalletApi } = require('./browser-wallet');
 const { createDesktopAccessGuard } = require('./desktop-access');
 const { createUpdateHold } = require('./update-hold');
+const { createSecureStore } = require('./secure-store');
 
 // Cap on how much of a failed daemon response is buffered before logging it.
 // Error bodies are small; this only stops a large one from being held in memory.
@@ -165,6 +166,8 @@ async function startManager({
 	// A full backup also carries every channel database, base64 in the body,
 	// up to the format's 256 MiB archive cap.
 	app.use('/api/backup/full', express.json({ limit: '360mb' }));
+	// A cached wallet view with a long history is larger than other requests.
+	app.use('/api/secure-store', express.json({ limit: '10mb' }));
 	app.use('/api/backup', express.json({ limit: '32mb' }));
 	app.use(express.json({ limit: '1mb' }));
 
@@ -307,6 +310,25 @@ async function startManager({
 			res.json({ ok: true, result: manager.restoreBackup(req.body || {}) });
 		})
 	);
+
+	// Private interface state on desktop: offline request drafts, cached
+	// wallet views, auto-pay policy and network profiles, encrypted at rest
+	// with the wallet storage and gated by the app lock like the rest of /api.
+	const secureStore = createSecureStore({ dataDir: config.dataDir });
+	api.get('/secure-store', asyncHandler(async (req, res) => {
+		res.setHeader('Cache-Control', 'no-store');
+		res.json({ ok: true, result: secureStore.list() });
+	}));
+	api.get('/secure-store/:service', asyncHandler(async (req, res) => {
+		res.setHeader('Cache-Control', 'no-store');
+		res.json({ ok: true, result: secureStore.get(req.params.service) });
+	}));
+	api.put('/secure-store/:service', asyncHandler(async (req, res) => {
+		res.json({ ok: true, result: secureStore.set(req.params.service, req.body || {}) });
+	}));
+	api.delete('/secure-store/:service', asyncHandler(async (req, res) => {
+		res.json({ ok: true, result: secureStore.remove(req.params.service) });
+	}));
 
 	// The portable full backup: every wallet with its channel databases,
 	// under a passphrase, for a fresh profile on another computer or OS
