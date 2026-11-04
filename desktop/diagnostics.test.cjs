@@ -142,6 +142,17 @@ test('reports corrupt encrypted storage with the manager error tail', t => {
   assert.equal(JSON.stringify(persisted).includes(KEY), false);
 });
 
+test('redacts a recovery phrase wrapped across stderr lines and chunks', t => {
+  const { diagnostics, file } = diagnosticsFor(t);
+  const words = PHRASE.split(' ');
+  diagnostics.managerOutput(`mnemonic: ${words.slice(0, 6).join(' ')}\n${words.slice(6, 9).join(' ')}`);
+  diagnostics.managerOutput(` ${words.slice(9).join(' ')}\nError: vault open failed\n`);
+  diagnostics.startupEnded('failed', new Error('vault open failed'));
+  assert.deepEqual(diagnostics.report().managerOutput, ['mnemonic: [redacted words]', 'Error: vault open failed']);
+  for (const text of [fs.readFileSync(file, 'utf8'), diagnostics.text()])
+    for (const word of words) assert.doesNotMatch(text, new RegExp(`\\b${word}\\b`), word);
+});
+
 test('reports a crashed manager and engine exits without wallet identifiers', t => {
   const { diagnostics, file, time } = diagnosticsFor(t);
   diagnostics.state('manager', 'ready');
@@ -218,6 +229,9 @@ test('records a shutdown that needed the kill deadline as a timeout', async t =>
   const failing = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, connected: true });
   failing.send = () => queueMicrotask(() => failing.emit('exit', 1, null));
   assert.equal(await stopChild(failing), 'failed');
+  const crashed = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, connected: true });
+  crashed.send = () => queueMicrotask(() => crashed.emit('exit', null, 'SIGSEGV'));
+  assert.equal(await stopChild(crashed), 'failed');
   diagnostics.shutdownEnded({ manager: 'failed', tor: 'stopped' });
   assert.equal(diagnostics.report().shutdowns.at(-1).outcome, 'incomplete');
 });

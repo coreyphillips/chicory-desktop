@@ -8,6 +8,9 @@ const REPORT_FORMAT = 1;
 const EVENT_LIMIT = 40;
 const OUTCOME_LIMIT = 5;
 const OUTPUT_LIMIT = 20;
+// A recovery phrase has at most 24 words, so wrapped one word per line it
+// spans 24 lines. Each kept line is redacted with this many lines before it.
+const CONTEXT_LINES = 23;
 const MESSAGE_LIMIT = 300;
 const FILE_LIMIT = 64 * 1024;
 const INPUT_LIMIT = 256 * 1024;
@@ -20,15 +23,16 @@ const SENSITIVE_FIELD = /key|token|secret|password|passphrase|mnemonic|seed|cook
 
 function now() { return Date.now(); }
 const iso = at => new Date(at).toISOString();
+const clip = (text, limit) => (text.length > limit ? `${text.slice(0, limit - 3)}...` : text);
 
 /**
  * Removes secrets and identifiers from free text before it is kept or copied.
  * Over-redaction is accepted: a support report never needs these values.
  */
-function redactText(value, { paths = [], limit = MESSAGE_LIMIT } = {}) {
+function redactText(value, { paths = [], limit = MESSAGE_LIMIT, input = 16384 } = {}) {
   // Bound the regex work on runaway input. The cut is far past `limit`, so a
   // phrase split by it cannot shift into the kept text.
-  let text = String(value ?? '').slice(0, 16384);
+  let text = String(value ?? '').slice(0, input);
   for (const [prefix, label] of paths) text = text.split(prefix).join(label);
   text = text
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
@@ -45,7 +49,7 @@ function redactText(value, { paths = [], limit = MESSAGE_LIMIT } = {}) {
     .replace(/(?:\/(?:Users|home)\/|[A-Za-z]:\\(?:Users|Documents and Settings)\\)[^/\\\s"']+/g, '<home>')
     .replace(/[A-Za-z0-9+/_-]{40,}={0,2}/g, '[redacted]')
     .replace(/\b[13mn2][a-km-zA-HJ-NP-Z1-9]{25,39}\b/g, '[redacted address]');
-  return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
+  return clip(text, limit);
 }
 
 /** Copies a structured value with sensitive fields removed and every string redacted. */
@@ -192,15 +196,23 @@ class DesktopDiagnostics {
     else { this.state('manager', 'crashed', { code: 'MANAGER_EXITED', message: reason }); this.persist(); }
   }
 
-  /** Keeps a short redacted tail of the manager's error stream. */
+  /**
+   * Keeps the last lines of the manager's error stream in memory only. They
+   * are redacted together when read, so a phrase wrapped across lines or
+   * chunks is still caught.
+   */
   managerOutput(chunk) {
     const lines = (this.partial + String(chunk)).split(/\r?\n/);
     this.partial = lines.pop().slice(-1024);
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      this.output.push(redactText(line, this.options));
-      if (this.output.length > OUTPUT_LIMIT) this.output.shift();
-    }
+    for (const line of lines) if (line.trim()) this.output.push(line.slice(0, 1024));
+    const keep = OUTPUT_LIMIT + CONTEXT_LINES;
+    if (this.output.length > keep) this.output.splice(0, this.output.length - keep);
+  }
+
+  outputTail() {
+    if (!this.output.length) return [];
+    const text = redactText(this.output.join('\n'), { ...this.options, limit: Infinity, input: Infinity });
+    return text.split('\n').slice(-OUTPUT_LIMIT).map(line => clip(line, MESSAGE_LIMIT));
   }
 
   suspend() {
@@ -225,7 +237,7 @@ class DesktopDiagnostics {
     const failed = ['failed', 'crashed'].some(state => Object.values(this.lifecycle).some(entry => entry.state === state)) ||
       this.startups.at(-1)?.outcome === 'failed';
     return { format: REPORT_FORMAT, savedAt: iso(this.clock()), versions: this.versions, lifecycle: this.lifecycle,
-      startups: this.startups, shutdowns: this.shutdowns, events: this.events, ...(failed ? { managerOutput: this.output } : {}) };
+      startups: this.startups, shutdowns: this.shutdowns, events: this.events, ...(failed ? { managerOutput: this.outputTail() } : {}) };
   }
 
   persist() {
@@ -272,7 +284,7 @@ class DesktopDiagnostics {
         tor: { state: 'unsupported' },
       },
       events: this.events,
-      managerOutput: this.output,
+      managerOutput: this.outputTail(),
       // redactValue keeps an array's first 50 items, so the newest are picked here.
       ...(Array.isArray(events) ? { appEvents: redactValue(events.slice(-50), this.options) } : {}),
       ...(walletError ? { walletError: redactText(walletError, this.options) } : {}),
@@ -301,7 +313,10 @@ function stopChild(child, { timeoutMs = 45000, message = { type: 'shutdown' } } 
   return new Promise(resolve => {
     let outcome = 'exited';
     const deadline = setTimeout(() => { outcome = 'timeout'; child.kill('SIGKILL'); }, timeoutMs);
-    child.once('exit', code => { clearTimeout(deadline); resolve(outcome === 'exited' && code ? 'failed' : outcome); });
+    // SIGTERM is a stop request, sent below when there is no IPC channel. Any
+    // other signal is a crash.
+    child.once('exit', (code, signal) => { clearTimeout(deadline);
+      resolve(outcome === 'exited' && (code || (signal && signal !== 'SIGTERM')) ? 'failed' : outcome); });
     if (child.connected) child.send(message, () => {});
     else child.kill('SIGTERM');
   });
