@@ -137,8 +137,7 @@ test('reports corrupt encrypted storage with the manager error tail', t => {
   assert.equal(report.lifecycle.storage.code, 'STORAGE_UNAVAILABLE');
   assert.equal(report.lifecycle.manager.state, 'crashed');
   // The last line had no newline. It is often the error that ended the process, so it is kept.
-  // Only the profile prefix is replaced, so the rest keeps the host's separators.
-  assert.deepEqual(report.managerOutput, [`vault open failed at ${path.join('<profile>', 'wallets', 'x.db')}`, 'key=[redacted]', 'partial']);
+  assert.deepEqual(report.managerOutput, ['vault open failed at <profile>/wallets/x.db', 'key=[redacted]', 'partial']);
   const persisted = saved(file);
   assert.equal(persisted.managerOutput.length, 3);
   assert.equal(JSON.stringify(persisted).includes(KEY), false);
