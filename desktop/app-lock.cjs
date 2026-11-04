@@ -19,6 +19,8 @@ const WALLET_ROUTE = /^\/(api|wallets)(\/|$)/;
 // phrase through the manager, but it is reachable through the proxy.
 const SECRET_ROUTES = [/^\/api\/wallets\/[^/]+\/recovery-phrase\/?$/i, /^\/api\/backup(\/|$)/i,
   /^\/wallets\/[^/]+\/api\/mnemonic\/?$/i];
+// The proxy collapses repeated slashes, so '/api//mnemonic' still reaches the daemon route.
+const isSecret = pathname => SECRET_ROUTES.some(route => route.test(pathname.replace(/\/{2,}/g, '/')));
 
 const MESSAGES = {
   cancelled: 'Authentication was cancelled. Chicory stays locked.',
@@ -145,7 +147,7 @@ class AppLock {
     if (!this.enabled) { this.unlocked = true; return Promise.resolve({ ok: true }); }
     // Applies a grace period that has run out, but only a native focus ends
     // the time away.
-    if (!this.prompting && this.backgroundedAt !== null && this.now() - this.backgroundedAt > this.graceMs) this.relock('grace');
+    this.expire();
     if (this.unlocked) return Promise.resolve({ ok: true });
     const generation = this.generation;
     this.unlocking ??= this.authenticate('unlock').then(result => {
@@ -172,11 +174,12 @@ class AppLock {
     if (next) {
       this.availability = null;
       if (!(await this.kind())) return { ok: false, error: MESSAGES.enableUnavailable };
-      const result = await this.authenticate('enable');
-      if (!result.ok) {
-        return { ok: false, error: result.reason === 'cancelled' ? MESSAGES.enableCancelled
-          : result.reason === 'unavailable' ? MESSAGES.enableUnavailable : result.error };
-      }
+    }
+    // Turning the lock off releases recovery phrases without a prompt, so it needs one too.
+    const result = await this.authenticate(next ? 'enable' : 'disable');
+    if (!result.ok) {
+      return { ok: false, error: result.reason === 'cancelled' ? MESSAGES.enableCancelled
+        : result.reason === 'unavailable' ? MESSAGES.enableUnavailable : result.error };
     }
     try { writeMetadata(this.profile, next); }
     catch { return { ok: false, error: MESSAGES.saveFailed }; }
@@ -224,7 +227,18 @@ class AppLock {
   background(reason = 'blur') {
     if (this.quiet()) return;
     this.conceal(reason);
-    this.backgroundedAt ??= this.now();
+    if (this.backgroundedAt !== null) return;
+    this.backgroundedAt = this.now();
+    this.timers.setTimeout(() => this.expire(), this.graceMs + 1);
+  }
+
+  /**
+   * Closes the gate once the time away outlasts the grace period, whether or
+   * not focus comes back. 'away' leaves the lock screen waiting for Unlock
+   * instead of raising a system prompt over another app.
+   */
+  expire() {
+    if (!this.prompting && this.backgroundedAt !== null && this.now() - this.backgroundedAt > this.graceMs) this.relock('away');
   }
 
   foreground() {
@@ -237,9 +251,10 @@ class AppLock {
   /** Admits a renderer request for a wallet route, or refuses it while locked. */
   admit(pathname) {
     if (!WALLET_ROUTE.test(pathname)) return { ok: true, ticket: null };
+    this.expire();
     if (this.required()) return { ok: false };
     // Concealment drops a phrase in flight whether or not the lock is on.
-    const secret = SECRET_ROUTES.some(route => route.test(pathname));
+    const secret = isSecret(pathname);
     if (secret && this.enabled) {
       const grant = this.grant;
       this.grant = null;
@@ -254,6 +269,7 @@ class AppLock {
   /** Whether a response may still be delivered for a ticket admitted earlier. */
   current(ticket) {
     if (!ticket) return true;
+    this.expire();
     return !this.required() && ticket.generation === this.generation &&
       (ticket.concealed === null || ticket.concealed === this.concealed);
   }

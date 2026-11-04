@@ -63,6 +63,18 @@ test('enabling persists only after system authentication succeeds', async () => 
   assert.deepEqual(accepted.events.at(-1), ['changed', true]);
 });
 
+test('disabling needs a successful prompt, so it cannot stand in for a reveal', async () => {
+  const { lock, auth, saved } = harness({ enabled: true, answers: [{ ok: true }, { ok: false, reason: 'cancelled' }, { ok: true }] });
+  await lock.unlock();
+  const refused = await lock.setEnabled(false);
+  assert.match(refused.error, /cancelled.*not changed/);
+  assert.deepEqual(saved(), { version: 1, enabled: true });
+  assert.equal(lock.admit('/api/wallets/abc/recovery-phrase').ok, false);
+  assert.deepEqual(await lock.setEnabled(false), { ok: true });
+  assert.deepEqual(auth.calls, ['unlock', 'disable', 'disable']);
+  assert.deepEqual(saved(), { version: 1, enabled: false });
+});
+
 test('a cold launch with the lock on admits no wallet route until authentication succeeds', async () => {
   const { lock, auth } = harness({ enabled: true, answers: [{ ok: false, reason: 'cancelled' }, { ok: true }] });
   assert.equal(lock.required(), true);
@@ -156,7 +168,7 @@ test('a recovery phrase needs fresh authentication for exactly one request', asy
   assert.deepEqual(auth.calls, ['unlock', 'reveal', 'reveal', 'reveal', 'reveal']);
 
   for (const other of ['/api/wallets/abc/RECOVERY-PHRASE', '/api/Wallets/abc/Recovery-Phrase/', '/api/BACKUP/export',
-    '/wallets/abc/api/mnemonic', '/wallets/abc/API/Mnemonic/']) {
+    '/wallets/abc/api/mnemonic', '/wallets/abc/API/Mnemonic/', '/wallets/abc/api//mnemonic', '/api//backup/export']) {
     assert.equal(lock.admit(other).ok, false, `${other} needs a grant like the canonical route`);
     await lock.authorizeSecret();
     assert.equal(lock.admit(other).ok, true, other);
@@ -239,6 +251,28 @@ test('the background grace period relocks, and Chicory\'s own prompts do not sta
   late.advance(30001);
   await late.lock.unlock();
   assert.deepEqual(late.auth.calls, ['unlock', 'unlock'], 'an unlock call after the grace period prompts again');
+
+  // Focus never comes back: the gate still closes when the grace period ends.
+  const away = harness({ enabled: true });
+  await away.lock.unlock();
+  const payment = away.lock.admit('/wallets/abc/api/send').ticket;
+  away.lock.background('blur');
+  away.advance(30001);
+  assert.equal(away.lock.current(payment), false, 'an earlier payment is not delivered');
+  assert.equal(away.lock.admit('/wallets/abc/api/send').ok, false);
+  assert.deepEqual(away.events.filter(([name]) => name === 'locked'), [['locked', 'away']]);
+  let clock = 0;
+  const pending = [];
+  const timed = new AppLock({ profile: profile(), authenticator: authenticator(), now: () => clock, settleMs: 0,
+    timers: { setTimeout: (callback, ms) => pending.push([callback, ms]) } });
+  await timed.setEnabled(true);
+  pending.length = 0;
+  timed.background('blur');
+  timed.background('hidden');
+  assert.equal(pending.length, 1, 'one expiry per time away');
+  clock += pending[0][1];
+  pending[0][0]();
+  assert.equal(timed.required(), true, 'the expiry timer relocks without any request or focus');
 
   // A long prompt raised by Chicory blurs the window. That blur neither
   // conceals nor starts the clock, so its own focus return does not relock.

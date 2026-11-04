@@ -6,6 +6,7 @@ const path = require('node:path');
 const REASONS = {
   unlock: 'unlock Chicory',
   enable: 'require authentication to open Chicory',
+  disable: 'turn off the Chicory app lock',
   reveal: 'show your recovery phrase',
 };
 

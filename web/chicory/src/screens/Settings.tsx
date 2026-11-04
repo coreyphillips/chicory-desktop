@@ -465,7 +465,8 @@ function PrimaryPanel({
  * (`setLockEnabled`), and that prompt is one the app raised
  * (`duringSystemPrompt`), so Settings stays in view behind it rather than
  * going under the privacy cover; once it confirms, the glyph draws itself
- * in again and its disc fills. Turning it off asks for nothing.
+ * in again and its disc fills. On desktop, turning it off asks as well.
+ * Otherwise it would release recovery phrases without a prompt.
  *
  * It draws nothing in its row until the phone has said what it offers, so
  * a phone with Face ID never flashes the line for a phone with none.
@@ -525,9 +526,7 @@ const AppLockRow = memo(function AppLockLine({
           setBusy(true);
           setError('');
           try {
-            await (next
-              ? duringSystemPrompt(() => setLockEnabled(true))
-              : setLockEnabled(false));
+            await duringSystemPrompt(() => setLockEnabled(next));
             setEnabled(next);
             if (next) setDrawn(count => count + 1);
           } catch (e) {
