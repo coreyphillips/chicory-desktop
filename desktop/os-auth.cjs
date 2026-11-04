@@ -11,45 +11,37 @@ const REASONS = {
 };
 
 // Windows Hello through UserConsentVerifier. It accepts the PIN as well as
-// face or fingerprint, so a changed enrollment still has a way in.
-const WINDOWS_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
-  $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1'
-} | Select-Object -First 1
-function Await($operation, [Type]$type) {
-  $task = $asTask.MakeGenericMethod($type).Invoke($null, @($operation))
-  $task.Wait(-1) | Out-Null
-  $task.Result
-}
-$verifier = [Windows.Security.Credentials.UI.UserConsentVerifier, Windows.Security.Credentials.UI, ContentType = WindowsRuntime]
-$availability = Await ($verifier::CheckAvailabilityAsync()) ([Windows.Security.Credentials.UI.UserConsentVerifierAvailability])
-if ('__MODE__' -eq 'check' -or [string]$availability -ne 'Available') { [Console]::Out.Write([string]$availability); exit 0 }
-$result = Await ($verifier::RequestVerificationAsync('Chicory: __REASON__')) ([Windows.Security.Credentials.UI.UserConsentVerificationResult])
-[Console]::Out.Write([string]$result)
-`;
-
+// face or fingerprint, so a changed enrollment still has a way in. The helper
+// (desktop/windows-hello/hello.cpp) raises it for the Chicory window's handle,
+// so the prompt is owned by that window and opens in front of it, on the same
+// monitor.
 const WINDOWS_UNAVAILABLE = new Set(['DeviceNotPresent', 'NotConfiguredForUser', 'DisabledByPolicy']);
+// The helper cancels its own prompt at 110 seconds, before this kills it.
+const WINDOWS_VERIFY_TIMEOUT_MS = 120000;
+const WINDOWS_CHECK_TIMEOUT_MS = 15000;
 
-function windowsCommand(mode, reason) {
-  const script = WINDOWS_SCRIPT.replace('__MODE__', mode).replace('__REASON__', reason);
-  return ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+/** BrowserWindow.getNativeWindowHandle() as the helper's decimal HWND argument. */
+function windowHandleArgument(handle) {
+  if (!Buffer.isBuffer(handle)) return null;
+  const value = handle.length === 8 ? handle.readBigUInt64LE() : handle.length === 4 ? BigInt(handle.readUInt32LE()) : 0n;
+  return value > 0n ? value.toString() : null;
 }
 
-function windowsAuthenticator({ execFile, env }) {
-  const shell = path.win32.join(env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const run = (mode, reason, timeout) => new Promise(resolve => {
-    execFile(shell, windowsCommand(mode, reason), { windowsHide: true, timeout, maxBuffer: 4096 },
+function windowsAuthenticator({ execFile, helper, windowHandle }) {
+  const run = (args, timeout) => new Promise(resolve => {
+    execFile(helper, args, { windowsHide: true, timeout, maxBuffer: 4096 },
       (error, stdout) => resolve(error ? null : String(stdout).trim()));
   });
   return {
     async availability() {
-      return { kind: (await run('check', REASONS.unlock, 15000)) === 'Available' ? 'passcode' : null };
+      return { kind: (await run(['check'], WINDOWS_CHECK_TIMEOUT_MS)) === 'Available' ? 'passcode' : null };
     },
     async authenticate(purpose) {
-      const answer = await run('verify', REASONS[purpose] || REASONS.unlock, 120000);
+      let handle = null;
+      try { handle = windowHandleArgument(windowHandle()); } catch {}
+      // Without Chicory's window there is nothing to own the prompt.
+      if (!handle) return { ok: false, reason: 'failed' };
+      const answer = await run(['verify', handle, `Chicory: ${REASONS[purpose] || REASONS.unlock}`], WINDOWS_VERIFY_TIMEOUT_MS);
       if (answer === 'Verified') return { ok: true };
       if (answer === 'Canceled') return { ok: false, reason: 'cancelled' };
       if (WINDOWS_UNAVAILABLE.has(answer)) return { ok: false, reason: 'unavailable' };
@@ -84,13 +76,17 @@ const unavailable = {
 
 /**
  * macOS uses Touch ID with the account password as fallback, and Windows uses
- * Windows Hello. Linux has no user-presence API Chicory can rely on, so it
- * reports none and Settings shows no toggle there.
+ * Windows Hello through the bundled helper, given by its absolute path so it
+ * is never resolved through PATH. Linux has no user-presence API Chicory can
+ * rely on, so it reports none and Settings shows no toggle there.
  */
-function createAuthenticator({ platform = process.platform, systemPreferences, execFile, env = process.env } = {}) {
+function createAuthenticator({ platform = process.platform, systemPreferences, execFile, helper, windowHandle } = {}) {
   if (platform === 'darwin') return macAuthenticator({ systemPreferences });
-  if (platform === 'win32' && typeof execFile === 'function') return windowsAuthenticator({ execFile, env });
+  if (platform === 'win32' && typeof execFile === 'function' && typeof windowHandle === 'function' &&
+      typeof helper === 'string' && path.win32.isAbsolute(helper)) {
+    return windowsAuthenticator({ execFile, helper, windowHandle });
+  }
   return unavailable;
 }
 
-module.exports = { createAuthenticator, REASONS, windowsCommand };
+module.exports = { createAuthenticator, REASONS, windowHandleArgument };

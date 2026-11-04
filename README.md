@@ -40,8 +40,10 @@ installs the pinned Beignet 0.36.1 engine from a lockfile, applies the reviewed
 fresh-address and encrypted-storage patches, builds the pinned encrypted SQLite
 driver, and verifies real encrypted database files. It also downloads and verifies
 the pinned official Tor Expert Bundle. Building the driver requires a C++ toolchain
-and Python. Packaged apps include these components and need no Node, npm or
-separate Tor installation.
+and Python. On Windows it also builds the app lock's Windows Hello helper, which
+needs Visual Studio or its Build Tools with the C++ tools and a Windows SDK.
+Packaged apps include these components and need no Node, npm or separate Tor
+installation.
 
 On first launch, create or restore a wallet and choose its network, Electrum
 server and primary node. Bundled Tor starts on demand for onion peers, guardians

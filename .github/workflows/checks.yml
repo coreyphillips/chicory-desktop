@@ -34,3 +34,16 @@ jobs:
           name: gallery
           path: artifacts/gallery
           if-no-files-found: ignore
+
+  # Builds the app lock's Windows Hello helper and runs it on Windows. A runner
+  # has no Windows Hello, so this covers the build, the argument checks and the
+  # unavailable answer for a real window. The owned prompt needs real hardware.
+  windows-hello:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - run: node scripts/desktop/build-windows-hello.mjs
+      - run: node --test desktop/os-auth.test.cjs desktop/windows-hello.test.cjs
