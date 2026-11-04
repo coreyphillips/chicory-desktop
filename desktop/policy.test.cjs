@@ -109,11 +109,12 @@ test('initial and restored windows fit small display work areas', () => {
   assert.deepEqual(windowBounds(null, laptop), { width: 1280, height: 696 });
 });
 
-test('preload exposes only window commands, the lock bridge, and strips IPC events from subscriptions', () => {
+test('preload exposes only window commands, the diagnostics report, the lock bridge, and strips IPC events from subscriptions', () => {
   const emitter = new EventEmitter();
   const sent = [];
   let api;
-  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args) });
+  const invoked = [];
+  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args), invoke: (...args) => { invoked.push(args); return Promise.resolve('{}'); } });
   const context = {
     process: { platform: 'darwin' },
     require(name) {
@@ -127,10 +128,13 @@ test('preload exposes only window commands, the lock bridge, and strips IPC even
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
+  // The report request has one fixed channel; the renderer cannot choose another.
+  api.diagnostics({ wallet: null, events: [] });
+  assert.deepEqual(invoked, [['desktop:diagnostics', { wallet: null, events: [] }]]);
   const received = [];
   const unsubscribe = api.onCommand((...args) => received.push(args));
   const privilegedEvent = { sender: { secret: 'not-for-renderer' } };
@@ -144,7 +148,7 @@ test('preload exposes only window commands, the lock bridge, and strips IPC even
   assert.equal(emitter.listenerCount('desktop:command'), 0);
 
   // The lock bridge can only ask the main process to prompt.
-  const invoked = [];
+  invoked.length = 0;
   ipc.invoke = async (...args) => { invoked.push(args); return { ok: false }; };
   assert.deepEqual(Object.keys(api.lock).sort(), ['authorize', 'onEvent', 'setEnabled', 'state', 'unlock']);
   assert.equal(Object.isFrozen(api.lock), true);

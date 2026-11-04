@@ -1,12 +1,13 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, powerMonitor, screen, session, shell, protocol, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, powerMonitor, screen, session, shell, protocol, safeStorage, systemPreferences } = require('electron');
 const { execFile, fork } = require('node:child_process');
 const { AppLock, installLockIpc } = require('./app-lock.cjs');
 const { createAuthenticator } = require('./os-auth.cjs');
-const { loadStorageKey } = require('./storage-key.cjs');
-const { BundledTor } = require('./tor.cjs');
-const { randomBytes } = require('node:crypto');
+const { loadStorageKey, ENVELOPE_VERSION } = require('./storage-key.cjs');
+const { BundledTor, TOR_VERSION } = require('./tor.cjs');
+const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require('./diagnostics.cjs');
+const { randomBytes, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { APP_URL, CSP, isAppURL, isPaymentLink, isExternalURL, staticPath, managerHeaders, windowBounds } = require('./policy.cjs');
@@ -24,6 +25,7 @@ let window;
 let manager;
 let managerStart;
 let appLock;
+let loaded = false;
 let tor;
 let torProxy;
 const torRequests = new Set();
@@ -35,6 +37,16 @@ const token = randomBytes(32).toString('hex');
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const runtime = path.join(root, app.isPackaged ? 'runtime' : '.runtime');
 const publicDirectory = path.join(root, 'dist');
+const coded = (message, code) => Object.assign(new Error(message), { code });
+// Redacted and bounded. Kept beside the profile so a failure before any
+// wallet opens can still be read and copied on the next launch.
+const diagnostics = new DesktopDiagnostics({
+  file: demo ? null : path.join(profile, 'diagnostics.json'),
+  versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome,
+    node: process.versions.node, tor: TOR_VERSION, storageEnvelope: ENVELOPE_VERSION, platform: `${process.platform}-${process.arch}` },
+  paths: [[profile, '<profile>'], [root, '<app>'], [app.getPath('home'), '<home>']],
+});
+const diagnosticRequests = new Map();
 
 function command(name, value) {
   if (!window || window.isDestroyed() || stopping || !isAppURL(window.webContents.getURL())) return;
@@ -78,13 +90,17 @@ async function startManager() {
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   const engine = path.join(runtime, 'engine/node_modules/beignet/dist/cli/cli.js');
   if (!fs.existsSync(node) || !fs.existsSync(engine)) {
-    throw new Error('The local wallet runtime is missing. For a source checkout, run npm run runtime:prepare.');
+    throw coded('The local wallet runtime is missing. For a source checkout, run npm run runtime:prepare.', 'RUNTIME_MISSING');
   }
   fs.mkdirSync(path.join(profile, 'wallets'), { recursive: true, mode: 0o700 });
-  const key = await loadStorageKey({ profile, safeStorage, platform: process.platform });
+  diagnostics.state('storage', 'opening');
+  let key;
+  try { key = await loadStorageKey({ profile, safeStorage, platform: process.platform }); }
+  catch (error) { diagnostics.state('storage', 'failed', error); throw error; }
   if (stopping) { key.fill(0); return; }
   tor = new BundledTor({ bundleDirectory: path.join(runtime, 'tor'), dataDirectory: path.join(profile, 'tor'),
     onStatus: status => {
+      diagnostics.torStatus(status);
       if (manager?.connected && !stopping) manager.send({ type: 'tor:status', status }, () => {});
     } });
   try { torProxy = await tor.startProxy(); } catch (error) { key.fill(0); throw error; }
@@ -92,24 +108,33 @@ async function startManager() {
   try {
     manager = fork(path.join(root, 'server/desktop-bootstrap.js'), [], {
       execPath: node, env: managerEnvironment(), cwd: profile,
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true,
     });
   } catch (error) { key.fill(0); throw error; }
+  diagnostics.state('manager', 'starting');
+  manager.stderr.setEncoding('utf8');
+  manager.stderr.on('data', chunk => diagnostics.managerOutput(chunk));
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('The local wallet did not finish starting.')), 30000);
+    const timeout = setTimeout(() => reject(coded('The local wallet did not finish starting.', 'STARTUP_TIMEOUT')), 30000);
     manager.once('error', (error) => { clearTimeout(timeout); reject(error); });
-    manager.once('exit', () => {
+    manager.once('exit', (code, signal) => {
       clearTimeout(timeout);
-      if (!origin) reject(new Error('The local wallet could not start. Check the runtime installation.'));
-      else if (!stopping) {
-        void dialog.showMessageBox(window, { type: 'error', title: 'Chicory', message: 'The local wallet stopped.',
-          detail: 'Quit and reopen Chicory to reconnect. Your wallet files remain on this computer.', buttons: ['Quit'] }).then(() => app.quit());
-      }
+      diagnostics.managerExited({ code, signal, expected: stopping });
+      if (!origin) reject(coded('The local wallet could not start. Check the runtime installation.', 'MANAGER_EXITED'));
+      else if (!stopping) void failureDialog(window, 'The local wallet stopped.',
+        'Quit and reopen Chicory to reconnect. Your wallet files remain on this computer.').then(() => app.quit());
     });
     manager.on('message', (message) => {
       if (message?.type === 'startup-error') {
         clearTimeout(timeout);
-        reject(new Error(message.code === 'STORAGE_UNAVAILABLE' ? String(message.message).slice(0, 300) : 'The local wallet could not start.'));
+        const error = coded(message.code === 'STORAGE_UNAVAILABLE' ? String(message.message).slice(0, 300) : 'The local wallet could not start.',
+          message.code === 'STORAGE_UNAVAILABLE' ? 'STORAGE_UNAVAILABLE' : 'MANAGER_FAILED');
+        if (error.code === 'STORAGE_UNAVAILABLE') diagnostics.state('storage', 'failed', error);
+        reject(error);
+        return;
+      }
+      if (message?.type === 'diagnostics:result') {
+        diagnosticRequests.get(message.requestId)?.(message.result);
         return;
       }
       if (message?.type === 'tor:ensure' || message?.type === 'tor:bridge') {
@@ -120,6 +145,8 @@ async function startManager() {
           message.host !== '127.0.0.1' || message.origin !== `http://127.0.0.1:${message.port}`) return;
       clearTimeout(timeout);
       origin = message.origin;
+      diagnostics.state('storage', 'open');
+      diagnostics.state('manager', 'ready');
       manager.send({ type: 'tor:status', status: tor.status() }, () => {});
       resolve();
     });
@@ -146,16 +173,40 @@ async function handleTorRequest(child, message) {
   finally { torRequests.delete(message.requestId); }
 }
 
-async function stopManager() {
-  if (!manager || manager.exitCode !== null || manager.signalCode !== null) return;
+// The manager gives each wallet a bounded graceful stop before terminating it.
+const stopManager = () => stopChild(manager, { timeoutMs: 45000 });
+
+/** Manager counters for one report. Null when it cannot answer in time. */
+function managerDiagnostics() {
   const child = manager;
-  await new Promise((resolve) => {
-    // The manager gives each wallet a bounded graceful stop before terminating it.
-    const deadline = setTimeout(() => { child.kill('SIGKILL'); }, 45000);
-    child.once('exit', () => { clearTimeout(deadline); resolve(); });
-    if (child.connected) child.send({ type: 'shutdown' }, () => {});
-    else child.kill('SIGTERM');
+  if (!child?.connected || stopping || !origin) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise(resolve => {
+    const finish = value => { clearTimeout(timer); diagnosticRequests.delete(requestId); resolve(value && typeof value === 'object' ? value : null); };
+    const timer = setTimeout(() => finish(null), 2000);
+    diagnosticRequests.set(requestId, finish);
+    try { child.send({ type: 'diagnostics:request', requestId }, error => { if (error) finish(null); }); }
+    catch { finish(null); }
   });
+}
+
+async function reportText(input = {}) {
+  return diagnostics.text({ ...input, manager: await managerDiagnostics(),
+    desktop: desktopResources(app.getAppMetrics(), process.memoryUsage()) });
+}
+
+/** A failure with its redacted report one click away, before or after a wallet opens. */
+async function failureDialog(parent, message, detail) {
+  const options = { type: 'error', title: 'Chicory', message, detail,
+    buttons: ['Quit', 'Copy Diagnostics', 'Show Diagnostics'], defaultId: 0, cancelId: 0 };
+  for (;;) {
+    const { response } = parent && !parent.isDestroyed() ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+    if (response === 0) return;
+    const text = await reportText();
+    if (response === 1) clipboard.writeText(text);
+    else await dialog.showMessageBox({ type: 'info', title: 'Chicory diagnostics', message: 'Diagnostics report',
+      detail: text.length > 6000 ? `${text.slice(0, 6000)}\n...\nUse Copy Diagnostics for the full report.` : text, buttons: ['Back'] });
+  }
 }
 
 function response(body, status = 200, type = 'text/plain') {
@@ -294,6 +345,14 @@ function createWindow(desktopSession) {
     ['window:maximize', () => window.isMaximized() ? window.unmaximize() : window.maximize()],
     ['window:close', () => window.close()],
   ]) ipcMain.on(channel, (event) => { if (trustedSender(event)) action(); });
+  // Read-only and redacted here, so the renderer never sees unredacted host state.
+  ipcMain.handle('desktop:diagnostics', async (event, input) => {
+    if (!trustedSender(event)) throw new Error('Diagnostics are unavailable.');
+    let size = Infinity;
+    try { size = JSON.stringify(input ?? null).length; } catch {}
+    const { wallet, walletError, events } = size <= INPUT_LIMIT && input && typeof input === 'object' ? input : {};
+    return reportText({ wallet, walletError: typeof walletError === 'string' ? walletError : undefined, events });
+  });
   for (const name of ['blur', 'hide', 'minimize']) window.on(name, () => appLock.background(name === 'blur' ? 'blur' : 'hidden'));
   for (const name of ['focus', 'show', 'restore']) window.on(name, () => appLock.foreground());
 }
@@ -312,10 +371,14 @@ function lockEvent(name, value) {
 /** The storage key and wallet engines are released only after the gate opens. */
 function ensureManager() {
   if (demo) return Promise.resolve();
-  managerStart ??= startManager().catch(async (error) => {
+  // A start the lock deferred is timed from the unlock, not from launch.
+  if (!managerStart && loaded) diagnostics.startupBegan();
+  managerStart ??= startManager().then(() => {
+    if (loaded && !stopping) diagnostics.startupEnded('ready');
+  }, async (error) => {
     if (!stopping) {
-      await dialog.showMessageBox({ type: 'error', title: 'Chicory could not open', message: 'Chicory could not open.',
-        detail: error.message, buttons: ['Quit'] });
+      diagnostics.startupEnded('failed', error);
+      await failureDialog(null, 'Chicory could not open.', error.message);
       app.quit();
     }
     throw Object.assign(error, { reported: true });
@@ -336,7 +399,11 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitting) return;
   stopping = true;
-  quitting = stopManager().finally(() => tor?.stop()).finally(() => { stopped = true; app.quit(); });
+  diagnostics.shutdownBegan();
+  quitting = stopManager().catch(() => 'failed')
+    .then(managerOutcome => Promise.resolve(tor?.stop()).then(() => 'stopped', () => 'failed')
+      .then(torOutcome => diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' })))
+    .finally(() => { stopped = true; app.quit(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', showWindow);
@@ -348,6 +415,9 @@ else app.whenReady().then(async () => {
   appLock = new AppLock({ profile, onEvent: lockEvent,
     authenticator: demo ? createAuthenticator({ platform: 'none' }) : createAuthenticator({ systemPreferences, execFile }),
     isForeground: () => !!window && !window.isDestroyed() && window.isFocused() });
+  diagnostics.startupBegan();
+  powerMonitor.on('suspend', () => diagnostics.suspend());
+  powerMonitor.on('resume', () => diagnostics.resume());
   const desktopSession = session.fromPartition(demo ? 'persist:chicory-demo' : 'persist:chicory');
   desktopSession.protocol.handle('chicory-app', handleRequest);
   createWindow(desktopSession);
@@ -355,12 +425,17 @@ else app.whenReady().then(async () => {
   installMenu();
   installLock();
   // With the lock on, no key is loaded and no wallet engine starts until it opens.
-  if (!appLock.required()) await ensureManager();
-  if (stopping) return;
+  const deferred = appLock.required();
+  if (!deferred) await ensureManager();
+  if (stopping) return diagnostics.startupEnded('cancelled');
   await window.loadURL(`${APP_URL}${demo ? '?demo' : ''}`);
+  loaded = true;
+  // A locked launch records its startup once the lock opens and the wallet starts.
+  if (deferred) diagnostics.state('app', 'locked');
+  else diagnostics.startupEnded('ready');
 }).catch(async (error) => {
   if (stopping || error.reported) return;
-  await dialog.showMessageBox({ type: 'error', title: 'Chicory could not open', message: 'Chicory could not open.',
-    detail: error.message, buttons: ['Quit'] });
+  diagnostics.startupEnded('failed', error);
+  await failureDialog(null, 'Chicory could not open.', error.message);
   app.quit();
 });

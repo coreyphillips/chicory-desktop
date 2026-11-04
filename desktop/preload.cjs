@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),
+  // Returns the redacted support report as text. The wallet's own report is
+  // passed in so it is redacted by the same rules before it can be copied.
+  diagnostics: (input) => ipcRenderer.invoke('desktop:diagnostics', input),
   onCommand: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, command, value) => {
