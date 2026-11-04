@@ -3,7 +3,8 @@
 // funded or mined until RegtestGate has verified the chain and every manager.
 // See docs/desktop-qualification.md.
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, fork } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -172,13 +173,26 @@ class DesktopApp {
 async function startPeer() {
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   const data = await profile('peer');
-  const child = spawn(node, [path.join(root, 'server/index.js')], { stdio: ['ignore', 'ignore', 'inherit'], env: {
+  // The bundled engine opens only encrypted storage, so the peer starts the way
+  // the desktop app starts its manager: through the bootstrap, keyed over IPC.
+  const child = fork(path.join(root, 'server/desktop-bootstrap.js'), [], { execPath: node, stdio: ['ignore', 'ignore', 'inherit', 'ipc'], env: {
     PATH: process.env.PATH, HOME: process.env.HOME, DATA_DIR: data, PORT: String(peerPort), DEFAULT_NETWORK: 'regtest',
     DEFAULT_ELECTRUM_HOST: electrum.host, DEFAULT_ELECTRUM_PORT: String(electrum.port), DEFAULT_ELECTRUM_TLS: 'false',
-    CHILD_PORT_BASE: String(peerPort + 1), CHILD_PORT_MAX: String(peerPort + 50),
+    CHILD_PORT_BASE: String(peerPort + 1), CHILD_PORT_MAX: String(peerPort + 50), CHICORY_ENCRYPTED_STORAGE: '1',
     BEIGNET_BIN: path.join(runtime, 'engine/node_modules/beignet/dist/cli/cli.js'),
   } });
-  const url = `http://127.0.0.1:${peerPort}`;
+  // Readiness comes only from this child, so another manager already on the
+  // port can never stand in for the disposable peer.
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The peer manager did not start')), 60000);
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`The peer manager exited with code ${code}`)); });
+    child.on('message', message => {
+      if (message?.type === 'startup-error') { clearTimeout(timer); reject(new Error(String(message.message))); }
+      if (message?.type === 'ready') { clearTimeout(timer); resolve(message.port); }
+    });
+    child.send({ type: 'initialize-storage', key: randomBytes(32).toString('hex') });
+  });
+  const url = `http://127.0.0.1:${port}`;
   const fetchPeer = (input, init) => fetch(new URL(String(input), url), init);
   const call = async (route, body, method = 'POST') => {
     const response = await fetchPeer(route, body === undefined ? {} : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -187,7 +201,6 @@ async function startPeer() {
     return packet.result;
   };
   const api = (route, body, method) => call(`/api${route}`, body, method);
-  await until('peer manager', () => api('/config'));
   // The wallet client receives only into Lightning-first wallets, so a plain
   // wallet takes its deposit address from its own daemon.
   const address = async walletId => (await call(`/wallets/${encodeURIComponent(walletId)}/api/address/new`, {})).address;
