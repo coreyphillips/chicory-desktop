@@ -20,6 +20,20 @@ async function verifiedDownload(url, destination, sha256) {
   return destination;
 }
 
+export async function verifiedSourceArchive(root, cache, source) {
+  if (!source.vendored) return verifiedDownload(source.url, path.join(cache, source.file), source.sha256);
+  // Keep the exact upstream recipe archive available even when GitLab blocks
+  // requests from hosted CI. Its provenance and checksum remain in the manifest.
+  const directory = path.resolve(root, 'build/sources');
+  const file = path.resolve(root, source.vendored);
+  if (!file.startsWith(directory + path.sep) || path.basename(file) !== source.file)
+    throw new Error('The vendored Tor source path is outside build/sources.');
+  const bytes = await fs.readFile(file);
+  if (createHash('sha256').update(bytes).digest('hex') !== source.sha256)
+    throw new Error(`Tor checksum verification failed for ${source.file}.`);
+  return file;
+}
+
 export async function prepareTor(root = defaultRoot) {
   const runtime = path.join(root, '.runtime');
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'build/tor-manifest.json'), 'utf8'));
@@ -32,7 +46,7 @@ export async function prepareTor(root = defaultRoot) {
   const sourceName = `tor-${manifest.torVersion}.tar.gz`;
   const sourceFile = await verifiedDownload(manifest.source.url, path.join(cache, sourceName), manifest.source.sha256);
   const additionalSources = await Promise.all((manifest.additionalSources || []).map(source =>
-    verifiedDownload(source.url, path.join(cache, source.file), source.sha256)));
+    verifiedSourceArchive(root, cache, source)));
   const stage = await fs.mkdtemp(path.join(runtime, 'tor-unpack-'));
   const destination = path.join(runtime, 'tor');
   try {

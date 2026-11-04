@@ -43,7 +43,7 @@ function secureStore(overrides = {}) {
 }
 
 function options(profile, safeStorage, extra = {}) {
-  return { profile, safeStorage, platform: 'darwin', ...extra };
+  return { profile, safeStorage, platform: process.platform, ...extra };
 }
 
 function envelopePath(profile) { return path.join(profile, 'storage-key.json'); }
@@ -106,8 +106,13 @@ test('refuses plaintext or unknown Linux key stores without invoking plaintext f
 });
 
 test('supports recognized Linux keyrings and the Windows provider', async (t) => {
+  // Create on the host's real filesystem, then exercise every accepted Linux
+  // protection backend when reopening. Windows cannot fsync POSIX directories.
   for (const backend of ['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6']) {
-    assert.equal((await loadStorageKey(options(fixture(t), secureStore({ backend }), { platform: 'linux' }))).length, 32);
+    const profile = fixture(t);
+    const store = secureStore({ backend });
+    const key = await loadStorageKey(options(profile, store));
+    assert.deepEqual(await loadStorageKey(options(profile, store, { platform: 'linux' })), key);
   }
   assert.equal((await loadStorageKey(options(fixture(t), secureStore(), { platform: 'win32' }))).length, 32);
 });

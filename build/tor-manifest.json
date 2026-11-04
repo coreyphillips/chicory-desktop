@@ -27,6 +27,7 @@
     },
     {
       "file": "tor-browser-build-16.0.tar.gz",
+      "vendored": "build/sources/tor-browser-build-16.0.tar.gz",
       "url": "https://gitlab.torproject.org/tpo/applications/tor-browser-build/-/archive/eb1e8801b0ed0a73dbae383ca9328e0d9a25ca89/tor-browser-build-eb1e8801b0ed0a73dbae383ca9328e0d9a25ca89.tar.gz",
       "sha256": "6844bb35b656f957c0412f4988a81be863f908899e50724a51d24beb2b4d19c7"
     }

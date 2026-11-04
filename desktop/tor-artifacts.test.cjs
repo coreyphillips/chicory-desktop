@@ -45,3 +45,23 @@ test('an unsupported target cannot substitute a system Tor installation', async 
   await write('build/tor-manifest.json', JSON.stringify(manifest));
   await assert.rejects(prepareTor(root), /No reviewed Tor Expert Bundle/);
 });
+
+test('vendored recipes are verified without contacting their upstream URL', async t => {
+  const { verifiedSourceArchive } = await import('../scripts/desktop/prepare-tor.mjs');
+  const { root, write } = await fixture(t);
+  await fs.mkdir(path.join(root, 'build/sources'));
+  const vendored = 'build/sources/recipes.tar.gz';
+  await write(vendored, 'official-recipe-fixture');
+  const source = { file: 'recipes.tar.gz', vendored, url: 'https://unused.invalid/blocked', sha256: digest('official-recipe-fixture') };
+  assert.equal(await verifiedSourceArchive(root, path.join(root, '.runtime/downloads'), source), path.join(root, vendored));
+  await write(vendored, 'changed-recipe-fixture');
+  await assert.rejects(verifiedSourceArchive(root, path.join(root, '.runtime/downloads'), source), /checksum verification failed/);
+});
+
+test('vendored recipe paths must stay in the source directory', async t => {
+  const { verifiedSourceArchive } = await import('../scripts/desktop/prepare-tor.mjs');
+  const { root } = await fixture(t);
+  await assert.rejects(verifiedSourceArchive(root, path.join(root, '.runtime/downloads'), {
+    file: 'recipes.tar.gz', vendored: '../recipes.tar.gz', sha256: digest('fixture'),
+  }), /outside build\/sources/);
+});

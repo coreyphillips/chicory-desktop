@@ -18,7 +18,7 @@ The suite covers platform behavior, desktop policy, OS key wrapping, encrypted
 files and database pages, Tor supervision, manager routes, TypeScript and the
 production renderer build.
 
-Version 0.2 passed 527 automated tests locally: 86 platform tests, 45 desktop
+Version 0.2 passed 529 automated tests locally: 86 platform tests, 47 desktop
 tests and 396 manager/storage tests, with zero skips. The actual bundled engine
 fixture verified private IPC bootstrap, encrypted config and database creation,
 and early parent-disconnect cleanup against a local test endpoint.
