@@ -66,13 +66,15 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | drain | Send-max quote. Where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
 | transport | Records whether the bundled engine advertises Iroh |
+| backup | Full backup exported from the funded wallet, then made stale by a later payment. With the original app closed, it is restored into a fresh profile with its own keys. A wrong passphrase and a changed byte are refused and leave nothing. The restored wallet keeps its identity and history, every open channel is held (`restoreRecencyUnproven`), and a payment over it does not complete. Runs last, because the peer may close the channel when it meets the stale copy |
 
 ## Recovery support
 
 A recovery phrase restores on-chain funds. It does not restore Lightning
 channel state. The recovery stage always records seed-only channel recovery as
 unsupported, with the engine's recovery status, rather than treating the restore
-as complete.
+as complete. A full backup file does carry channel state. The backup stage
+qualifies its restore, with every open channel held until it is proven current.
 
 ## Not yet qualified
 

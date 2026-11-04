@@ -100,9 +100,8 @@ current gaps are described in [desktop-qualification.md](desktop-qualification.m
 
 Version 0.2 adds OS-protected storage keys, authenticated encrypted wallet files,
 SQLCipher-compatible wallet/guardian databases and encrypted engine backups.
-Fresh profiles are supported without legacy migration code. Native app lock,
-biometric approval, encrypted renderer drafts and portable full channel backups
-remain tracked work. Bundled Tor starts on demand and refuses direct onion
+Fresh profiles are supported without legacy migration code. Biometric approval
+on real hardware and encrypted renderer drafts remain tracked work. Bundled Tor starts on demand and refuses direct onion
 fallback. Clearnet connections retain their normal routing.
 
 Settings > Funds and exits > Erase all wallets from this computer erases every
@@ -119,6 +118,19 @@ followed, and nothing outside the profile is touched. An `erase-pending.json`
 marker is written before deletion and removed only after everything succeeds,
 so a failed or interrupted erase is retried, or finished at the next launch,
 before any key opens. Erase does not send or rescue funds.
+
+Settings > Wallet > Full backup to a file saves every wallet in the profile,
+with its channel databases, to one file under a passphrase. It needs the app
+lock's fresh authentication when the lock is on. The restore sheet's "Restore a
+full backup file instead" brings it back into a fresh profile, on another
+computer or OS account. The format (`CHICORYFULL1`) seals an authenticated
+payload under a random key made for that archive. scrypt, with bounded
+parameters, wraps that key, so no profile key is ever in the file. Each
+database is copied between keys with `VACUUM INTO`, never as plaintext. On
+restore, every open channel is held (`restoreRecencyUnproven`) until its peer
+shows the state is current, because a backup can be older than the channel.
+The main process picks the file with the owner, and the archive never passes
+through the page. A recovery phrase alone still restores only on-chain funds.
 
 Encryption regression checks include wrong and missing keys, tampered files and
 pages, live WAL contents, crash recovery, cross-process file access, encrypted

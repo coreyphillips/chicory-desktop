@@ -16,6 +16,8 @@ export interface DesktopBridge {
   close(): void;
   /** The host's redacted support report, with the given wallet figures redacted into it. */
   diagnostics?(input: HostReportInput): Promise<string>;
+  /** The portable full backup, by passphrase only. */
+  fullBackup?: import('./fullBackup').DesktopFullBackup;
   /** Erases every wallet in this profile. On success the host reloads into first-run setup. */
   erase?(): Promise<{ ok: boolean; code?: string; error?: string }>;
   onCommand(callback: (command: string, value?: string) => void): () => void;

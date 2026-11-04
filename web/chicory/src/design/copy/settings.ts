@@ -196,6 +196,30 @@ export const settings = {
     copied: 'Diagnostics copied',
   },
 
+  fullBackup: {
+    link: 'Full backup to a file',
+    warning:
+      'Saves every wallet in this profile, with its channel state, to one file encrypted with a passphrase you choose. Anyone with the file and the passphrase can spend these funds, so keep them private and apart. Every payment or channel change after this makes the file older. A recovery phrase alone does not restore channels; this file does.',
+    passphrase: 'Backup passphrase',
+    passphraseHint: 'At least 12 characters. It cannot be recovered if you forget it.',
+    repeat: 'Repeat the passphrase',
+    mismatch: 'The passphrases do not match.',
+    short: 'Use at least 12 characters.',
+    save: 'Save full backup',
+    saved: (file: string) => `Saved ${file}. Keep it offline, away from this computer.`,
+    prompt: 'Confirm to save a full backup',
+    unconfirmed: 'Nothing was saved because this was not confirmed.',
+    failed: 'The full backup could not be saved.',
+    restoreLink: 'Restore a full backup file instead',
+    restoreNote:
+      'A full backup brings back each wallet with its channel state. Its channels stay on hold until each peer shows their state is current, because a backup can be older than the channel. Keep the computer it came from offline while you restore.',
+    choose: 'Choose backup file',
+    restored: (count: number) => `Restored ${count === 1 ? 'one wallet' : `${count} wallets`}.`,
+    partial: (names: string) => `These wallets were not restored: ${names}. Try again.`,
+    nothing: 'Every wallet in this backup is already on this computer.',
+    restoreFailed: 'The full backup could not be restored.',
+  },
+
   erase: {
     link: 'Erase all wallets from this computer',
     warning:

@@ -26,6 +26,7 @@ export type HubRow =
   | 'recovery'
   | 'primary'
   | 'network'
+  | 'fullBackup'
   | 'applock'
   | 'haptics'
   | 'autopay'
@@ -75,6 +76,8 @@ export interface HubShape {
   drain: boolean;
   /** This phone can erase its wallets (device mode). */
   erase: boolean;
+  /** The desktop host can save and restore a portable full backup. */
+  fullBackup?: boolean;
 }
 
 /** The groups, top to bottom. */
@@ -96,9 +99,12 @@ export const HUB_LANDS =
 export function rowsOf(group: HubGroup, shape: HubShape): HubRow[] {
   switch (group) {
     case 'wallet':
-      return shape.lead
-        ? ['primary', 'network']
-        : ['recovery', 'primary', 'network'];
+      return [
+        ...(shape.lead ? [] : (['recovery'] as const)),
+        'primary',
+        'network',
+        ...(shape.fullBackup ? (['fullBackup'] as const) : []),
+      ];
     case 'phone':
       return ['applock', 'autopay'];
     case 'funds':

@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
   // Erases every wallet in this profile after the lock's fresh confirmation.
   // It takes nothing from the page.
   erase: () => ipcRenderer.invoke('desktop:erase'),
+  // The portable full backup. The page passes only the passphrase; the main
+  // process picks the file with the owner and moves the archive itself.
+  fullBackup: Object.freeze({
+    export: (passphrase) => ipcRenderer.invoke('backup:export-full', typeof passphrase === 'string' ? passphrase : ''),
+    restore: (passphrase) => ipcRenderer.invoke('backup:restore-full', typeof passphrase === 'string' ? passphrase : ''),
+  }),
   onCommand: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, command, value) => {

@@ -128,7 +128,7 @@ test('preload exposes only window commands, the diagnostics report, the lock bri
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'erase', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'erase', 'fullBackup', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
@@ -138,6 +138,10 @@ test('preload exposes only window commands, the diagnostics report, the lock bri
   // Erase forwards nothing the page passes.
   api.erase({ profile: '/', entries: ['..'] });
   assert.deepEqual(invoked.at(-1), ['desktop:erase']);
+  // A full backup passes only a passphrase string, never a path or a file.
+  assert.equal(Object.isFrozen(api.fullBackup), true);
+  api.fullBackup.export('a long passphrase'); api.fullBackup.restore({ path: '/etc/passwd' });
+  assert.deepEqual(invoked.slice(-2), [['backup:export-full', 'a long passphrase'], ['backup:restore-full', '']]);
   const received = [];
   const unsubscribe = api.onCommand((...args) => received.push(args));
   const privilegedEvent = { sender: { secret: 'not-for-renderer' } };
