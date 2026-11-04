@@ -177,3 +177,24 @@ test('only the verified engine version names completed outgoing debit semantics 
   manager.engineVersion = '0.37.0';
   assert.deepEqual((await fetch(url).then(result => result.json())).result, [outgoing, incoming, pending]);
 });
+
+test('an offline request keeps its offline flag, confirmed in the engine\'s offline receive journal', async t => {
+  const journal = { requests: [{ id: 'job-one', kind: 'bolt11', invoice: { paymentHash: hash } }] };
+  const confirmed = fixture(t);
+  const base = confirmed.options.call;
+  confirmed.store.call = async (method, route, body) => route === '/receive/status' ? journal : base(method, route, body);
+  await confirmed.store.allocate({});
+  const saved = await confirmed.store.register({ ...request(), offlineReceive: true });
+  assert.equal(saved.offlineReceive, true);
+  // A claim the engine does not confirm is refused rather than stored as offline.
+  const unconfirmed = fixture(t);
+  const other = unconfirmed.options.call;
+  unconfirmed.store.call = async (method, route, body) => route === '/receive/status' ? { requests: [] } : other(method, route, body);
+  await unconfirmed.store.allocate({});
+  await assert.rejects(() => unconfirmed.store.register({ ...request(), offlineReceive: true }), { code: 'INVALID_RECEIVE_REQUEST' });
+  // An ordinary request never asks the journal.
+  const ordinary = fixture(t);
+  await ordinary.store.allocate({});
+  assert.equal((await ordinary.store.register(request())).offlineReceive, undefined);
+  assert.equal(ordinary.calls.some(([, route]) => route === '/receive/status'), false);
+});

@@ -113,6 +113,17 @@ class BrowserWallet {
       if (invoice?.bolt11?.toLowerCase() !== input.bolt11.toLowerCase() || invoice.paymentHash !== input.paymentHash ||
           decoded.paymentHash !== input.paymentHash || (decoded.amountSats || null) !== requestedAmount)
         refuse('RECEIVE_REQUEST_NOT_OWNED', 'This invoice does not belong to this wallet.');
+      // The engine records an offline request in its offline receive journal,
+      // not on the invoice, so a request the client calls offline is confirmed
+      // there. Without this the flag was dropped and later reads treated the
+      // request as an ordinary one.
+      let offline = invoice.offlineReceive === true;
+      if (!offline && input.offlineReceive === true) {
+        const status = await this.call('GET', '/receive/status').catch(() => null);
+        offline = Array.isArray(status?.requests) &&
+          status.requests.some(job => job?.invoice?.paymentHash === input.paymentHash);
+        if (!offline) refuse('INVALID_RECEIVE_REQUEST', 'This is not one of this wallet\'s offline payment requests.');
+      }
       const expiresAt = (Number(decoded.timestamp) + Number(decoded.expiry ?? 3600)) * 1000;
       if (!Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= 0 || input.expiresAt > expiresAt)
         refuse('INVALID_RECEIVE_REQUEST', 'The payment request expiry does not match its invoice.');
@@ -143,7 +154,7 @@ class BrowserWallet {
         id: input.id, uri: input.uri, address, bolt11: input.bolt11, paymentHash: input.paymentHash,
         amountSats: requestedAmount, description: input.description, feeSats, expiresAt: input.expiresAt,
         warnings: [...input.warnings], demo: false, createdAt: Number(decoded.timestamp) * 1000,
-        ...(invoice.offlineReceive === true ? { offlineReceive: true } : {}),
+        ...(offline ? { offlineReceive: true } : {}),
       };
       const previous = state.requests.find(row => row.paymentHash === request.paymentHash || row.id === request.id);
       if (previous) {
