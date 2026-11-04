@@ -92,7 +92,8 @@ notarization. No public binary release or automatic updater is configured.
 New funded Lightning/on-chain payments, full disaster recovery, physical camera
 hardware, OS protocol installation and Windows/Linux permissions remain release
 qualification work. The existing browser regtest results are useful inherited
-evidence, not a substitute for these checks.
+evidence, not a substitute for these checks. The packaged regtest suite and its
+current gaps are described in [desktop-qualification.md](desktop-qualification.md).
 
 Version 0.2 adds OS-protected storage keys, authenticated encrypted wallet files,
 SQLCipher-compatible wallet/guardian databases and encrypted engine backups.
