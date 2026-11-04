@@ -242,12 +242,24 @@ test('a closed port is unreachable, quickly', async () => {
 });
 
 test('a server that connects but never answers times out within the bound', async (t) => {
-	const s = await fakeElectrum(t, { mode: 'silent' });
+	// Deliver connection deterministically before the timeout clock can fire.
+	// A loaded CI runner can take more than 200 ms to dispatch a real loopback
+	// connection, which would exercise the separate never-connected case below.
+	const socket = new net.Socket();
+	const requests = [];
+	socket.write = (request) => { requests.push(request); return true; };
+	t.after(() => socket.destroy());
+	const transport = { net: { connect() {
+		queueMicrotask(() => socket.emit('connect'));
+		return socket;
+	} } };
 	const started = Date.now();
-	const r = await probeElectrum({ host: s.host, port: s.port, tls: false }, { timeoutMs: 200 });
+	const r = await probeElectrum({ host: '127.0.0.1', port: 50001, tls: false }, { timeoutMs: 200, transport });
 	assert.equal(r.reachable, true);
 	assert.equal(r.error, 'timeout');
 	assert.equal(r.chain, 'unknown');
+	assert.ok(requests.length > 0, 'the connected peer received requests but supplied no replies');
+	assert.equal(socket.destroyed, true, 'the timed-out connection is released');
 	assert.ok(Date.now() - started < 1000);
 });
 

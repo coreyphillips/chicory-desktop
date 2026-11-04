@@ -49,7 +49,15 @@ with production developer tools disabled. Its real manager reported Beignet
 0.36.1 and zero wallets in a disposable profile. The test verified loopback-only
 listening, HTTP 403 for unauthenticated requests, preferences surviving a complete
 app restart, clean application exits and termination of each manager process.
+The version 0.2 packaged run also verified the real OS-wrapped key, encrypted
+vault continuity and bundled Tor reaching 100% through private manager IPC.
+It exercised an onion bridge and confirmed that Tor exited with the app.
 No real wallet was created and no funds were used.
+
+Use `CHICORY_SMOKE_TOR=1 node scripts/desktop/live-smoke.mjs` for the live
+network variant. Set `CHICORY_ELECTRON_EXECUTABLE` to the packaged executable
+to test an installed build. The test uses a disposable profile and Tor Project
+public onion service, and never creates or funds a wallet.
 
 Detailed run results and screenshots are generated in `artifacts/smoke/`. That
 folder is excluded from source control. Selected screenshots in this repository
@@ -65,9 +73,12 @@ an archive originated on Windows, whose file permissions use ACLs.
 
 ## Release limits
 
-macOS Apple Silicon is the local build host. Windows, Linux and Intel macOS have
-build workflows but require their own native interaction and installation
-qualification. macOS local builds use ad hoc signing without Developer ID or
+macOS Apple Silicon is the local build host. Version 0.2 installers built
+successfully for [Windows x64, Linux x64 and macOS Apple Silicon](https://github.com/coreyphillips/chicory-desktop/actions/runs/41756275148)
+and [macOS Intel](https://github.com/coreyphillips/chicory-desktop/actions/runs/41755649209).
+These artifacts use identical production source; intervening fixes affect test
+fixtures only. Native interaction and installation qualification on Windows,
+Linux and Intel macOS remain separate release work. macOS local builds use ad hoc signing without Developer ID or
 notarization. No public binary release or automatic updater is configured.
 
 New funded Lightning/on-chain payments, full disaster recovery, physical camera
