@@ -14,7 +14,11 @@ const REVEAL_GRANT_MS = 60000;
 const PROMPT_SETTLE_MS = 600;
 
 const WALLET_ROUTE = /^\/(api|wallets)(\/|$)/;
-const SECRET_ROUTES = [/^\/api\/wallets\/[^/]+\/recovery-phrase\/?$/, /^\/api\/backup(\/|$)/];
+// Express routes match without regard to case, so these must too. The
+// daemon's mnemonic route is never used by the interface, which reads the
+// phrase through the manager, but it is reachable through the proxy.
+const SECRET_ROUTES = [/^\/api\/wallets\/[^/]+\/recovery-phrase\/?$/i, /^\/api\/backup(\/|$)/i,
+  /^\/wallets\/[^/]+\/api\/mnemonic\/?$/i];
 
 const MESSAGES = {
   cancelled: 'Authentication was cancelled. Chicory stays locked.',
@@ -22,6 +26,7 @@ const MESSAGES = {
   unavailable: 'System authentication is unavailable. Turn on Touch ID, Windows Hello or your sign-in password, then retry. Chicory stays locked.',
   busy: 'An authentication prompt is already open.',
   locked: 'Unlock Chicory first.',
+  relocked: 'Chicory locked again while the prompt was open. Unlock to continue.',
   enableCancelled: 'Authentication was cancelled. The app lock was not changed.',
   enableUnavailable: 'System authentication is unavailable on this computer.',
   saveFailed: 'The app lock setting could not be saved. It was not changed.',
@@ -138,9 +143,14 @@ class AppLock {
   /** Opens the gate. Concurrent callers share one prompt. */
   unlock() {
     if (!this.enabled) { this.unlocked = true; return Promise.resolve({ ok: true }); }
-    this.foreground();
+    // Applies a grace period that has run out, but only a native focus ends
+    // the time away.
+    if (!this.prompting && this.backgroundedAt !== null && this.now() - this.backgroundedAt > this.graceMs) this.relock('grace');
     if (this.unlocked) return Promise.resolve({ ok: true });
+    const generation = this.generation;
     this.unlocking ??= this.authenticate('unlock').then(result => {
+      // A screen lock or suspend during the prompt outranks its answer.
+      if (result.ok && generation !== this.generation) return { ok: false, reason: 'failed', error: MESSAGES.relocked };
       if (result.ok) {
         this.unlocked = true;
         this.backgroundedAt = null;
@@ -228,8 +238,9 @@ class AppLock {
   admit(pathname) {
     if (!WALLET_ROUTE.test(pathname)) return { ok: true, ticket: null };
     if (this.required()) return { ok: false };
-    const secret = this.enabled && SECRET_ROUTES.some(route => route.test(pathname));
-    if (secret) {
+    // Concealment drops a phrase in flight whether or not the lock is on.
+    const secret = SECRET_ROUTES.some(route => route.test(pathname));
+    if (secret && this.enabled) {
       const grant = this.grant;
       this.grant = null;
       if (!grant || grant.expires < this.now() || grant.generation !== this.generation || grant.concealed !== this.concealed)

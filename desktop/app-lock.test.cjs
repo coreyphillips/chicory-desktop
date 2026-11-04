@@ -155,10 +155,40 @@ test('a recovery phrase needs fresh authentication for exactly one request', asy
   assert.equal(lock.admit(route).ok, false, 'losing the foreground voids a grant');
   assert.deepEqual(auth.calls, ['unlock', 'reveal', 'reveal', 'reveal', 'reveal']);
 
+  for (const other of ['/api/wallets/abc/RECOVERY-PHRASE', '/api/Wallets/abc/Recovery-Phrase/', '/api/BACKUP/export',
+    '/wallets/abc/api/mnemonic', '/wallets/abc/API/Mnemonic/']) {
+    assert.equal(lock.admit(other).ok, false, `${other} needs a grant like the canonical route`);
+    await lock.authorizeSecret();
+    assert.equal(lock.admit(other).ok, true, other);
+  }
+
   const off = harness();
   assert.equal(off.lock.admit(route).ok, true, 'with the lock off the phrase follows the existing local authorization');
   assert.deepEqual(await off.lock.authorizeSecret(), { ok: true });
   assert.deepEqual(off.auth.calls, []);
+  const pending = off.lock.admit(route).ticket;
+  off.lock.background('blur');
+  assert.equal(pending.signal.aborted, true, 'with the lock off a phrase in flight is still dropped on blur');
+  assert.equal(off.lock.current(pending), false);
+});
+
+test('a screen lock or suspend during the unlock prompt outranks its answer', async () => {
+  const handlers = new Map();
+  let release;
+  const { lock } = harness({ enabled: true, answers: [() => new Promise(resolve => { release = resolve; })] });
+  let started = 0;
+  installLockIpc({ ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, appLock: lock,
+    trusted: () => true, ensureManager: async () => { started++; } });
+  const unlocking = handlers.get('lock:unlock')({});
+  await new Promise(setImmediate);
+  lock.conceal('suspend');
+  lock.relock('suspend');
+  release({ ok: true });
+  const result = await unlocking;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /locked again/);
+  assert.equal(lock.required(), true);
+  assert.equal(started, 0, 'no key or engine is released');
 });
 
 test('payment and recovery responses that arrive after a relock are discarded', async () => {
@@ -193,6 +223,22 @@ test('the background grace period relocks, and Chicory\'s own prompts do not sta
   lock.foreground();
   assert.equal(lock.required(), true);
   assert.deepEqual(events.filter(([name]) => name === 'locked'), [['locked', 'grace']]);
+
+  // Only a native focus ends the time away, not an unlock call from the renderer.
+  const early = harness({ enabled: true });
+  await early.lock.unlock();
+  early.lock.background('blur');
+  early.advance(29000);
+  assert.deepEqual(await early.lock.unlock(), { ok: true });
+  early.advance(60000);
+  early.lock.foreground();
+  assert.equal(early.lock.required(), true);
+  const late = harness({ enabled: true });
+  await late.lock.unlock();
+  late.lock.background('blur');
+  late.advance(30001);
+  await late.lock.unlock();
+  assert.deepEqual(late.auth.calls, ['unlock', 'unlock'], 'an unlock call after the grace period prompts again');
 
   // A long prompt raised by Chicory blurs the window. That blur neither
   // conceals nor starts the clock, so its own focus return does not relock.
