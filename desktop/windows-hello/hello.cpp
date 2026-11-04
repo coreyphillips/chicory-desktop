@@ -31,9 +31,10 @@
 #include <cstring>
 #include <cwchar>
 
+// Qualified, because the interop header also brings the ABI names into scope.
 namespace ui = winrt::Windows::Security::Credentials::UI;
-using winrt::Windows::Foundation::AsyncStatus;
-using winrt::Windows::Foundation::IAsyncOperation;
+namespace wf = winrt::Windows::Foundation;
+using OperationStatus = wf::AsyncStatus;
 
 namespace {
 
@@ -102,23 +103,23 @@ int Usage(const char* why) {
 // Polls instead of blocking so the deadline, the owner window and the dialog's
 // focus are checked while the prompt is open. Returns the final status.
 template <typename Operation, typename Tick>
-AsyncStatus Wait(Operation const& operation, ULONGLONG deadline, Tick&& tick) {
+OperationStatus Wait(Operation const& operation, ULONGLONG deadline, Tick&& tick) {
   for (;;) {
-    const AsyncStatus status = operation.Status();
-    if (status != AsyncStatus::Started) return status;
+    const OperationStatus status = operation.Status();
+    if (status != OperationStatus::Started) return status;
     if (GetTickCount64() >= deadline || !tick()) {
       operation.Cancel();
       const ULONGLONG settle = GetTickCount64() + kCancelSettleMs;
-      while (operation.Status() == AsyncStatus::Started && GetTickCount64() < settle) Sleep(kPollMs);
-      return AsyncStatus::Canceled;
+      while (operation.Status() == OperationStatus::Started && GetTickCount64() < settle) Sleep(kPollMs);
+      return OperationStatus::Canceled;
     }
     Sleep(kPollMs);
   }
 }
 
 template <typename Operation>
-int Unfinished(Operation const& operation, AsyncStatus status, const char* what) {
-  if (status == AsyncStatus::Error) return Fail(what, static_cast<HRESULT>(operation.ErrorCode()));
+int Unfinished(Operation const& operation, OperationStatus status, const char* what) {
+  if (status == OperationStatus::Error) return Fail(what, static_cast<HRESULT>(operation.ErrorCode()));
   return Fail(what, HRESULT_FROM_WIN32(ERROR_TIMEOUT));
 }
 
@@ -172,8 +173,8 @@ bool ValidMessage(const wchar_t* text) {
 // no app lock rather than an unowned prompt.
 int Check() {
   const auto operation = ui::UserConsentVerifier::CheckAvailabilityAsync();
-  const AsyncStatus status = Wait(operation, GetTickCount64() + kCheckDeadlineMs, [] { return true; });
-  if (status != AsyncStatus::Completed) return Unfinished(operation, status, "CheckAvailabilityAsync");
+  const OperationStatus status = Wait(operation, GetTickCount64() + kCheckDeadlineMs, [] { return true; });
+  if (status != OperationStatus::Completed) return Unfinished(operation, status, "CheckAvailabilityAsync");
   const auto availability = operation.GetResults();
   if (availability == ui::UserConsentVerifierAvailability::Available) {
     try { Interop(); } catch (winrt::hresult_error const& error) {
@@ -187,21 +188,21 @@ int Check() {
 int Verify(HWND window, const wchar_t* message) {
   // No prompt opens unless it can be completed.
   const auto availability = ui::UserConsentVerifier::CheckAvailabilityAsync();
-  const AsyncStatus checked = Wait(availability, GetTickCount64() + kCheckDeadlineMs, [] { return true; });
-  if (checked != AsyncStatus::Completed) return Unfinished(availability, checked, "CheckAvailabilityAsync");
+  const OperationStatus checked = Wait(availability, GetTickCount64() + kCheckDeadlineMs, [] { return true; });
+  if (checked != OperationStatus::Completed) return Unfinished(availability, checked, "CheckAvailabilityAsync");
   if (availability.GetResults() != ui::UserConsentVerifierAvailability::Available) return Answer(Name(availability.GetResults()));
 
   const winrt::hstring text{ message };
-  IAsyncOperation<ui::UserConsentVerificationResult> operation{ nullptr };
+  wf::IAsyncOperation<ui::UserConsentVerificationResult> operation{ nullptr };
   const HRESULT requested = Interop()->RequestVerificationForWindowAsync(window,
     reinterpret_cast<HSTRING>(winrt::get_abi(text)),
-    winrt::guid_of<IAsyncOperation<ui::UserConsentVerificationResult>>(), winrt::put_abi(operation));
+    winrt::guid_of<wf::IAsyncOperation<ui::UserConsentVerificationResult>>(), winrt::put_abi(operation));
   if (FAILED(requested)) return Fail("RequestVerificationForWindowAsync", requested);
 
   const ULONGLONG started = GetTickCount64();
   bool focused = false;
   bool closed = false;
-  const AsyncStatus status = Wait(operation, started + kVerifyDeadlineMs, [&] {
+  const OperationStatus status = Wait(operation, started + kVerifyDeadlineMs, [&] {
     // Chicory quit or its window closed, so nobody is waiting for the answer.
     if (!IsWindow(window)) { closed = true; return false; }
     // Face and fingerprint need the dialog in the foreground. This process was
@@ -218,7 +219,7 @@ int Verify(HWND window, const wchar_t* message) {
     return true;
   });
   if (closed) return Fail("Owner window", HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE));
-  if (status != AsyncStatus::Completed) return Unfinished(operation, status, "RequestVerificationForWindowAsync");
+  if (status != OperationStatus::Completed) return Unfinished(operation, status, "RequestVerificationForWindowAsync");
   return Answer(Name(operation.GetResults()));
 }
 

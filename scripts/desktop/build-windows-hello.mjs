@@ -56,7 +56,7 @@ export async function buildWindowsHello(root, arch = process.arch) {
   try {
     const output = path.join(work, HELPER_NAME);
     execFileSync('cl.exe', [
-      '/nologo', '/std:c++17', '/permissive-', '/EHsc', '/O2', '/MT', '/GS', '/sdl', '/guard:cf',
+      '/nologo', '/std:c++20', '/permissive-', '/EHsc', '/O2', '/MT', '/GS', '/sdl', '/guard:cf',
       '/W4', '/WX', '/external:anglebrackets', '/external:W0', '/utf-8', '/DUNICODE', '/D_UNICODE', '/DNOMINMAX',
       `/Fo${work}\\`, `/Fe${output}`, source,
       // No console window, the static CRT so no redistributable is needed, and
