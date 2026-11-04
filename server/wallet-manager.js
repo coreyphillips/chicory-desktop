@@ -44,6 +44,7 @@ const {
 	tokenPath,
 	backupFilename
 } = require('./backup');
+const fullBackup = require('./full-backup');
 const {
 	engineVersion,
 	recoveryAvailable,
@@ -2680,6 +2681,207 @@ class WalletManager {
 
 	// A Windows archive can carry emulated 0666 modes. Never reproduce those
 	// permissions on POSIX. Windows protects these files with profile ACLs.
+	// ── Portable full-wallet backup (issue #10) ──
+
+	/** The encrypted storage this needs, refused plainly where it is not running. */
+	_fullBackupStorage() {
+		const vault = require('./vault-files');
+		if (!vault.isActive()) {
+			throw httpError(409, 'FULL_BACKUP_UNAVAILABLE', 'A full backup needs the desktop app\'s encrypted wallet storage.');
+		}
+		return { vault, storage: require('./engine-storage.cjs') };
+	}
+
+	/** The wallet's databases worth carrying: the engine's per-network database and any guardian sets it serves. */
+	_walletDatabases(id) {
+		const nodeFs = require('node:fs');
+		const data = this.paths(id).data;
+		const names = [];
+		const list = (dir) => { try { return nodeFs.readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
+		for (const entry of list(data)) {
+			if (entry.isFile() && fullBackup.DATABASE_NAME.test(entry.name)) names.push(entry.name);
+		}
+		for (const entry of list(path.join(data, 'guardian'))) {
+			const name = `guardian/${entry.name}`;
+			if (entry.isFile() && fullBackup.DATABASE_NAME.test(name)) names.push(name);
+		}
+		return names.sort();
+	}
+
+	/**
+	 * One archive of every wallet here, with its channel databases, that a
+	 * fresh profile on another computer or OS account can restore. Each
+	 * database is read in one transaction while its engine runs, and copied
+	 * under a key derived from this archive's own random key, so neither the
+	 * profile's master key nor its database keys leave this computer. The only
+	 * files staged on disk are those encrypted copies, removed before return.
+	 */
+	async exportFullBackup({ passphrase } = {}) {
+		const { vault, storage } = this._fullBackupStorage();
+		if (this.registry.loadError || this.settings.loadError) {
+			throw httpError(409, 'REGISTRY_UNREADABLE', 'The wallet list or app settings here could not be read, so a full backup of them would be incomplete.');
+		}
+		const records = this.registry.list();
+		if (!records.length) throw httpError(409, 'NO_WALLETS', 'There are no wallets to back up.');
+		const nodeFs = require('node:fs');
+		const createdAt = nowIso();
+		const exportKey = fullBackup.createExportKey();
+		const staging = path.join(config.dataDir, `.full-backup-${crypto.randomUUID()}`);
+		nodeFs.mkdirSync(staging, { mode: 0o700 });
+		try {
+			const wallets = [];
+			for (const record of records) {
+				const p = this.paths(record.id);
+				const databases = [];
+				for (const name of this._walletDatabases(record.id)) {
+					const staged = path.join(staging, `${record.id}-${databases.length}.db`);
+					storage.rekeyDatabase(path.join(p.data, name), vault.engineKeys(record.id).databaseKey,
+						staged, fullBackup.databaseKey(exportKey, record.id, name));
+					databases.push({ name, content: nodeFs.readFileSync(staged).toString('base64') });
+					nodeFs.rmSync(staged, { force: true });
+				}
+				const optional = (file) => { try { return fs.readFileSync(file).toString('base64'); } catch { return undefined; } };
+				const scb = optional(path.join(p.data, 'channels.scb'));
+				const history = {};
+				for (const name of fullBackup.HISTORY_FILES) {
+					const content = optional(path.join(p.base, name));
+					if (content !== undefined) history[name] = content;
+				}
+				wallets.push({
+					id: record.id,
+					record: { ...record, running: false },
+					mnemonic: fs.readFileSync(p.mnemonicFile, 'utf8').trim(),
+					apiToken: fs.readFileSync(p.tokenFile, 'utf8').trim(),
+					databases,
+					files: scb === undefined ? {} : { 'channels.scb': scb },
+					history
+				});
+			}
+			const current = this.settings.get();
+			const archive = fullBackup.seal({
+				kind: fullBackup.KIND, format: fullBackup.FORMAT, createdAt, app: config.appVersion, engine: this.engineVersion,
+				settings: { defaultNetwork: current.defaultNetwork, defaultElectrum: current.defaultElectrum, recoveryGuardians: current.recoveryGuardians },
+				wallets
+			}, passphrase, exportKey);
+			// Stamped only once the archive exists: a failed export claims nothing.
+			for (const rec of this.registry.list()) rec.lastFullBackupAt = createdAt;
+			this.registry.save();
+			console.log(`backup: exported a full backup of ${wallets.length} wallet(s) at ${createdAt}`);
+			return { archive, filename: `chicory-full-backup-${createdAt.replace(/[:.]/g, '-')}.chicory`, createdAt, walletCount: wallets.length };
+		} finally {
+			exportKey.fill(0);
+			nodeFs.rmSync(staging, { recursive: true, force: true });
+		}
+	}
+
+	_openFullBackup({ passphrase, archive }) {
+		const bytes = Buffer.isBuffer(archive) ? archive : Buffer.from(String(archive || ''), 'base64');
+		const opened = fullBackup.open(bytes, passphrase);
+		const existing = this._identities();
+		const plan = opened.payload.wallets.map((wallet) => {
+			const here = existing.find((w) => w.id === wallet.id);
+			const seedHash = seedDigest(wallet.mnemonic);
+			const twin = existing.find((w) => w.id !== wallet.id &&
+				((w.nodeId && wallet.record.nodeId && w.nodeId === wallet.record.nodeId) || (w.seedHash && w.seedHash === seedHash)));
+			return { id: wallet.id, name: wallet.record.name || wallet.id, network: wallet.record.network,
+				action: here ? 'present' : twin ? 'duplicate' : 'restore', duplicateOf: twin ? { id: twin.id, name: twin.name } : null,
+				databases: wallet.databases.map((d) => d.name) };
+		});
+		return { ...opened, plan };
+	}
+
+	/** What a full backup holds and what restoring it here would do. Writes nothing. */
+	inspectFullBackup({ passphrase, archive } = {}) {
+		this._fullBackupStorage();
+		const { payload, exportKey, plan } = this._openFullBackup({ passphrase, archive });
+		exportKey.fill(0);
+		return { kind: payload.kind, createdAt: payload.createdAt, app: payload.app, engine: payload.engine, wallets: plan };
+	}
+
+	/**
+	 * Restores a full backup into this profile. The whole archive is
+	 * authenticated and checked first; nothing is written before that. Each
+	 * wallet then gets new local encryption: its databases are copied from the
+	 * archive's key to this profile's own, never as plaintext, and the
+	 * engine's restore marker makes every open channel prove its state is
+	 * current before it may broadcast or take new payments, since a backup can
+	 * be older than the channel. A wallet appears only once complete; a
+	 * failure removes what it wrote. Wallets are left stopped.
+	 */
+	async restoreFullBackup({ passphrase, archive } = {}) {
+		const { vault, storage } = this._fullBackupStorage();
+		if (this.registry.loadError) {
+			throw httpError(409, 'REGISTRY_UNREADABLE', 'The wallet list here could not be read, and it will not be written over. Repair or remove it first.');
+		}
+		const { payload, exportKey, plan } = this._openFullBackup({ passphrase, archive });
+		const nodeFs = require('node:fs');
+		try {
+			// Running one node from two copies of its channel state is how channel
+			// funds are lost, so a wallet already here under another record is refused.
+			const duplicates = plan.filter((w) => w.action === 'duplicate');
+			if (duplicates.length) {
+				const err = httpError(409, 'DUPLICATE_NODE_ID',
+					`This computer already holds ${duplicates.map((w) => `"${w.name}" (as "${w.duplicateOf.name}")`).join(', ')}. ` +
+					'Restoring a second copy of a node\'s channel state can lose its funds, so nothing was restored.');
+				err.details = { duplicates };
+				throw err;
+			}
+			const networks = new Map(plan.filter((w) => w.action === 'restore').map((w) => [w.id, this._validateNetwork(w.network)]));
+			const restored = [];
+			const failed = [];
+			for (const wallet of payload.wallets) {
+				if (!networks.has(wallet.id)) continue;
+				const p = this.paths(wallet.id);
+				const port = await this._reservePort();
+				try {
+					// A directory with no record is what an interrupted restore leaves.
+					nodeFs.rmSync(p.base, { recursive: true, force: true });
+					for (const dir of [p.home, p.data, p.secrets]) nodeFs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+					this._writeSecret(p.mnemonicFile, { data: Buffer.from(wallet.mnemonic) });
+					this._writeSecret(p.tokenFile, { data: Buffer.from(wallet.apiToken) });
+					const keys = vault.engineKeys(wallet.id);
+					for (const database of wallet.databases) {
+						const target = path.join(p.data, database.name);
+						nodeFs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+						const staged = path.join(p.data, `.chicory-import-${crypto.randomUUID()}.db`);
+						try {
+							nodeFs.writeFileSync(staged, Buffer.from(database.content, 'base64'), { mode: 0o600, flag: 'wx' });
+							storage.rekeyDatabase(staged, fullBackup.databaseKey(exportKey, wallet.id, database.name), target, keys.databaseKey);
+						} finally { nodeFs.rmSync(staged, { force: true }); }
+						if (!database.name.includes('/')) {
+							// The engine holds every open channel restored from this file
+							// until its peer shows the state is current.
+							fs.writeFileSync(`${target}.restored`, JSON.stringify({ restoredAt: Date.now(), source: 'chicory-full-backup', backupCreatedAt: payload.createdAt }));
+						}
+					}
+					for (const [name, content] of Object.entries(wallet.files ?? {})) fs.writeFileSync(path.join(p.data, name), Buffer.from(content, 'base64'));
+					for (const [name, content] of Object.entries(wallet.history ?? {})) fs.writeFileSync(path.join(p.base, name), Buffer.from(content, 'base64'));
+					const rec = { ...wallet.record, network: networks.get(wallet.id), port, running: false, lastFullBackupAt: payload.createdAt || null };
+					this.registry.upsert(rec);
+					restored.push({ id: rec.id, name: rec.name, network: rec.network, databases: wallet.databases.length });
+					this._log(rec.id, `restored from a full backup written ${payload.createdAt}; open channels wait for proof that their state is current`);
+				} catch (error) {
+					nodeFs.rmSync(p.base, { recursive: true, force: true });
+					failed.push({ id: wallet.id, name: wallet.record.name || wallet.id, code: error.code || 'RESTORE_FAILED',
+						message: error.code === 'ENOSPC' ? 'The disk is full.' : error.message });
+				} finally {
+					this._reserved().delete(port);
+				}
+			}
+			if (payload.settings && restored.length) {
+				this.settings.update({
+					defaultNetwork: payload.settings.defaultNetwork,
+					defaultElectrum: payload.settings.defaultElectrum,
+					recoveryGuardians: Array.isArray(payload.settings.recoveryGuardians) ? payload.settings.recoveryGuardians : undefined
+				});
+			}
+			console.log(`backup: restored ${restored.length} wallet(s) from a full backup written ${payload.createdAt}${failed.length ? `, ${failed.length} failed` : ''}`);
+			return { createdAt: payload.createdAt, restored, failed, skipped: plan.filter((w) => w.action === 'present') };
+		} finally {
+			exportKey.fill(0);
+		}
+	}
+
 	_writeSecret(file, entry) {
 		fs.writeFileSync(file, entry.data, { mode: 0o600 });
 		fs.chmodSync(file, 0o600);

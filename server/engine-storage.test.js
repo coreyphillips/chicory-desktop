@@ -7,7 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const {
-  openEncryptedDatabase, verifyDatabase,
+  openEncryptedDatabase, verifyDatabase, rekeyDatabase,
   isDatabaseFile, isDatabaseSidecar, isPlaintextDatabase,
 } = require('./engine-storage.cjs');
 
@@ -214,4 +214,30 @@ test('the installed engine encrypts its full wallet and guardian schemas and con
     })().catch(()=>{ console.error('Installed wallet storage verification failed.'); process.exitCode=1; });
   `, engine, directory], { encoding: 'utf8', timeout: 30000 });
   assert.equal(output.trim(), 'verified');
+});
+
+test('a database moves to a new key with no plaintext copy, and a wrong key or occupied destination changes nothing', { skip: !available }, (t) => {
+  const handles = new Set();
+  const root = folder(t, handles), file = path.join(root, 'wallet.db'), moved = path.join(root, 'moved.db');
+  const db = openEncryptedDatabase(file, key, options);
+  handles.add(db);
+  db.pragma('journal_mode=WAL');
+  db.exec('CREATE TABLE channels(value TEXT)');
+  db.prepare('INSERT INTO channels VALUES (?)').run(secret);
+  // A live writer holds the source open with uncheckpointed WAL commits.
+  db.prepare('INSERT INTO channels VALUES (?)').run('after-wal-commit');
+  const newKey = crypto.randomBytes(32).toString('hex');
+  rekeyDatabase(file, key, moved, newKey, options);
+  encryptedOnDisk(moved);
+  failsSafely(() => verifyDatabase(moved, key, options), 'WALLET_STORAGE_LOCKED');
+  const reopened = openEncryptedDatabase(moved, newKey, options);
+  handles.add(reopened);
+  assert.deepEqual(reopened.prepare('SELECT value FROM channels ORDER BY rowid').all().map(row => row.value), [secret, 'after-wal-commit']);
+  reopened.close();
+  for (const name of fs.readdirSync(root)) assert.equal(name.includes('chicory-rekey'), false, 'no staged copy is left');
+  failsSafely(() => rekeyDatabase(file, wrongKey, path.join(root, 'wrong.db'), newKey, options), 'WALLET_STORAGE_REKEY_FAILED');
+  assert.equal(fs.existsSync(path.join(root, 'wrong.db')), false);
+  const before = fs.readFileSync(moved);
+  failsSafely(() => rekeyDatabase(file, key, moved, newKey, options), 'WALLET_STORAGE_REKEY_FAILED');
+  assert.deepEqual(fs.readFileSync(moved), before, 'an existing destination is never replaced');
 });
