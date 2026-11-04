@@ -626,7 +626,9 @@ else app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark';
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
   appLock = new AppLock({ profile, onEvent: lockEvent,
-    authenticator: demo ? createAuthenticator({ platform: 'none' }) : createAuthenticator({ systemPreferences, execFile }),
+    authenticator: demo ? createAuthenticator({ platform: 'none' }) : createAuthenticator({ systemPreferences, execFile,
+      helper: path.join(runtime, 'windows-hello', 'chicory-hello.exe'),
+      windowHandle: () => (window && !window.isDestroyed() ? window.getNativeWindowHandle() : null) }),
     isForeground: () => !!window && !window.isDestroyed() && window.isFocused() });
   diagnostics.startupBegan();
   powerMonitor.on('suspend', () => diagnostics.suspend());

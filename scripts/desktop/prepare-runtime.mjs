@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { patchEngine } from '../apply-engine-patches.mjs';
 import { patchStorageEncryption, verifyDriver } from '../apply-storage-encryption.mjs';
 import { prepareTor } from './prepare-tor.mjs';
+import { buildWindowsHello } from './build-windows-hello.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtime = path.join(root, '.runtime');
@@ -90,9 +91,11 @@ patchEngine(enginePackage);
 const storage = await patchStorageEncryption(enginePackage, { node });
 verifyDriver(node, enginePackage);
 await prepareTor(root);
+// The app lock's Windows Hello prompt, owned by the Chicory window.
+if (windows) await buildWindowsHello(root);
 await fs.writeFile(path.join(runtime, 'manifest.json'), JSON.stringify({
   node: version, engine: '0.36.1', encryptedStorage: storage.driver, platform: process.platform, arch: process.arch,
   nodeArchive: archiveName, nodeArchiveSha256: selected[1],
   engineLockSha256: createHash('sha256').update(await fs.readFile(path.join(engine, 'package-lock.json'))).digest('hex'),
 }, null, 2) + '\n');
-console.log(`Desktop runtime ready: Node ${version}, Beignet 0.36.1, encrypted SQLite ${storage.driver}, bundled Tor, ${target}.`);
+console.log(`Desktop runtime ready: Node ${version}, Beignet 0.36.1, encrypted SQLite ${storage.driver}, bundled Tor${windows ? ', Windows Hello helper' : ''}, ${target}.`);

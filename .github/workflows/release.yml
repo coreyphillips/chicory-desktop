@@ -102,7 +102,8 @@ jobs:
         name: Verify Authenticode signature
         shell: pwsh
         run: |
-          foreach ($file in @(Get-ChildItem release/*.exe) + @(Get-Item release/win-unpacked/Chicory.exe)) {
+          $unpacked = @('release/win-unpacked/Chicory.exe', 'release/win-unpacked/resources/runtime/windows-hello/chicory-hello.exe')
+          foreach ($file in @(Get-ChildItem release/*.exe) + @(Get-Item $unpacked)) {
             $signature = Get-AuthenticodeSignature $file.FullName
             if ($signature.Status -ne 'Valid') { throw "$($file.Name) is not validly signed: $($signature.Status)" }
           }

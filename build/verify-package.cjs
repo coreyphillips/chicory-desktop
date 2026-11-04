@@ -15,7 +15,8 @@ module.exports = async function verifyPackage(context) {
     'runtime/node/LICENSE', 'runtime/engine/node_modules/beignet/dist/cli/cli.js',
     'runtime/engine/node_modules/beignet/dist/lightning/storage/engine-storage.cjs',
     'runtime/engine/node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node',
-    'runtime/tor/bundle.json', 'app.asar']) {
+    'runtime/tor/bundle.json', 'app.asar',
+    ...(context.electronPlatformName === 'win32' ? ['runtime/windows-hello/chicory-hello.exe'] : [])]) {
     if (!fs.existsSync(path.join(resources, relative))) throw new Error(`Packaged resource is missing: ${relative}`);
   }
   execFileSync(node, ['-e', `
