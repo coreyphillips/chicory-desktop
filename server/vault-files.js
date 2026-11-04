@@ -6,6 +6,7 @@ const { fileURLToPath } = require('node:url');
 const { randomBytes, hkdfSync, createCipheriv, createDecipheriv, timingSafeEqual } = require('node:crypto');
 const { Readable } = require('node:stream');
 const MAGIC = Buffer.from('CHICORYVAULT1');
+const VAULT_FORMAT = 1;
 const HEADER_SIZE = MAGIC.length + 12 + 16;
 let context = null;
 
@@ -182,10 +183,10 @@ function initializeVault() {
   const files = walk(context.root);
   if (!state) {
     if (files.length) throw failure('Wallet storage is not empty and has no valid encrypted vault marker. No files were changed.');
-    atomicWriteFileSync(marker, JSON.stringify({ version: 1 }));
+    atomicWriteFileSync(marker, JSON.stringify({ version: VAULT_FORMAT }));
     return;
   }
-  if (state.version !== 1 || Object.keys(state).length !== 1) throw failure();
+  if (state.version !== VAULT_FORMAT || Object.keys(state).length !== 1) throw failure();
   for (const file of files) {
     if (isProcessFile(file)) continue;
     if (isDatabaseFile(file)) {
@@ -237,5 +238,5 @@ for (const name of asyncOperations) overrides[name] = (...args) => {
 };
 overrides.promises = promises;
 const facade = new Proxy(native, { get(target, name) { return overrides[name] || target[name]; } });
-module.exports = { fs: facade, MAGIC, configureVault, clearVault, engineKeys, initializeVault,
+module.exports = { fs: facade, MAGIC, VAULT_FORMAT, configureVault, clearVault, engineKeys, initializeVault,
   atomicWriteFileSync, isDatabaseFile, isActive: () => !!context, protects: file => !!protectedLocation(file) };

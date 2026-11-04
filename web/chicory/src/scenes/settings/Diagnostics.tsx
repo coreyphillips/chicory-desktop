@@ -14,7 +14,7 @@ import { palette } from '../../design/palette';
 import { SAFETY_CODE } from '../../motion/speech';
 import { recentDiagnostics } from '../../services/diagnosticLog';
 import type { DiagnosticEntry } from '../../services/diagnosticLog';
-import { threadCount } from '../../services/processInfo';
+import { hostReport, threadCount } from '../../services/processInfo';
 import type { WalletAdapter } from '../../services/wallet';
 import { fonts, radius, space, type } from '../../theme';
 import { Action, BREAK, Note, Working } from './ui';
@@ -120,6 +120,11 @@ function RecentErrors({ entries }: { entries: DiagnosticEntry[] }) {
  * so a copied report shows a process growing towards the system's limit.
  * Above it sit the app's own recent errors, in full.
  *
+ * On desktop the host builds the report instead: its lifecycle, Tor and
+ * storage state, process counters and outcomes kept from earlier launches,
+ * with the wallet's figures redacted by the same rules. It is drawn even
+ * when the wallet could not answer, since that is when it is needed.
+ *
  * It is what Settings > Help > Diagnostics opens, drawn only while its row
  * is open, so it reads the report as it opens and again on Refresh, and the
  * report is turned into text only then, never on every Settings render.
@@ -127,6 +132,7 @@ function RecentErrors({ entries }: { entries: DiagnosticEntry[] }) {
 export function DiagnosticsPanel({ client }: { client: WalletAdapter }) {
   const [report, setReport] = useState<WalletDiagnostics | null>(null);
   const [threads, setThreads] = useState<number | null>(null);
+  const [host, setHost] = useState<string | null>(null);
   const [events, setEvents] = useState<DiagnosticEntry[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -139,15 +145,23 @@ export function DiagnosticsPanel({ client }: { client: WalletAdapter }) {
     threadCount().then(count => {
       if (alive.current) setThreads(count);
     });
+    let next: WalletDiagnostics | null = null;
+    let failure = '';
     try {
-      const next = await client.diagnostics();
+      next = await client.diagnostics();
       if (alive.current) setReport(next);
     } catch (e) {
-      if (alive.current) {
-        setError(e instanceof Error ? e.message : words.unreadable);
-      }
-    } finally {
-      if (alive.current) setBusy(false);
+      failure = e instanceof Error ? e.message : words.unreadable;
+      if (alive.current) setError(failure);
+    }
+    const hosted = await hostReport({
+      wallet: next,
+      ...(failure ? { walletError: failure } : {}),
+      events: recentDiagnostics(),
+    });
+    if (alive.current) {
+      setHost(hosted);
+      setBusy(false);
     }
   }, [client]);
   useEffect(() => {
@@ -163,23 +177,24 @@ export function DiagnosticsPanel({ client }: { client: WalletAdapter }) {
   );
   const text = useMemo(
     () =>
-      report
+      host ??
+      (report
         ? JSON.stringify(
             { ...report, ...(threads === null ? {} : { threads }), events },
             null,
             1,
           )
-        : '',
-    [report, threads, events],
+        : ''),
+    [host, report, threads, events],
   );
   return (
     <>
       <RecentErrors entries={errors} />
       {error ? <Note tone="error">{error}</Note> : null}
-      {busy && !report ? (
+      {busy && !text ? (
         <Working size={24} accessibilityLabel={words.loading} />
       ) : null}
-      {report ? (
+      {text ? (
         <View style={styles.errors}>
           <Text accessibilityRole="header" style={styles.subheading}>
             {words.report}
@@ -204,7 +219,7 @@ export function DiagnosticsPanel({ client }: { client: WalletAdapter }) {
             label={words.copy}
             glyph="copy"
             tone="quiet"
-            disabled={!report}
+            disabled={!text}
             onPress={() => {
               Clipboard.setString(text);
               announce(words.copied);

@@ -3,12 +3,20 @@ import type { BrowserKey } from './keyboard';
 export type DesktopScene = 'home' | 'send' | 'receive' | 'activity' | 'settings';
 export type DesktopCommand = DesktopScene | 'payment-link';
 
+export interface HostReportInput {
+  wallet: unknown;
+  walletError?: string;
+  events: unknown[];
+}
+
 export interface DesktopBridge {
   readonly platform: string;
   readonly version: string;
   minimize(): void;
   toggleMaximize(): void;
   close(): void;
+  /** The host's redacted support report, with the given wallet figures redacted into it. */
+  diagnostics?(input: HostReportInput): Promise<string>;
   onCommand(callback: (command: string, value?: string) => void): () => void;
 }
 

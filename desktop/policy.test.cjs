@@ -113,7 +113,8 @@ test('preload exposes only window commands and strips IPC events from subscripti
   const emitter = new EventEmitter();
   const sent = [];
   let api;
-  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args) });
+  const invoked = [];
+  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args), invoke: (...args) => { invoked.push(args); return Promise.resolve('{}'); } });
   const context = {
     process: { platform: 'darwin' },
     require(name) {
@@ -127,10 +128,13 @@ test('preload exposes only window commands and strips IPC events from subscripti
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
+  // The report request has one fixed channel; the renderer cannot choose another.
+  api.diagnostics({ wallet: null, events: [] });
+  assert.deepEqual(invoked, [['desktop:diagnostics', { wallet: null, events: [] }]]);
   const received = [];
   const unsubscribe = api.onCommand((...args) => received.push(args));
   const privilegedEvent = { sender: { secret: 'not-for-renderer' } };
