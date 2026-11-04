@@ -136,6 +136,16 @@ function httpError(status, code, message) {
 	return err;
 }
 
+/** Whether this host lets a listener bind `port` on `host` right now. */
+function portBindable(port, host) {
+	return new Promise((resolve) => {
+		const server = net.createServer();
+		server.unref();
+		server.once('error', () => resolve(false));
+		server.listen({ port, host, exclusive: true }, () => server.close(() => resolve(true)));
+	});
+}
+
 /**
  * Resolves how to invoke the beignet daemon. In the container beignet is a
  * global npm install (`beignet` on PATH). For local dev, set BEIGNET_BIN to a
@@ -639,7 +649,13 @@ class WalletManager {
 		return `http://127.0.0.1:${rec.port}`;
 	}
 
-	_allocatePort() {
+	/** Wallet ports handed to a create that has not written its record yet. */
+	_reserved() {
+		this._reservedPorts ??= new Set();
+		return this._reservedPorts;
+	}
+
+	_allocatePort(skip = new Set()) {
 		const used = new Set(
 			this.registry
 				.list()
@@ -647,9 +663,67 @@ class WalletManager {
 				.filter(Boolean)
 		);
 		for (let port = config.childPortBase; port <= config.childPortMax; port++) {
-			if (!used.has(port)) return port;
+			if (!used.has(port) && !skip.has(port) && !this._reserved().has(port)) return port;
 		}
 		throw httpError(507, 'NO_PORT', 'No free wallet port available');
+	}
+
+	/**
+	 * Whether another program on this computer holds a wallet's API port or
+	 * the Lightning listen port derived from it. Both loopback and the
+	 * wildcard address are tried, because some systems let a wildcard bind
+	 * succeed beside a loopback listener and the other way round.
+	 */
+	async _portsFree(port) {
+		for (const candidate of [port, port + LISTEN_PORT_OFFSET]) {
+			for (const host of ['127.0.0.1', '0.0.0.0']) {
+				if (!(await portBindable(candidate, host))) return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The first wallet port that neither another wallet here nor another
+	 * program on this computer holds, such as a second Chicory profile's
+	 * manager. It is reserved before it is probed, so a concurrent create
+	 * never takes the same one; the caller releases it once its record is
+	 * written or the create fails.
+	 */
+	async _reservePort() {
+		const skip = new Set();
+		for (let tries = config.childPortMax - config.childPortBase + 1; tries > 0; tries--) {
+			const port = this._allocatePort(skip);
+			if (skip.has(port)) break;
+			this._reserved().add(port);
+			if (await this._portsFree(port)) return port;
+			this._reserved().delete(port);
+			skip.add(port);
+		}
+		throw httpError(507, 'NO_PORT', 'No free wallet port is available on this computer.');
+	}
+
+	/**
+	 * The wallet port another program holds, or null. An on-chain only wallet
+	 * runs no Lightning listener, so only its API port is checked. A daemon
+	 * from an earlier run that is still exiting frees its port within
+	 * moments, so a busy port is retried briefly before it is reported.
+	 */
+	async _busyPort(rec, { attempts = 6, delayMs = 500 } = {}) {
+		const ports = rec.onchainOnly ? [rec.port] : [rec.port, rec.port + LISTEN_PORT_OFFSET];
+		let busy = null;
+		for (let attempt = 0; attempt < attempts; attempt++) {
+			if (attempt) await new Promise((resolve) => setTimeout(resolve, delayMs));
+			busy = null;
+			for (const port of ports) {
+				for (const host of ['127.0.0.1', '0.0.0.0']) {
+					if (!(await portBindable(port, host))) { busy = port; break; }
+				}
+				if (busy) break;
+			}
+			if (!busy) return null;
+		}
+		return busy;
 	}
 
 	_normalizeElectrum(input) {
@@ -1071,7 +1145,19 @@ class WalletManager {
 		});
 	}
 
-	async _provision({
+	async _provision(input) {
+		// A port free on this computer, held for this create until its record
+		// is written. Reserved first, so the import identity check below still
+		// has no asynchronous work between it and the registry write.
+		const port = await this._reservePort();
+		try {
+			return await this._provisionOn(input, port);
+		} finally {
+			this._reserved().delete(port);
+		}
+	}
+
+	async _provisionOn({
 		name,
 		network,
 		electrum,
@@ -1089,7 +1175,7 @@ class WalletManager {
 		guardianServe,
 		lfbw: lfbwInput,
 		ffor: fforInput
-	}) {
+	}, port) {
 		const net = this._validateNetwork(network);
 		const resolvedElectrum = this._resolveElectrum(electrum);
 		// A cold onion route can take two minutes. Desktop defers its chain
@@ -1114,7 +1200,6 @@ class WalletManager {
 		const host = netmode.normalizePublicHost(publicHost);
 		netmode.validateNetworkChoice({ mode, publicHost: host, onchainOnly: !!onchainOnly });
 		const irohBlock = netmode.normalizeIroh(iroh, { available: this.irohAvailable(), onchainOnly: !!onchainOnly });
-		const port = this._allocatePort();
 		const rec = {
 			id,
 			name: (name && String(name).trim()) || `Wallet ${id.slice(0, 4)}`,
@@ -1487,13 +1572,20 @@ class WalletManager {
 			rt.startTask = this._startWalletLocked(id, rec, rt).catch(err => {
 				if (rt.stopping || this.shuttingDown) return;
 				rt.status = 'error'; rt.healthy = false;
-				rt.lastStartError = { message: err.message, at: nowIso() };
+				rt.lastStartError = { message: err.message, ...(err.code === 'PORT_IN_USE' ? { code: err.code } : {}), at: nowIso() };
 				this._log(id, `start failed: ${err.message}`);
 			}).finally(() => { rt.spawning = false; rt.startTask = null; });
 			return;
 		}
 		try {
 			await this._startWalletLocked(id, rec, rt);
+		} catch (err) {
+			if (err.code === 'PORT_IN_USE') {
+				rt.status = 'error'; rt.healthy = false;
+				rt.lastStartError = { message: err.message, code: err.code, at: nowIso() };
+				this._log(id, `start failed: ${err.message}`);
+			}
+			throw err;
 		} finally {
 			rt.spawning = false;
 		}
@@ -1554,6 +1646,19 @@ class WalletManager {
 			fs.unlinkSync(path.join(p.home, '.beignet', 'daemon.pid'));
 		} catch (_) {
 			/* no pid file */
+		}
+
+		// Another program on this computer, such as a second Chicory profile's
+		// manager, may hold the wallet's port. Say so plainly rather than let
+		// the daemon fail on bind and restart without saying why.
+		const busy = await this._busyPort(rec);
+		if (rt.stopping || this.shuttingDown) return;
+		if (busy) {
+			throw httpError(
+				409,
+				'PORT_IN_USE',
+				`Port ${busy} on this computer is already in use by another program, so this wallet cannot start. Close that program, then start the wallet again.`
+			);
 		}
 
 		const mnemonic = fs.readFileSync(p.mnemonicFile, 'utf8').trim();
@@ -2075,6 +2180,10 @@ class WalletManager {
 		while (rt.proc && rt.proc === proc) {
 			const probe = await this._probeHealth(rec, 2000);
 			if (rt.proc !== proc) return;
+			if (probe.kind === 'foreign') {
+				await this._refuseForeignDaemon(id, rec, rt);
+				return;
+			}
 			if (probe.kind === 'ok') {
 				rt.healthy = true;
 				rt.lastStartError = null;
@@ -2113,6 +2222,53 @@ class WalletManager {
 	}
 
 	/**
+	 * Whether the daemon answering on this wallet's port is this wallet's own.
+	 * /health takes no credential, so another manager's daemon holding the
+	 * port, such as a second Chicory profile's, answers it as well. Only the
+	 * wallet's own daemon accepts its token. Checked once per child process;
+	 * anything but a refused token is inconclusive, so a daemon still booting
+	 * is never mistaken for a stranger.
+	 */
+	async _daemonOwnership(rec, timeoutMs) {
+		const rt = this.runtimeState(rec.id);
+		if (rt.proc && rt.ownerVerified === rt.proc) return 'owned';
+		try {
+			const res = await fetch(`http://127.0.0.1:${rec.port}/info`, {
+				headers: { Authorization: `Bearer ${this.token(rec.id)}` },
+				signal: AbortSignal.timeout(timeoutMs)
+			});
+			if (res.status === 401 || res.status === 403) return 'foreign';
+			if (res.ok) {
+				rt.ownerVerified = rt.proc;
+				return 'owned';
+			}
+		} catch (_) {
+			/* unreachable, timed out or no token yet */
+		}
+		return 'unknown';
+	}
+
+	/**
+	 * Another program's wallet engine answers on this wallet's port, so this
+	 * wallet's daemon never bound it. Stop that daemon without a restart loop
+	 * and say why; starting the wallet again checks the port afresh.
+	 */
+	_refuseForeignDaemon(id, rec, rt) {
+		const message = `Port ${rec.port} on this computer is answered by another wallet engine, such as one a second Chicory profile runs, so this wallet cannot start. Close it, then start the wallet again.`;
+		rt.healthy = false;
+		rt.status = 'error';
+		rt.lastStartError = { message, code: 'PORT_IN_USE', at: nowIso() };
+		this._log(id, `start failed: ${message}`);
+		// The exit that follows is this refusal, not a crash to restart.
+		rt.stopping = true;
+		const proc = rt.proc;
+		if (!proc) return Promise.resolve();
+		return this._killProc(proc).then(() => {
+			if (!rt.proc) rt.status = 'error';
+		}, () => {});
+	}
+
+	/**
 	 * One /health probe, classified. A daemon booted against a fresh database
 	 * whose recovery namespace its guardians hold answers every route but the
 	 * recovery surface with 503 NODE_RESTORE_PENDING; that is a daemon that
@@ -2123,7 +2279,11 @@ class WalletManager {
 			const res = await fetch(`http://127.0.0.1:${rec.port}/health`, {
 				signal: AbortSignal.timeout(timeoutMs)
 			});
-			if (res.ok) return { kind: 'ok', health: (await res.json()).result };
+			if (res.ok) {
+				const health = (await res.json()).result;
+				if ((await this._daemonOwnership(rec, timeoutMs)) === 'foreign') return { kind: 'foreign' };
+				return { kind: 'ok', health };
+			}
 			if (res.status === 503) {
 				let body = null;
 				try {

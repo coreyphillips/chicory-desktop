@@ -45,6 +45,9 @@ function harness(t, overrides = {}) {
   manager._log = () => {};
   manager.token = () => 'fixture';
   manager._clearStaleInstanceLock = () => {};
+  // Host port probing has its own tests; these are about Tor and IPC.
+  manager._busyPort = async () => null;
+  manager._portsFree = async () => true;
   manager._startEvents = () => {};
   manager._stopEvents = () => {};
   manager._startDfWatch = () => {};
