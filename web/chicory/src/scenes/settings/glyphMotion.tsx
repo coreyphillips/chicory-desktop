@@ -7,7 +7,6 @@ import Reanimated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import type { SharedValue } from 'react-native-reanimated';
 import Svg, { Path } from 'react-native-svg';
 import { GLYPHS, strokeFor } from '../../design/glyphs';
 import type { GlyphName } from '../../design/glyphs';
@@ -24,9 +23,8 @@ import { ROW_GLYPH } from './hub';
 
 /*
  * The glyphs of Settings' rows that move in parts (REDESIGN.md 4, Animated
- * glyphs): the lock whose shackle closes as Lock device wallet is pressed,
- * the phone that buzzes as haptics turn on, and the scan frame that closes
- * on its bolt as Auto-pay does. Each is drawn as its glyph
+ * glyphs): the phone that buzzes as haptics turn on, and the scan frame
+ * that closes on its bolt as Auto-pay does. Each is drawn as its glyph
  * is, in layers of its parts, so only the part that moves is moved, and
  * only by transform and opacity. Their numbers are exported, so each is a
  * table test.
@@ -68,140 +66,6 @@ function Parts({
         ))}
     </Svg>
   );
-}
-
-/** How far the shackle drops as it closes, in points at a row's glyph size. */
-export const SHACKLE_DROP = 1.5;
-
-/** How long a shackle let go of without a press takes to lift back, in ms. */
-export const SHACKLE_LIFT_MS = 260;
-
-/**
- * How far the shackle drops at `size`: its 1.5pt grown with the glyph, and
- * nothing under Reduce Motion, where the shackle only crossfades.
- */
-export const shackleDrop = (size: number, reduced: boolean): number =>
-  reduced ? 0 : (SHACKLE_DROP * size) / ROW_GLYPH;
-
-/** `value` held between 0 and 1. */
-function unit(value: number): number {
-  'worklet';
-  return Math.min(1, Math.max(0, value));
-}
-
-/**
- * The lock beside Lock device wallet: at rest its shackle stands open, as
- * `unlock` draws it. `shut` closes it: the open shackle crossfades to
- * `lock`'s closed one as both drop `shackleDrop`, so a press lands with a
- * clunk before anything is locked (REDESIGN.md 4, lock to unlock run the
- * other way). `useShackle` moves `shut` with the press.
- */
-export function ShackleGlyph({
-  size,
-  color,
-  shut,
-}: {
-  size: number;
-  color: string;
-  shut: SharedValue<number>;
-}) {
-  const { reduced } = useMotionPrefs();
-  const drop = shackleDrop(size, reduced);
-  const open = useAnimatedStyle(() => ({
-    opacity: 1 - unit(shut.get()),
-    transform: [{ translateY: drop * shut.get() }],
-  }));
-  const closed = useAnimatedStyle(() => ({
-    opacity: unit(shut.get()),
-    transform: [{ translateY: drop * shut.get() }],
-  }));
-  return (
-    <View
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      style={{ width: size, height: size }}
-    >
-      <Parts name="lock" parts={['body']} size={size} color={color} />
-      <Reanimated.View style={[StyleSheet.absoluteFill, open]}>
-        <Parts name="unlock" parts={['shackle']} size={size} color={color} />
-      </Reanimated.View>
-      <Reanimated.View style={[StyleSheet.absoluteFill, closed]}>
-        <Parts name="lock" parts={['shackle']} size={size} color={color} />
-      </Reanimated.View>
-    </View>
-  );
-}
-
-/**
- * The press behind `ShackleGlyph`. A finger landing closes the shackle on
- * the snap spring; one lifting with no press after it, a press the finger
- * slid away from, lets it lift back over 260ms; a press that lands keeps it
- * shut while the wallet locks, and closes it for a press no finger started,
- * as a screen reader's. Under Reduce Motion each is a crossfade. All of it
- * runs on the steady clock (REDESIGN.md 3.5), since a lock is followed at
- * once by work that can hold the JavaScript thread.
- *
- * A press arrives with or just after the finger lifts, so the lift waits a
- * turn to see whether one came.
- */
-export function useShackle() {
-  const { reduced } = useMotionPrefs();
-  const shut = useSharedValue(0);
-  const lift = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // A finger is on the control, and whether its press landed.
-  const finger = useRef(false);
-  const landed = useRef(false);
-  const stop = () => {
-    if (lift.current !== null) clearTimeout(lift.current);
-    lift.current = null;
-  };
-  // Nothing lifts a shackle that has gone.
-  useEffect(
-    () => () => {
-      if (lift.current !== null) clearTimeout(lift.current);
-    },
-    [],
-  );
-  const close = () =>
-    shut.set(
-      steady(
-        reduced
-          ? withTiming(1, {
-              duration: durations.crossfade,
-              easing: curves.standard,
-            })
-          : withSpring(1, springs.snap),
-      ),
-    );
-  return {
-    shut,
-    pressIn: () => {
-      stop();
-      finger.current = true;
-      landed.current = false;
-      close();
-    },
-    pressOut: () => {
-      stop();
-      lift.current = setTimeout(() => {
-        lift.current = null;
-        finger.current = false;
-        if (landed.current) return;
-        shut.set(
-          steady(
-            withTiming(0, {
-              duration: reduced ? durations.crossfade : SHACKLE_LIFT_MS,
-              easing: curves.standard,
-            }),
-          ),
-        );
-      }, 0);
-    },
-    release: () => {
-      landed.current = true;
-      if (!finger.current) close();
-    },
-  };
 }
 
 /**

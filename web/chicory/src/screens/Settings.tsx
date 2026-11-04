@@ -39,18 +39,12 @@ import { unlockGlyph } from '../scenes/phases/visual';
 import { EmptyWallet } from '../scenes/settings/EmptyWallet';
 import { DiagnosticsPanel } from '../scenes/settings/Diagnostics';
 import { useFieldScan } from '../scenes/settings/fieldScan';
-import {
-  AutoPayGlyph,
-  HapticsGlyph,
-  ShackleGlyph,
-  useShackle,
-} from '../scenes/settings/glyphMotion';
+import { AutoPayGlyph, HapticsGlyph } from '../scenes/settings/glyphMotion';
 import { ShareSlider } from '../scenes/settings/ShareSlider';
 import { autoPayLimit } from '../scenes/send/autoPay';
 import { Odometer } from '../glyphs/Odometer';
 import { steady } from '../motion/steady';
 import {
-  ActionRow,
   DISC,
   DisclosureRow,
   GlyphDisc,
@@ -804,39 +798,6 @@ function AutoPayLimit({
 }
 
 /**
- * Lock device wallet: it acts at once, whatever is open, since it is a way
- * out. Its lock's shackle closes as the finger lands and lifts back if the
- * finger slides away (`useShackle`).
- */
-const LockRow = memo(function LockLine({
-  edge,
-  step,
-  onDisconnect,
-}: {
-  edge: HubEdge;
-  step: number;
-  onDisconnect: () => void;
-}) {
-  const { accent } = useAccent();
-  const size = useGlyphSize(ROW_GLYPH);
-  const shackle = useShackle();
-  return (
-    <ActionRow
-      edge={edge}
-      step={step}
-      label={words.wallet.lock}
-      glyph={<ShackleGlyph size={size} color={accent} shut={shackle.shut} />}
-      onPressIn={shackle.pressIn}
-      onPressOut={shackle.pressOut}
-      onPress={() => {
-        shackle.release();
-        return onDisconnect();
-      }}
-    />
-  );
-});
-
-/**
  * What Erase wallet from this phone opens: the warning, felt as it opens
  * and where a screen reader lands, then the explicit button, behind the app
  * lock when one is on, because it deletes keys and channel state that a
@@ -1176,13 +1137,13 @@ function About({ engine, step }: { engine: string | null; step: number }) {
  * grouped hub (REDESIGN.md 6, Settings): the wallet's card on top, then
  * its rows in four groups, Wallet (the recovery phrase, the primary node,
  * the network and its servers), This phone (the app lock, haptics and
- * auto-pay), Funds and exits (emptying the wallet, locking it and erasing
- * it) and Help (diagnostics), and the versions at the foot. Every safety line stays,
+ * auto-pay), Funds and exits (emptying the wallet and erasing it) and Help
+ * (diagnostics), and the versions at the foot. Every safety line stays,
  * inside the row it belongs to.
  *
  * A row opens in place, one at a time (`nextOpen`), and what it opens is
  * drawn only while it is open, so Settings arrives light and each row opens
- * fresh. The switches and Lock device wallet act at once and open nothing.
+ * fresh. The switches act at once and open nothing.
  * What closes itself, Keep my wallet or Keep my channel, closes its row and
  * hands a screen reader back to it.
  *
@@ -1208,7 +1169,6 @@ export function SettingsScreen({
   snapshot,
   client,
   switchError,
-  onDisconnect,
   onRefresh,
   onRead,
   onNetwork,
@@ -1225,7 +1185,6 @@ export function SettingsScreen({
   client: WalletAdapter;
   /** Why the last network switch failed. It outlives the screen that ran it. */
   switchError: string;
-  onDisconnect: () => void;
   /**
    * Restarts and resyncs the wallet behind the pull to refresh's spinner,
    * for a change that moved it, such as a new primary node.
@@ -1492,8 +1451,6 @@ export function SettingsScreen({
             ) : null}
           </DisclosureRow>
         );
-      case 'leave':
-        return <LockRow key="leave" {...at} onDisconnect={onDisconnect} />;
       case 'fullBackup':
         return (
           <DisclosureRow

@@ -38,7 +38,6 @@ export const settings = {
     serversLabel: 'Change network or Bitcoin server',
     /** The row inside Network & servers that opens the server editor. */
     editServers: 'Edit servers',
-    lock: 'Stop wallet',
   },
 
   recovery: {

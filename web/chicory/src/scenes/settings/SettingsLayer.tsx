@@ -185,7 +185,6 @@ export function SettingsLayer({
               snapshot={snapshot}
               client={client}
               switchError={session.switchError}
-              onDisconnect={session.disconnect}
               onRefresh={session.manualRefresh}
               onRead={session.refresh}
               onNetwork={session.switchNetwork}

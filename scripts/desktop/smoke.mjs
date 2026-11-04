@@ -164,6 +164,9 @@ try {
   await screenshot('desktop-receive');
   await nativeMenu('Settings');
   await expect(page.getByText('This computer', { exact: true })).toBeVisible();
+  // The page is drawn through to Help, below Funds and exits, which no longer offers Stop wallet.
+  await expect(page.getByRole('button', { name: 'Diagnostics', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Stop wallet', exact: true })).toHaveCount(0);
   await screenshot('desktop-settings');
   // A network that ships without a server opens its servers and says what is missing.
   await page.getByRole('button', { name: 'Change network or Bitcoin server', exact: true }).click();
