@@ -9,7 +9,7 @@ The Beignet wallet runs on this computer.
 
 ## A desktop workspace
 
-- A persistent navigation rail, wallet selector and Activity column. The rail
+- A persistent navigation rail, network status and Activity column. The rail
   becomes compact in narrower windows, while payment forms keep readable widths.
 - Native window controls and menus, remembered window placement, standard text
   editing and keyboard navigation. Use Command on macOS or Control elsewhere:

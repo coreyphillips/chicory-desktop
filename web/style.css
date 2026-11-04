@@ -45,9 +45,6 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outlin
   .browser-sidebar nav button[data-scene="settings"] { margin-top: 22px; }
   .browser-nav-label, .browser-sidebar kbd { display: none; }
   .browser-wallet-identity { display: flex; flex-direction: column; gap: 10px; margin-top: auto; padding: 20px 0 0; border-top: 1px solid #302822; min-width: 0; }
-  .browser-wallet-caption { color: #8c8174; font-size: 10px; letter-spacing: .04em; }
-  .browser-wallet-identity select { width: 100%; min-width: 0; padding: 7px 0; color: #f3ecdf; background: #15110f; border: 0; border-bottom: 1px solid #4a3e36; font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
-  .browser-wallet-identity select:focus-visible { outline: 2px solid #8fa5e4; outline-offset: 3px; }
   .browser-network { font-size: 11px; color: #b9ad9e; display: flex; align-items: center; justify-content: center; gap: 8px; }
   .browser-network i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #f2c46b; }
   .browser-network i[data-connected="true"] { background: #9fd4a6; }
@@ -63,8 +60,6 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outlin
   .browser-sidebar kbd { display: inline; margin-left: auto; color: #8c8174; font-family: inherit; font-size: 10px; font-weight: 400; opacity: 0; transition: opacity 140ms; }
   .browser-sidebar nav button:hover kbd, .browser-sidebar nav button:focus-visible kbd { opacity: 1; }
   .browser-wallet-identity { padding: 22px 12px 0; gap: 10px; }
-  .browser-wallet-caption { font-size: 11px; }
-  .browser-wallet-identity select { font-size: 12px; }
   .browser-network { justify-content: flex-start; font-size: 12px; }
   .browser-network > span { display: inline; }
   .browser-device-caption { display: block; font-size: 10px; color: #8c8174; padding-top: 3px; }

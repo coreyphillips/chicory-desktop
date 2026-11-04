@@ -70,21 +70,10 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
             <kbd aria-hidden="true">{modifier}{shortcuts[item.name]}</kbd>
           </button>)}
         </nav>
-        {/* A relock may leave the session's wallets in memory, so the lock decides what shows. */}
-        {phase.kind !== 'locked' && <div className="browser-wallet-identity" title={wallet?.name || 'Wallet'}>
-          <label htmlFor="browser-wallet-selector" className="browser-wallet-caption">Wallet</label>
-          <select id="browser-wallet-selector" aria-label="Wallet" value={session.walletId}
-            disabled={!session.client || state.busy || choosing || !!state.overlay}
-            onChange={event => {
-              const selected = session.wallets.find(item => item.id === event.target.value);
-              if (selected && !state.busy && !choosing && !state.overlay)
-                void session.selectWallet(selected).catch(() => {});
-            }}>
-            {!session.walletId && <option value="">Choose wallet</option>}
-            {session.wallets.map(item => <option key={item.id} value={item.id}>
-              {item.name}{session.wallets.filter(other => other.name === item.name).length > 1 ? ` (${item.id.slice(0, 6)})` : ''}
-            </option>)}
-          </select>
+        {/* The open wallet's network and whether it is connected; networks change in Settings.
+            A relock may leave the session's wallet in memory, so the lock decides what shows. */}
+        {phase.kind !== 'locked' && <div className="browser-wallet-identity" title={wallet?.name || 'Wallet'}
+          data-wallet={session.walletId || undefined}>
           <span className="browser-network" title={`${wallet?.network || session.activeProfile.network}: ${session.snapshot?.primary.connected ? 'Connected' : 'Connecting'}`}><i data-connected={!!session.snapshot?.primary.connected} /><span>{wallet?.network || session.activeProfile.network}</span></span>
           <span className="browser-device-caption">On this computer</span>
         </div>}

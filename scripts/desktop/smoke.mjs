@@ -92,6 +92,10 @@ try {
   }));
   assert.equal(sizes.desktop, 'true');
   assert.ok(sizes.width > 1000);
+  // The sidebar says which network is open; it offers no wallet drop-down.
+  await expect(page.locator('.browser-sidebar select')).toHaveCount(0);
+  await expect(page.locator('.browser-wallet-identity')).toHaveAttribute('data-wallet', /.+/);
+  await expect(page.locator('.browser-network')).toBeVisible();
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(960, 720));
   await page.waitForTimeout(700);
   await screenshot('desktop-compact');

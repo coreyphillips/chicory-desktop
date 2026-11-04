@@ -157,7 +157,7 @@ class DesktopApp {
   /** The renderer selects a wallet only when it connects, so a wallet created outside it needs a reload. */
   async activate(walletId) {
     await this.page.reload();
-    await expect(this.page.locator('#browser-wallet-selector')).toHaveValue(walletId, { timeout: 60000 });
+    await expect(this.page.locator(`.browser-wallet-identity[data-wallet="${walletId}"]`)).toBeAttached({ timeout: 60000 });
     await expect(this.page.locator('[data-scene="send"]')).toBeEnabled({ timeout: 60000 });
   }
 
