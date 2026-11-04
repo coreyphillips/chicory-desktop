@@ -28,7 +28,7 @@ const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
 // backup runs last: restoring a stale copy of the node may lead its peer to
 // close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'offline', 'drain', 'recovery', 'transport', 'backup'];
+const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'drain', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
 for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
@@ -426,19 +426,61 @@ try {
       paidOnce: { outgoing: once.outgoing.map(item => item.status), incoming: once.incoming.map(item => item.status) } });
   }
 
+  if (stages.has('persistence')) {
+    // Payments land while the whole app is killed, so the engine's encrypted
+    // database and the manager's vault files are being written when it dies.
+    const requests = [];
+    for (let index = 1; index <= 5; index++)
+      requests.push(await wallet().receive(await wallet().quoteReceive({ amountSats: 1000 + index, description: `qualify burst ${index}` })));
+    const sends = requests.map(request => payer.prepareSend({ request: request.bolt11 })
+      .then(review => payer.send(review)).catch(error => ({ refused: error.code ?? error.message })));
+    await wait(600);
+    await subject.kill();
+    await Promise.allSettled(sends);
+    subject = await new DesktopApp(subject.profile).open();
+    await healthy(subject.api.bind(subject), state.walletId);
+    const outcomes = await until('every burst payment settles one way or the other', async () => {
+      const [mine, theirs] = await Promise.all([wallet().snapshot(), payer.snapshot()]);
+      const rows = requests.map(request => ({
+        received: onePer(mine.activity, 'paymentHash', request.paymentHash),
+        paid: onePer(theirs.activity, 'paymentHash', request.paymentHash),
+      }));
+      return rows.every(row => ![...row.received, ...row.paid].some(item => item.status === 'pending')) ? rows : null;
+    }, Boolean, 180000);
+    for (const [index, row] of outcomes.entries()) {
+      const credited = row.received.filter(item => item.status === 'completed').length;
+      const paid = row.paid.filter(item => item.status === 'completed').length;
+      assert.ok(credited <= 1, `Burst payment ${index + 1} is credited at most once`);
+      assert.equal(credited, paid, `Burst payment ${index + 1}: the wallet agrees with the payer`);
+    }
+    record.pass('a crash while payments are written leaves an intact wallet that agrees with the payer', {
+      payments: outcomes.map(row => ({ credited: row.received.filter(item => item.status === 'completed').length,
+        paid: row.paid.filter(item => item.status === 'completed').length })) });
+  }
+
   if (stages.has('offline')) {
+    // Above the engine's offline minimum (5000 sats), so a refusal here is
+    // about settlement, not the amount.
+    const OFFLINE_SATS = 6000;
     // The primary does not settle offline receives yet, so this must refuse whatever the engine supports.
-    await assert.rejects(() => wallet().quoteReceive({ amountSats: 4000, mode: 'offline' }), 'Unsupported offline receive refuses');
+    const refusal = await wallet().quoteReceive({ amountSats: OFFLINE_SATS, mode: 'offline' }).then(() => null, error => error);
+    assert.ok(refusal, 'Unsupported offline receive refuses');
+    assert.doesNotMatch(String(refusal.message), /at least/, 'The refusal is about settlement, not the amount');
     const snap = await wallet().snapshot();
     assert.ok(!snap.offlineReservations?.length, 'Refusal leaves no reservation');
     const offline = (await subject.api('/config')).offlineReceiveAvailable === true;
     if (!offline) {
       record.unsupported('offline receive', 'Engine does not advertise offline receive; request refused without online downgrade');
     } else {
-      record.pass('offline receive refused by a primary without settlement, no online downgrade');
+      record.pass('offline receive refused by a primary without settlement, no online downgrade', { refusal: refusal.code ?? refusal.message });
       await peer.api(`/wallets/${primary.id}`, { ffor: { settle: { enabled: true } } }, 'PATCH');
       await healthy(peer.api, primary.id, false);
-      const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: 4000, mode: 'offline', description: 'qualify offline' }));
+      // An offline receive needs remaining inbound capacity on a channel with
+      // the primary. Paying out makes that room on the home channel.
+      const room = await payer.receive(await payer.quoteReceive({ amountSats: 30000, description: 'qualify inbound room' }));
+      checkSent('payment that makes inbound room', await wallet().send(await wallet().prepareSend({ request: room.bolt11 })));
+      await until('inbound room payment settled', () => payer.getReceiveStatus(room), status => status.phase === 'completed');
+      const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: OFFLINE_SATS, mode: 'offline', description: 'qualify offline' }));
       const request = await wallet().receive(quote);
       assert.equal(request.offlineReceive, true, 'Offline request is not downgraded');
       const balance = (await wallet().snapshot()).balance.totalSats;
@@ -450,9 +492,9 @@ try {
         await healthy(subject.api.bind(subject), state.walletId);
         // Balance and Activity are separate reads, so wait for both before comparing.
         const snap = await until(`offline credit after reopen ${attempt}`, () => wallet().snapshot(),
-          value => onePer(value.activity, 'paymentHash', request.paymentHash).some(item => item.status === 'completed') && value.balance.totalSats - balance >= 4000);
+          value => onePer(value.activity, 'paymentHash', request.paymentHash).some(item => item.status === 'completed') && value.balance.totalSats - balance >= OFFLINE_SATS);
         assert.equal(onePer(snap.activity, 'paymentHash', request.paymentHash).length, 1, 'One Activity row');
-        assert.equal(snap.balance.totalSats - balance, 4000, 'One credit');
+        assert.equal(snap.balance.totalSats - balance, OFFLINE_SATS, 'One credit');
         if (attempt === 1) await subject.quit();
       }
       record.pass('offline receive paid while the app was closed, one credit after two reopenings', { paymentHash: request.paymentHash, payer: paid.status });
