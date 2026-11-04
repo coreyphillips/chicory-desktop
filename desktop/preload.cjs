@@ -6,7 +6,6 @@ const lockEvents = new Set(['locked', 'unlocked', 'conceal', 'changed']);
 
 contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
   platform: process.platform,
-  version: '0.1.0',
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),

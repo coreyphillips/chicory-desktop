@@ -128,7 +128,7 @@ test('preload exposes only window commands, the diagnostics report, the lock bri
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);

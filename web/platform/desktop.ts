@@ -11,7 +11,6 @@ export interface HostReportInput {
 
 export interface DesktopBridge {
   readonly platform: string;
-  readonly version: string;
   minimize(): void;
   toggleMaximize(): void;
   close(): void;
