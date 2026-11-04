@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
   // Returns the redacted support report as text. The wallet's own report is
   // passed in so it is redacted by the same rules before it can be copied.
   diagnostics: (input) => ipcRenderer.invoke('desktop:diagnostics', input),
+  // Erases every wallet in this profile after the lock's fresh confirmation.
+  // It takes nothing from the page.
+  erase: () => ipcRenderer.invoke('desktop:erase'),
   onCommand: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, command, value) => {

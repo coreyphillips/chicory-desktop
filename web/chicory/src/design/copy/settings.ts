@@ -197,14 +197,14 @@ export const settings = {
   },
 
   erase: {
-    link: 'Erase wallet from this computer',
+    link: 'Erase all wallets from this computer',
     warning:
-      "Deletes this wallet's keys, channel state and history from this computer, on every network. Without the recovery phrase and current channel state, funds are lost.",
-    confirm: 'Erase wallet',
-    prompt: 'Confirm to erase this wallet',
-    unconfirmed: 'The wallet was not erased because this was not confirmed.',
-    failed: 'Could not erase the wallet.',
-    keep: 'Keep my wallet',
+      "Deletes every wallet in this Chicory profile from this computer, on every network: keys, channel state, history and saved app settings. It does not send or rescue funds. Without each wallet's recovery phrase and current channel state, funds are lost. The app lock setting is kept.",
+    confirm: 'Erase all wallets',
+    prompt: 'Confirm to erase all wallets',
+    unconfirmed: 'Nothing was erased because this was not confirmed.',
+    failed: 'Could not erase the wallets.',
+    keep: 'Keep my wallets',
   },
 
   about: {

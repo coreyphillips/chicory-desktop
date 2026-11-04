@@ -8,6 +8,7 @@ const { loadStorageKey, ENVELOPE_VERSION } = require('./storage-key.cjs');
 const { BundledTor, TOR_VERSION } = require('./tor.cjs');
 const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require('./diagnostics.cjs');
 const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
+const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
 const fs = require('node:fs');
@@ -33,6 +34,10 @@ let torProxy;
 const torRequests = new Set();
 let origin;
 let stopping = false;
+// While set, the wallet service is being stopped and the profile erased, so
+// no wallet route, payment link or unlock may start or reach it.
+let erasing = false;
+let eraser;
 let stopped = false;
 let quitting;
 const token = randomBytes(32).toString('hex');
@@ -81,7 +86,7 @@ function showWindow() {
 
 function paymentLink(url) {
   // Never queue a payment link across startup, wallet selection or the lock.
-  if (!isPaymentLink(url) || !window || window.webContents.isLoading() || appLock?.required()) return;
+  if (!isPaymentLink(url) || !window || window.webContents.isLoading() || appLock?.required() || erasing) return;
   showWindow();
   command('payment-link', url);
 }
@@ -139,9 +144,9 @@ async function startManager() {
     manager.once('error', (error) => { clearTimeout(timeout); reject(error); });
     manager.once('exit', (code, signal) => {
       clearTimeout(timeout);
-      diagnostics.managerExited({ code, signal, expected: stopping });
+      diagnostics.managerExited({ code, signal, expected: stopping || erasing });
       if (!origin) reject(coded('The local wallet could not start. Check the runtime installation.', 'MANAGER_EXITED'));
-      else if (!stopping) void failureDialog(window, 'The local wallet stopped.',
+      else if (!stopping && !erasing) void failureDialog(window, 'The local wallet stopped.',
         'Quit and reopen Chicory to reconnect. Your wallet files remain on this computer.').then(() => app.quit());
     });
     manager.on('message', (message) => {
@@ -368,6 +373,7 @@ async function handleRequest(request) {
   }
   const admitted = appLock.admit(url.pathname);
   if (!admitted.ok) return admitted.status === 403 ? response('Forbidden', 403) : response('Chicory is locked.', 423);
+  if (erasing) return response('Chicory is erasing this profile.', 503);
   if (!origin || stopping) return response('The local wallet is unavailable.', 503);
   try {
     const upstream = await fetch(`${origin}${url.pathname}${url.search}`, {
@@ -486,6 +492,13 @@ function createWindow(desktopSession) {
     ['window:close', () => window.close()],
   ]) ipcMain.on(channel, (event) => { if (trustedSender(event)) action(); });
   // Read-only and redacted here, so the renderer never sees unredacted host state.
+  // Erases every wallet in this profile. It takes no arguments: the app lock's
+  // one-shot grant, the engines' clean stop and the fixed list of profile
+  // entries decide everything.
+  ipcMain.handle('desktop:erase', async (event) => {
+    if (!trustedSender(event) || demo || !eraser) return { ok: false, code: 'ERASE_REFUSED', error: 'Erase is unavailable.' };
+    return eraser.erase();
+  });
   ipcMain.handle('desktop:diagnostics', async (event, input) => {
     if (!trustedSender(event)) throw new Error('Diagnostics are unavailable.');
     let size = Infinity;
@@ -511,12 +524,14 @@ function lockEvent(name, value) {
 /** The storage key and wallet engines are released only after the gate opens. */
 function ensureManager() {
   if (demo) return Promise.resolve();
+  if (erasing) return Promise.reject(coded('Chicory is erasing this profile.', 'ERASING'));
   // A start the lock deferred is timed from the unlock, not from launch.
   if (!managerStart && loaded) diagnostics.startupBegan();
   managerStart ??= startManager().then(() => {
     if (loaded && !stopping) diagnostics.startupEnded('ready');
   }, async (error) => {
-    if (!stopping) {
+    // A wallet service stopped by an erase did not fail to open.
+    if (!stopping && !erasing) {
       diagnostics.startupEnded('failed', error);
       await failureDialog(null, 'Chicory could not open.', error.message);
       app.quit();
@@ -524,6 +539,50 @@ function ensureManager() {
     throw Object.assign(error, { reported: true });
   });
   return managerStart;
+}
+
+/** The erase of this profile, wired to the wallet service, Tor and this window's stored state. */
+function createEraser(desktopSession) {
+  return new ProfileEraser({
+    profile,
+    authorize: () => appLock.takeGrant(),
+    busy: () => !!gate.active,
+    exclusive: task => gate.run('erase', task),
+    stopService: async () => {
+      erasing = true;
+      // The manager stops every engine and waits for each to exit before it
+      // does. A kill at the deadline is reported, and nothing is deleted.
+      const outcome = await stopManager().catch(() => 'failed');
+      manager = undefined; origin = undefined; managerStart = undefined;
+      return outcome;
+    },
+    stopTor: async () => {
+      await Promise.resolve(tor?.stop()).catch(() => {});
+      tor = undefined; torProxy = undefined; torRequests.clear();
+    },
+    // Saved selections, pending-backup flags, offline drafts, preferences and
+    // any cached view live in this partition's storage.
+    clearRendererState: () => desktopSession.clearStorageData(),
+    startOver: async () => {
+      erasing = false;
+      // A new storage key and an empty wallet service, then first-run setup.
+      await ensureManager();
+      if (window && !window.isDestroyed()) await window.loadURL(APP_URL);
+    },
+    record: message => diagnostics.record('erase', message),
+  });
+}
+
+/** Finishes an erase that was interrupted, before any key is opened. False when the owner quits instead. */
+async function finishPendingErase() {
+  diagnostics.record('erase', 'resuming an interrupted erase');
+  for (;;) {
+    const result = await eraser.resume();
+    if (result.ok) return true;
+    const { response } = await dialog.showMessageBox({ type: 'error', title: 'Chicory', message: 'Chicory could not finish erasing this profile.',
+      detail: `${result.error} Chicory will not open a wallet until the erase is complete.`, buttons: ['Retry', 'Quit'], defaultId: 0, cancelId: 1 });
+    if (response !== 0) { app.quit(); return false; }
+  }
 }
 
 function installLock() {
@@ -563,6 +622,11 @@ else app.whenReady().then(async () => {
   try { cleanStaging(updateDirectory); } catch {}
   const desktopSession = session.fromPartition(demo ? 'persist:chicory-demo' : 'persist:chicory');
   desktopSession.protocol.handle('chicory-app', handleRequest);
+  if (!demo) {
+    eraser = createEraser(desktopSession);
+    // An erase that was interrupted finishes before any key or wallet opens.
+    if (hasPendingErase(profile) && !(await finishPendingErase())) return;
+  }
   createWindow(desktopSession);
   installPermissions(desktopSession);
   installMenu();
