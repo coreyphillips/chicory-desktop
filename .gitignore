@@ -1,6 +1,7 @@
 node_modules/
 .runtime/
 dist/
+dist-gallery/
 .DS_Store
 .env
 .env.*

@@ -70,7 +70,8 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
             <kbd aria-hidden="true">{modifier}{shortcuts[item.name]}</kbd>
           </button>)}
         </nav>
-        <div className="browser-wallet-identity" title={wallet?.name || 'Wallet'}>
+        {/* A relock may leave the session's wallets in memory, so the lock decides what shows. */}
+        {phase.kind !== 'locked' && <div className="browser-wallet-identity" title={wallet?.name || 'Wallet'}>
           <label htmlFor="browser-wallet-selector" className="browser-wallet-caption">Wallet</label>
           <select id="browser-wallet-selector" aria-label="Wallet" value={session.walletId}
             disabled={!session.client || state.busy || choosing || !!state.overlay}
@@ -86,7 +87,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
           </select>
           <span className="browser-network" title={`${wallet?.network || session.activeProfile.network}: ${session.snapshot?.primary.connected ? 'Connected' : 'Connecting'}`}><i data-connected={!!session.snapshot?.primary.connected} /><span>{wallet?.network || session.activeProfile.network}</span></span>
           <span className="browser-device-caption">On this computer</span>
-        </div>
+        </div>}
       </aside>
       <main id="wallet-workspace" className="browser-stage" tabIndex={-1}>{children}</main>
     </div>

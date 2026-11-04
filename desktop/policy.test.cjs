@@ -109,11 +109,12 @@ test('initial and restored windows fit small display work areas', () => {
   assert.deepEqual(windowBounds(null, laptop), { width: 1280, height: 696 });
 });
 
-test('preload exposes only window commands and strips IPC events from subscriptions', () => {
+test('preload exposes only window commands, the diagnostics report, the lock bridge, and strips IPC events from subscriptions', () => {
   const emitter = new EventEmitter();
   const sent = [];
   let api;
-  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args) });
+  const invoked = [];
+  const ipc = Object.assign(emitter, { send: (...args) => sent.push(args), invoke: (...args) => { invoked.push(args); return Promise.resolve('{}'); } });
   const context = {
     process: { platform: 'darwin' },
     require(name) {
@@ -127,10 +128,13 @@ test('preload exposes only window commands and strips IPC events from subscripti
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize', 'version']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
+  // The report request has one fixed channel; the renderer cannot choose another.
+  api.diagnostics({ wallet: null, events: [] });
+  assert.deepEqual(invoked, [['desktop:diagnostics', { wallet: null, events: [] }]]);
   const received = [];
   const unsubscribe = api.onCommand((...args) => received.push(args));
   const privilegedEvent = { sender: { secret: 'not-for-renderer' } };
@@ -142,4 +146,22 @@ test('preload exposes only window commands and strips IPC events from subscripti
   emitter.emit('desktop:command', privilegedEvent, 'send');
   assert.equal(received.length, 2);
   assert.equal(emitter.listenerCount('desktop:command'), 0);
+
+  // The lock bridge can only ask the main process to prompt.
+  invoked.length = 0;
+  ipc.invoke = async (...args) => { invoked.push(args); return { ok: false }; };
+  assert.deepEqual(Object.keys(api.lock).sort(), ['authorize', 'onEvent', 'setEnabled', 'state', 'unlock']);
+  assert.equal(Object.isFrozen(api.lock), true);
+  api.lock.state(); api.lock.unlock({ ok: true }); api.lock.authorize('anything');
+  api.lock.setEnabled('false'); api.lock.setEnabled({ enabled: true }); api.lock.setEnabled(true);
+  assert.deepEqual(invoked, [['lock:state'], ['lock:unlock'], ['lock:authorize'],
+    ['lock:set-enabled', false], ['lock:set-enabled', false], ['lock:set-enabled', true]]);
+  const lockEvents = [];
+  const stop = api.lock.onEvent((...args) => lockEvents.push(args));
+  emitter.emit('desktop:lock', privilegedEvent, 'locked', 'suspend');
+  emitter.emit('desktop:lock', privilegedEvent, 'unlock-now', true);
+  emitter.emit('desktop:lock', privilegedEvent, 'conceal', privilegedEvent);
+  assert.deepEqual(lockEvents, [['locked', 'suspend'], ['conceal', undefined]]);
+  stop();
+  assert.equal(emitter.listenerCount('desktop:lock'), 0);
 });

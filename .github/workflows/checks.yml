@@ -25,3 +25,12 @@ jobs:
       - run: npm --prefix server ci
       - run: npm run runtime:prepare
       - run: npm run check
+      # Electron's sandbox needs unprivileged user namespaces on Ubuntu 24.04.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: xvfb-run -a npm run test:gallery
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery
+          path: artifacts/gallery
+          if-no-files-found: ignore

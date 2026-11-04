@@ -5,6 +5,7 @@ const path = require('node:path');
 const { randomBytes, timingSafeEqual } = require('node:crypto');
 
 const ENVELOPE_NAME = 'storage-key.json';
+const ENVELOPE_VERSION = 1;
 const LINUX_BACKENDS = new Set(['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6']);
 const MAX_ENVELOPE_BYTES = 64 * 1024;
 const MAX_INSPECTED_FILES = 100000;
@@ -76,7 +77,7 @@ async function requireProtection(safeStorage, platform) {
 function decodeEnvelope(bytes) {
   let envelope;
   try { envelope = JSON.parse(bytes.toString('utf8')); } catch {}
-  if (!envelope || envelope.version !== 1 || envelope.provider !== 'electron.safeStorage' ||
+  if (!envelope || envelope.version !== ENVELOPE_VERSION || envelope.provider !== 'electron.safeStorage' ||
       typeof envelope.ciphertext !== 'string' || !envelope.ciphertext ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(envelope.ciphertext))
     throw failure('STORAGE_KEY_INVALID', 'The protected storage key is damaged or unsupported. Existing wallet data was preserved.');
@@ -110,7 +111,7 @@ async function wrap(safeStorage, key) {
     if (!timingSafeEqual(confirmed.key, key))
       throw failure('STORAGE_KEY_INVALID', 'The secure store could not verify the wallet key. No wallet was opened.');
   } finally { confirmed.key.fill(0); }
-  return Buffer.from(JSON.stringify({ version: 1, provider: 'electron.safeStorage', ciphertext: ciphertext.toString('base64') }) + '\n');
+  return Buffer.from(JSON.stringify({ version: ENVELOPE_VERSION, provider: 'electron.safeStorage', ciphertext: ciphertext.toString('base64') }) + '\n');
 }
 
 function persistEnvelope(profile, bytes, { replace = false, platform }) {
@@ -175,4 +176,4 @@ async function loadStorageKey({ profile, safeStorage, platform = process.platfor
   } catch (error) { key.fill(0); throw error; }
 }
 
-module.exports = { loadStorageKey };
+module.exports = { loadStorageKey, ENVELOPE_VERSION };

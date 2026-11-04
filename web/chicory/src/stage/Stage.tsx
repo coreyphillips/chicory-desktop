@@ -278,6 +278,7 @@ export function Stage({
           onApplyNetwork={session.switchNetwork}
           onDisconnect={session.disconnect}
           loadPhrase={() => client.getRecoveryPhrase()}
+          client={client}
         />
       ) : null;
       break;

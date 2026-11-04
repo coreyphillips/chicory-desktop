@@ -63,6 +63,14 @@ Detailed run results and screenshots are generated in `artifacts/smoke/`. That
 folder is excluded from source control. Selected screenshots in this repository
 show only the explicit sample wallet.
 
+## Gallery
+
+`npm run test:gallery` draws the mobile gallery's state inventory in a sealed
+desktop renderer, captures each state and audits it for clipped figures,
+unreachable confirmations, invisible glyphs and focusable hidden panes. CI runs
+a deterministic subset. Release checks run `npm run test:gallery:full`. See
+[gallery.md](gallery.md).
+
 ## Windows portability
 
 The first Windows CI pass caught an inherited directory-fsync assumption. The
