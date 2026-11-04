@@ -100,7 +100,6 @@ class DesktopApp {
     this.page.setDefaultTimeout(20000);
     await this.page.waitForURL('chicory-app://wallet/', { timeout: 30000 });
     await expect.poll(() => this.page.evaluate(async () => (await fetch('/api/config')).status), { timeout: 30000 }).toBe(200);
-    this.pids = descendants(this.electron.process().pid);
     return this;
   }
 
@@ -137,10 +136,12 @@ class DesktopApp {
 
   /** A complete application quit, waiting until every child process has exited. */
   async quit() {
+    // Taken now, so engines started since open are included.
+    const pids = descendants(this.electron.process().pid);
     const closed = this.electron.waitForEvent('close', { timeout: 60000 });
     await this.electron.evaluate(({ app }) => { setTimeout(() => app.quit(), 0); }).catch(() => {});
     await closed;
-    for (const pid of this.pids) await until(`process ${pid} exit`, async () => !alive(pid), Boolean, 30000);
+    for (const pid of pids) await until(`process ${pid} exit`, async () => !alive(pid), Boolean, 30000);
   }
 
   /** An abrupt loss of the whole process tree, as in a crash or power loss. */
@@ -330,15 +331,22 @@ try {
     const invoice = await payer.receive(await payer.quoteReceive({ amountSats: 3000, description: 'qualify crash send' }));
     const review = await wallet().prepareSend({ request: invoice.bolt11 });
     const hash = invoice.paymentHash.toLowerCase();
-    // Not awaited. The process tree dies once the engine has recorded the payment.
-    let refused;
-    void wallet().send(review).catch(error => { refused = error; });
-    await until('engine records the submission', async () => {
-      if (refused) throw refused;
-      const packet = await (await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api/payments`)).json();
-      return packet.result.some(item => item.direction === 'OUTGOING' && item.paymentHash?.toLowerCase() === hash);
-    }, Boolean, 30000);
-    await subject.kill();
+    // A frozen peer cannot settle, so the kill always lands between submission
+    // and settlement. SIGSTOP does not exist on Windows.
+    const frozen = descendants(peer.child.pid);
+    for (const pid of frozen) process.kill(pid, 'SIGSTOP');
+    try {
+      let returned;
+      void wallet().send(review).then(result => { returned = result; }, error => { returned = error; });
+      await until('payment in flight', async () => {
+        if (returned) throw new Error(`Send returned before the crash: ${returned.message}`);
+        const packet = await (await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api/payments`)).json();
+        return packet.result.some(item => item.direction === 'OUTGOING' && item.paymentHash?.toLowerCase() === hash && item.status === 'PENDING');
+      }, Boolean, 30000);
+      await subject.kill();
+    } finally {
+      for (const pid of frozen) { try { process.kill(pid, 'SIGCONT'); } catch {} }
+    }
     subject = await new DesktopApp(subject.profile).open();
     const wallets = await subject.api('/wallets');
     assert.deepEqual(wallets.map(item => item.id), [state.walletId], 'No silent replacement wallet');
@@ -372,15 +380,18 @@ try {
       const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: 4000, mode: 'offline', description: 'qualify offline' }));
       const request = await wallet().receive(quote);
       assert.equal(request.offlineReceive, true, 'Offline request is not downgraded');
+      const balance = (await wallet().snapshot()).balance.totalSats;
       await subject.quit();
       const paid = await payer.send(await payer.prepareSend({ request: request.bolt11 }));
       await until('payer settled while app is closed', async () => (await payer.snapshot()).activity.some(item => item.paymentHash === request.paymentHash && item.status === 'completed'));
       for (const attempt of [1, 2]) {
         subject = await new DesktopApp(subject.profile).open();
         await healthy(subject.api.bind(subject), state.walletId);
-        const rows = await until(`offline credit after reopen ${attempt}`, async () => onePer((await wallet().snapshot()).activity, 'paymentHash', request.paymentHash), found => found.some(item => item.status === 'completed'));
-        assert.equal(rows.length, 1, 'One Activity row');
-        assert.equal((await wallet().getReceiveStatus(request)).receivedSats, 4000, 'One credit');
+        // Balance and Activity are separate reads, so wait for both before comparing.
+        const snap = await until(`offline credit after reopen ${attempt}`, () => wallet().snapshot(),
+          value => onePer(value.activity, 'paymentHash', request.paymentHash).some(item => item.status === 'completed') && value.balance.totalSats - balance >= 4000);
+        assert.equal(onePer(snap.activity, 'paymentHash', request.paymentHash).length, 1, 'One Activity row');
+        assert.equal(snap.balance.totalSats - balance, 4000, 'One credit');
         if (attempt === 1) await subject.quit();
       }
       record.pass('offline receive paid while the app was closed, one credit after two reopenings', { paymentHash: request.paymentHash, payer: paid.status });
@@ -413,14 +424,13 @@ try {
     const before = await wallet().snapshot();
     const recoveryStatus = await wallet().getRecoveryStatus().catch(error => ({ error: error.code }));
     await subject.quit();
-    const restored = await new DesktopApp(await profile('restore')).open();
+    const restored = subject = await new DesktopApp(await profile('restore')).open();
     const imported = await restored.client().createWallet({ name: 'Qualify restore', network: 'regtest', primaryUri: state.primaryUri, electrum, mnemonic: phrase });
     await healthy(restored.api.bind(restored), imported.id, false);
     const onchain = before.balance.pending.unconfirmedSats + before.balance.pending.confirmedSats;
     const snap = await until('restored on-chain balance', () => restored.client(imported.id).snapshot(), value => value.balance.totalSats > 0 && value.balance.totalSats >= onchain);
     record.pass('recovery phrase import in a fresh profile restores on-chain funds', { totalSats: snap.balance.totalSats, previousTotalSats: before.balance.totalSats });
     record.unsupported('Lightning channel recovery from seed only', 'A seed restore recovers on-chain funds. Channel state needs the engine Recovery Protocol or an encrypted backup.', { recoveryStatus });
-    subject = restored;
   }
 
   if (stages.has('transport')) {
