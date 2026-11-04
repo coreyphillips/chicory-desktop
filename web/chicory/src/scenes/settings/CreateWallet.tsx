@@ -15,6 +15,7 @@ import { seedSourceNetwork } from '../../embedded/seed';
 import { defaultProfile } from '../../services/networks';
 import type { NetworkProfile } from '../../services/networks';
 import type { WalletAdapter } from '../../services/wallet';
+import { fullBackupAvailable, restoreFullBackup } from '../../services/fullBackup';
 import { space } from '../../theme';
 import { countWords, phraseBloom } from './motion';
 import { PhraseBloom } from './PhraseBloom';
@@ -82,6 +83,9 @@ export function CreateWalletScreen({
   // Creating a wallet on another network reuses the original seed, but the flow
   // said nothing about it, so it read as an entirely new wallet.
   const [seedSource, setSeedSource] = useState<DeviceNetwork | null>(null);
+  // Restoring from a full backup file instead of a phrase, on desktop.
+  const [fullRestore, setFullRestore] = useState(false);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
   const working = useRef(false);
   useEffect(() => {
     let active = true;
@@ -179,6 +183,36 @@ export function CreateWalletScreen({
       setBusy(false);
     }
   }
+  /**
+   * Restores a full backup file the owner picks in the main process, then
+   * opens the first wallet it brought back. Its channels stay on hold in the
+   * engine until each peer shows their state is current.
+   */
+  async function restoreBackupFile() {
+    if (working.current) return;
+    const b = copy.settings.fullBackup;
+    working.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await restoreFullBackup(backupPassphrase);
+      if (!result) return;
+      const names = result.failed.map(wallet => wallet.name).join(', ');
+      if (!result.restored.length) throw new Error(result.failed.length ? b.partial(names) : b.nothing);
+      announce(b.restored(result.restored.length));
+      haptics.success();
+      setBackupPassphrase('');
+      const record = (await client.listWallets()).find(wallet => wallet.id === result.restored[0].id);
+      if (!record) throw new Error(b.restoreFailed);
+      await onCreated(record);
+    } catch (e) {
+      haptics.error();
+      setError(e instanceof Error ? e.message : b.restoreFailed);
+    } finally {
+      working.current = false;
+      setBusy(false);
+    }
+  }
   async function finishBackup() {
     if (!created || working.current) {
       return;
@@ -244,6 +278,46 @@ export function CreateWalletScreen({
             focus
           />
         )}
+      </View>
+    );
+  }
+  if (restoring && fullRestore) {
+    const b = copy.settings.fullBackup;
+    return (
+      <View style={styles.stack}>
+        <Title>{words.restoreTitle}</Title>
+        <Note tone="warning" glyph="shield" focus>
+          {b.restoreNote}
+        </Note>
+        <Field
+          label={b.passphrase}
+          value={backupPassphrase}
+          onChangeText={value => {
+            setBackupPassphrase(value);
+            setError('');
+          }}
+          secureTextEntry
+          autoCapitalize="none"
+          editable={!busy}
+        />
+        {error ? <Note tone="error">{error}</Note> : null}
+        <Action
+          label={b.choose}
+          glyph="restore"
+          busy={busy}
+          disabled={!backupPassphrase}
+          onPress={restoreBackupFile}
+        />
+        <Link
+          label={words.toRestore}
+          glyph="restore"
+          disabled={busy}
+          onPress={() => {
+            setFullRestore(false);
+            setBackupPassphrase('');
+            setError('');
+          }}
+        />
       </View>
     );
   }
@@ -333,6 +407,19 @@ export function CreateWalletScreen({
         }
         onPress={create}
       />
+      {restoring && fullBackupAvailable() ? (
+        <Link
+          label={copy.settings.fullBackup.restoreLink}
+          glyph="shield"
+          disabled={busy}
+          onPress={() => {
+            setFullRestore(true);
+            setPhrase('');
+            setRefused(false);
+            setError('');
+          }}
+        />
+      ) : null}
       <Link
         label={restoring ? words.toCreate : words.toRestore}
         glyph={restoring ? 'sprout' : 'restore'}

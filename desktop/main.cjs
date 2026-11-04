@@ -9,6 +9,7 @@ const { BundledTor, TOR_VERSION } = require('./tor.cjs');
 const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require('./diagnostics.cjs');
 const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
 const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
+const { installFullBackupIpc } = require('./full-backup-ipc.cjs');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
 const fs = require('node:fs');
@@ -541,6 +542,17 @@ function ensureManager() {
   return managerStart;
 }
 
+/** A request from this process to the wallet service, authenticated as the window's own requests are. */
+async function managerCall(route, body, { raw = false } = {}) {
+  if (!origin || stopping || erasing) throw coded('The local wallet is unavailable.', 'UNAVAILABLE');
+  const reply = await fetch(`${origin}${route}`, { method: 'POST', redirect: 'error', body: JSON.stringify(body),
+    headers: managerHeaders(new Headers({ 'content-type': 'application/json' }), token, origin) });
+  if (raw && reply.ok) return Buffer.from(await reply.arrayBuffer());
+  const packet = await reply.json().catch(() => null);
+  if (!reply.ok || packet?.ok !== true) throw coded(packet?.error?.message || 'The wallet service refused this.', packet?.error?.code || 'FAILED');
+  return packet.result;
+}
+
 /** The erase of this profile, wired to the wallet service, Tor and this window's stored state. */
 function createEraser(desktopSession) {
   return new ProfileEraser({
@@ -631,6 +643,8 @@ else app.whenReady().then(async () => {
   installPermissions(desktopSession);
   installMenu();
   installLock();
+  if (!demo) installFullBackupIpc({ ipcMain, trusted: trustedSender, appLock, dialog, fs, call: managerCall,
+    window: () => window, documents: () => app.getPath('documents') });
   // With the lock on, no key is loaded and no wallet engine starts until it opens.
   const deferred = appLock.required();
   if (!deferred) await ensureManager();

@@ -26,7 +26,10 @@ const bitcoin = process.env.REGTEST_BITCOIN_CONTAINER ?? 'chicory-browser-regtes
 const electrum = { host: '127.0.0.1', port: Number(process.env.REGTEST_ELECTRUM_PORT ?? '62401'), tls: false };
 const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'offline', 'drain', 'recovery', 'transport'];
+// backup runs last: restoring a stale copy of the node may lead its peer to
+// close the channel, which no later stage could use.
+const ALL = ['preflight', 'payments', 'restart', 'crash', 'offline', 'drain', 'recovery', 'transport', 'backup'];
+const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
 for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
 const record = new Recorder();
@@ -121,6 +124,19 @@ class DesktopApp {
     }, { url: String(input), method: init.method || 'GET', headers: Object.fromEntries(new Headers(init.headers)), body: init.body ?? undefined });
     return new Response(reply.status === 204 ? null : reply.body, { status: reply.status, headers: reply.headers });
   };
+
+  /** A binary response, base64 in transit, since the page reads text otherwise. */
+  async bytes(input, body) {
+    const reply = await this.page.evaluate(async ({ url, body }) => {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let text = '';
+      for (let at = 0; at < bytes.length; at += 0x8000) text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+      return { status: response.status, base64: btoa(text) };
+    }, { url: String(input), body: JSON.stringify(body) });
+    if (reply.status !== 200) throw new Error(`HTTP ${reply.status}: ${Buffer.from(reply.base64, 'base64').toString('utf8').slice(0, 300)}`);
+    return Buffer.from(reply.base64, 'base64');
+  }
 
   async api(route, body, method = body === undefined ? 'GET' : 'POST') {
     const response = await this.fetch(`/api${route}`, { method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
@@ -260,7 +276,7 @@ function mempoolPayment(address, sats) {
 
 const onePer = (activity, key, value) => activity.filter(item => item[key] === value);
 
-let subject; let wallet; let state = {};
+let subject; let wallet; let state = {}; let original;
 try {
   await fs.mkdir(output, { recursive: true });
   record.pass('host and package identified', { host: hostEvidence(), versions: dependencyVersions(root), package: packageEvidence(executable) });
@@ -268,6 +284,7 @@ try {
   // Preflight: no wallet, address or block exists before every guard passes.
   assertLoopback(electrum.host, 'Electrum');
   subject = await new DesktopApp(await profile('subject')).open();
+  original = subject.profile;
   const config = await subject.api('/config');
   const subjectWallets = await subject.api('/wallets');
   assert.deepEqual(subjectWallets, [], 'A fresh profile starts with zero wallets');
@@ -481,6 +498,56 @@ try {
     const current = await subject.api('/config');
     if (!current.irohAvailable) record.unsupported('Iroh direct, relay and onion fallback', `Bundled engine ${current.engineVersion} does not advertise Iroh`);
     else record.skip('Iroh direct, relay and onion fallback', 'Transport evidence requires the engine to report its active path. See docs/desktop-qualification.md.');
+  }
+
+  if (stages.has('backup')) {
+    // A full backup taken while the channel is funded, made stale by a later
+    // payment, and restored into a fresh profile with its own keys while the
+    // original stays offline, as recovery on another computer would be.
+    const id = state.walletId;
+    // The recovery stage leaves a phrase-restored profile open; this needs the original.
+    if (subject.profile !== original) {
+      await subject.quit();
+      subject = await new DesktopApp(original).open();
+      await healthy(subject.api.bind(subject), id);
+    }
+    const exportedAt = await wallet().snapshot();
+    const archive = await subject.bytes('/api/backup/full/export', { passphrase: BACKUP_PASSPHRASE });
+    assert.equal(archive.subarray(0, 12).toString(), 'CHICORYFULL1', 'A full backup file');
+    const later = await payer.receive(await payer.quoteReceive({ amountSats: 1000, description: 'qualify after backup' }));
+    checkSent('payment after the backup', await wallet().send(await wallet().prepareSend({ request: later.bolt11 })));
+    await until('payment after the backup settled', () => payer.getReceiveStatus(later), status => status.phase === 'completed');
+    await subject.quit();
+    const restored = subject = await new DesktopApp(await profile('backup-restore')).open();
+    const attempt = async (passphrase, bytes) => {
+      try { return { result: await restored.api('/backup/full/restore', { passphrase, archive: bytes.toString('base64') }) }; }
+      catch (error) { return { refused: error.code }; }
+    };
+    assert.equal((await attempt('not the backup passphrase', archive)).refused, 'BAD_PASSPHRASE');
+    const tampered = Buffer.from(archive); tampered[tampered.length - 100] ^= 1;
+    assert.equal((await attempt(BACKUP_PASSPHRASE, tampered)).refused, 'BAD_ARCHIVE');
+    assert.deepEqual(await restored.api('/wallets'), [], 'Refused restores leave nothing');
+    const { result } = await attempt(BACKUP_PASSPHRASE, archive);
+    assert.deepEqual(result.restored.map(item => item.id), [id], 'The wallet comes back under its own identity');
+    await restored.api(`/wallets/${id}/start`, {});
+    await healthy(restored.api.bind(restored), id, false);
+    const listChannels = async () => (await (await restored.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;
+    const describe = list => list.map(channel => ({ state: channel.state, held: channel.restoreRecencyUnproven === true,
+      usable: channel.htlcUsable === true, localSats: channel.localBalanceSats, capacitySats: channel.capacitySats }));
+    const atBoot = describe(await until('restored channels loaded', listChannels, list => Array.isArray(list) && list.length > 0, 120000));
+    // Reconnecting lets each peer show which channels are current: those may
+    // resume, and the one the later payment moved on must not.
+    await wait(30000);
+    const afterReconnect = describe(await listChannels());
+    assert.ok(afterReconnect.some(channel => channel.held || /ERRORED|CLOS/.test(String(channel.state))),
+      `The channel the backup is behind on stays held or is closed by its peer: ${JSON.stringify({ atBoot, afterReconnect })}`);
+    assert.ok(afterReconnect.every(channel => !(channel.held && channel.usable)), `A held channel takes no new payments: ${JSON.stringify(afterReconnect)}`);
+    const history = (await restored.client(id).snapshot()).activity;
+    const kept = exportedAt.activity.filter(row => row.status === 'completed' && history.some(item => item.id === row.id)).length;
+    record.pass('full backup restored into a fresh profile; the stale channel stays held or is closed by its peer', {
+      archiveBytes: archive.length, restoredWallets: result.restored.length, channelsAtBoot: atBoot, channelsAfterReconnect: afterReconnect,
+      historyRowsKept: kept, staleBy: 'one payment after export' });
+    state.backup = { restoredInto: 'fresh profile', channels: afterReconnect.length };
   }
 } catch (error) {
   if (!error.done) {

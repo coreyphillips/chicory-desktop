@@ -128,6 +128,11 @@ import {
   supportedBiometry,
 } from '../services/lock';
 import type { BiometryKind } from '../services/lock';
+import {
+  FULL_BACKUP_MIN_PASSPHRASE,
+  exportFullBackup,
+  fullBackupAvailable,
+} from '../services/fullBackup';
 import { APP_VERSION } from '../version';
 import { space, type } from '../theme';
 import type { Unit } from '../theme';
@@ -870,6 +875,85 @@ function ErasePanel({
 }
 
 /**
+ * What Full backup to a file opens on desktop: the warning, landed on as it
+ * opens, a passphrase typed twice, and Save full backup behind the app lock
+ * when one is on, since the file holds every key. The main process asks where
+ * to save it and writes it; the page never holds the file. The passphrase is
+ * cleared once the backup is saved.
+ */
+function FullBackupPanel() {
+  const [passphrase, setPassphrase] = useState('');
+  const [repeat, setRepeat] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState('');
+  const b = words.fullBackup;
+  const short = [...passphrase.normalize('NFKC')].length < FULL_BACKUP_MIN_PASSPHRASE;
+  const mismatch = repeat.length > 0 && repeat !== passphrase;
+  return (
+    <>
+      <Note tone="warning" focus>
+        {b.warning}
+      </Note>
+      <Field
+        label={b.passphrase}
+        accessibilityHint={b.passphraseHint}
+        value={passphrase}
+        onChangeText={value => {
+          setPassphrase(value);
+          setSaved('');
+          setError('');
+        }}
+        secureTextEntry
+        autoCapitalize="none"
+        editable={!busy}
+      />
+      <Field
+        label={b.repeat}
+        value={repeat}
+        onChangeText={setRepeat}
+        secureTextEntry
+        autoCapitalize="none"
+        editable={!busy}
+      />
+      {passphrase && short ? <Note>{b.short}</Note> : null}
+      {mismatch ? <Note tone="error">{b.mismatch}</Note> : null}
+      {error ? <Note tone="error">{error}</Note> : null}
+      {saved ? <Note tone="success">{b.saved(saved)}</Note> : null}
+      <Action
+        label={b.save}
+        glyph="share"
+        busy={busy}
+        disabled={short || repeat !== passphrase}
+        onPress={async () => {
+          if (busy) return;
+          setBusy(true);
+          setError('');
+          setSaved('');
+          try {
+            const confirmed = await duringSystemPrompt(() =>
+              requireUnlock(b.prompt),
+            );
+            if (!confirmed) throw new Error(b.unconfirmed);
+            const result = await exportFullBackup(passphrase);
+            if (result) {
+              setSaved(result.file);
+              setPassphrase('');
+              setRepeat('');
+              haptics.success();
+            }
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : b.failed);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+    </>
+  );
+}
+
+/**
  * The recovery phrase, which is one item wherever it is drawn.
  *
  * While it is still to be saved it leads the page (`lead`): honey, open,
@@ -1253,9 +1337,10 @@ export function SettingsScreen({
 
   const lead = backupPending && !!onBackupSaved;
   const erasable = !!onErase;
+  const backupFile = fullBackupAvailable();
   const items = useMemo(
-    () => hubItems({ lead, drain: drainAvailable, erase: erasable }),
-    [lead, drainAvailable, erasable],
+    () => hubItems({ lead, drain: drainAvailable, erase: erasable, fullBackup: backupFile }),
+    [lead, drainAvailable, erasable, backupFile],
   );
   const live = answering({ snapshot, connecting, stale });
   const bloom = cardBloom({
@@ -1393,6 +1478,21 @@ export function SettingsScreen({
         );
       case 'leave':
         return <LockRow key="leave" {...at} onDisconnect={onDisconnect} />;
+      case 'fullBackup':
+        return (
+          <DisclosureRow
+            key="fullBackup"
+            id="fullBackup"
+            {...at}
+            glyph="shield"
+            label={words.fullBackup.link}
+            open={open === 'fullBackup'}
+            back={back === 'fullBackup'}
+            onToggle={toggle}
+          >
+            {open === 'fullBackup' ? <FullBackupPanel /> : null}
+          </DisclosureRow>
+        );
       case 'erase':
         return (
           <DisclosureRow
