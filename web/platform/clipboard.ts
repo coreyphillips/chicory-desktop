@@ -1,7 +1,13 @@
 async function getString(): Promise<string> {
   if (!navigator.clipboard?.readText)
     throw new Error('Clipboard access is unavailable. Paste into the request field instead.');
-  return navigator.clipboard.readText();
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    // A refused permission prompt, or a clipboard the system will not share.
+    // Typing or pasting into the field still works.
+    throw new Error('Chicory was not allowed to read the clipboard. Paste into the request field instead.');
+  }
 }
 function setString(value: string): void {
   if (navigator.clipboard?.writeText) {
