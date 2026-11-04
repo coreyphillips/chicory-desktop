@@ -14,13 +14,15 @@ const REVEAL_GRANT_MS = 60000;
 const PROMPT_SETTLE_MS = 600;
 
 const WALLET_ROUTE = /^\/(api|wallets)(\/|$)/;
-// Express routes match without regard to case, so these must too. The
-// daemon's mnemonic route is never used by the interface, which reads the
-// phrase through the manager, but it is reachable through the proxy.
-const SECRET_ROUTES = [/^\/api\/wallets\/[^/]+\/recovery-phrase\/?$/i, /^\/api\/backup(\/|$)/i,
-  /^\/wallets\/[^/]+\/api\/mnemonic\/?$/i];
+// Express routes match without regard to case, so these must too.
+const SECRET_ROUTES = [/^\/api\/wallets\/[^/]+\/recovery-phrase\/?$/i, /^\/api\/backup(\/|$)/i];
+// The daemon's own mnemonic route. The interface reads the phrase through the
+// manager and never needs it, so it is refused whatever the lock says. The
+// daemon strips a leading '/v1', so that spelling reaches it too.
+const DAEMON_MNEMONIC = /^\/wallets\/[^/]+\/api\/(?:v1\/)?mnemonic\/?$/i;
 // The proxy collapses repeated slashes, so '/api//mnemonic' still reaches the daemon route.
-const isSecret = pathname => SECRET_ROUTES.some(route => route.test(pathname.replace(/\/{2,}/g, '/')));
+const collapse = pathname => pathname.replace(/\/{2,}/g, '/');
+const isSecret = pathname => SECRET_ROUTES.some(route => route.test(collapse(pathname)));
 
 const MESSAGES = {
   cancelled: 'Authentication was cancelled. Chicory stays locked.',
@@ -175,12 +177,16 @@ class AppLock {
       this.availability = null;
       if (!(await this.kind())) return { ok: false, error: MESSAGES.enableUnavailable };
     }
+    const generation = this.generation;
     // Turning the lock off releases recovery phrases without a prompt, so it needs one too.
     const result = await this.authenticate(next ? 'enable' : 'disable');
     if (!result.ok) {
       return { ok: false, error: result.reason === 'cancelled' ? MESSAGES.enableCancelled
         : result.reason === 'unavailable' ? MESSAGES.enableUnavailable : result.error };
     }
+    // A screen lock or suspend while the prompt was open outranks its answer,
+    // as it does for unlock, so a pending change cannot reopen the gate.
+    if (generation !== this.generation) return { ok: false, error: MESSAGES.relocked };
     try { writeMetadata(this.profile, next); }
     catch { return { ok: false, error: MESSAGES.saveFailed }; }
     this.enabled = next;
@@ -251,6 +257,7 @@ class AppLock {
   /** Admits a renderer request for a wallet route, or refuses it while locked. */
   admit(pathname) {
     if (!WALLET_ROUTE.test(pathname)) return { ok: true, ticket: null };
+    if (DAEMON_MNEMONIC.test(collapse(pathname))) return { ok: false, status: 403 };
     this.expire();
     if (this.required()) return { ok: false };
     // Concealment drops a phrase in flight whether or not the lock is on.

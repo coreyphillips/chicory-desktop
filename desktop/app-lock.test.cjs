@@ -168,13 +168,23 @@ test('a recovery phrase needs fresh authentication for exactly one request', asy
   assert.deepEqual(auth.calls, ['unlock', 'reveal', 'reveal', 'reveal', 'reveal']);
 
   for (const other of ['/api/wallets/abc/RECOVERY-PHRASE', '/api/Wallets/abc/Recovery-Phrase/', '/api/BACKUP/export',
-    '/wallets/abc/api/mnemonic', '/wallets/abc/API/Mnemonic/', '/wallets/abc/api//mnemonic', '/api//backup/export']) {
+    '/api//backup/export']) {
     assert.equal(lock.admit(other).ok, false, `${other} needs a grant like the canonical route`);
     await lock.authorizeSecret();
     assert.equal(lock.admit(other).ok, true, other);
   }
 
   const off = harness();
+  // The daemon strips a leading '/v1', so every spelling of its mnemonic route
+  // is refused, with or without a grant and with the lock on or off.
+  const daemon = ['/wallets/abc/api/mnemonic', '/wallets/abc/API/Mnemonic/', '/wallets/abc/api//mnemonic',
+    '/wallets/abc/api/v1/mnemonic', '/wallets/abc/api//v1//mnemonic', '/wallets/abc/api/V1/MNEMONIC/'];
+  for (const other of daemon) {
+    await lock.authorizeSecret();
+    assert.deepEqual(lock.admit(other), { ok: false, status: 403 }, `${other} is refused even with a grant`);
+    assert.deepEqual(off.lock.admit(other), { ok: false, status: 403 }, `${other} is refused with the lock off`);
+  }
+  assert.equal(lock.admit('/wallets/abc/api/v1/info').ok, true, 'other daemon routes still pass');
   assert.equal(off.lock.admit(route).ok, true, 'with the lock off the phrase follows the existing local authorization');
   assert.deepEqual(await off.lock.authorizeSecret(), { ok: true });
   assert.deepEqual(off.auth.calls, []);
@@ -182,6 +192,24 @@ test('a recovery phrase needs fresh authentication for exactly one request', asy
   off.lock.background('blur');
   assert.equal(pending.signal.aborted, true, 'with the lock off a phrase in flight is still dropped on blur');
   assert.equal(off.lock.current(pending), false);
+});
+
+test('a screen lock or suspend during an enable or disable prompt outranks its answer', async () => {
+  let release;
+  const { lock, saved } = harness({ enabled: true, answers: [{ ok: true }, () => new Promise(resolve => { release = resolve; })] });
+  await lock.unlock();
+  const disabling = lock.setEnabled(false);
+  await new Promise(setImmediate);
+  lock.conceal('lock-screen');
+  lock.relock('lock-screen');
+  release({ ok: true });
+  const result = await disabling;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /locked again/);
+  assert.equal(lock.required(), true, 'the gate stays closed');
+  assert.equal(lock.enabled, true);
+  assert.deepEqual(saved(), { version: 1, enabled: true }, 'the setting is unchanged');
+  assert.equal(lock.admit('/wallets/abc/api/send').ok, false);
 });
 
 test('a screen lock or suspend during the unlock prompt outranks its answer', async () => {

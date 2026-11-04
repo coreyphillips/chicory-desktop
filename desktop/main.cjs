@@ -181,7 +181,7 @@ async function handleRequest(request) {
     catch { return response('Not found', 404); }
   }
   const admitted = appLock.admit(url.pathname);
-  if (!admitted.ok) return response('Chicory is locked.', 423);
+  if (!admitted.ok) return admitted.status === 403 ? response('Forbidden', 403) : response('Chicory is locked.', 423);
   if (!origin || stopping) return response('The local wallet is unavailable.', 503);
   try {
     const upstream = await fetch(`${origin}${url.pathname}${url.search}`, {
