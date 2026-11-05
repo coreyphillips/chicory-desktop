@@ -15,7 +15,6 @@ on:
       - 'scripts/desktop/prepare-tor.mjs'
       - 'scripts/qualification/floresta-preview*.mjs'
       - 'scripts/desktop/prepare-floresta.mjs'
-      - 'scripts/desktop/system-tar.mjs'
       - '.github/workflows/floresta.yml'
 permissions:
   contents: read
@@ -24,11 +23,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
+        include:
+          - { os: ubuntu-24.04, arch: x64 }
+          - { os: macos-15, arch: arm64 }
+          - { os: macos-15-intel, arch: x64 }
+          - { os: windows-2025, arch: x64 }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 50 || 40 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24.22.1
@@ -83,7 +88,6 @@ jobs:
       - name: Test native control, storage ownership and exit
         run: node --test desktop/floresta.test.cjs desktop/floresta-settings.test.cjs desktop/floresta-wallet-sync.test.cjs
       - name: Prepare wallet dependencies for the unpacked preview
-        if: runner.os != 'macOS'
         shell: bash
         run: |
           git config --global url."https://github.com/".insteadOf ssh://git@github.com/
@@ -94,9 +98,13 @@ jobs:
           npm run build
           node --test desktop/floresta-preview.test.cjs
       - name: Verify the host preview
-        if: runner.os != 'macOS'
         shell: pwsh
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
+          $arch = node -p process.arch
+          if ($LASTEXITCODE -ne 0 -or $arch -ne $env:EXPECTED_ARCH) { throw "Expected $env:EXPECTED_ARCH host; got $arch." }
           $sha = (Get-FileHash -LiteralPath $env:CHICORY_TEST_MANAGED_FLORESTA_BINARY).Hash.ToLowerInvariant()
           $dir = node scripts/desktop/package-floresta-preview.mjs --sha256 $sha | Tee-Object -Variable log | Select-Object -Last 1
           if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $dir -PathType Container)) { $log; throw 'Preview packaging failed.' }
@@ -116,6 +124,35 @@ jobs:
       - name: Start and stop the packaged Windows monitor
         if: runner.os == 'Windows'
         run: node scripts/qualification/floresta-preview-smoke.mjs "$env:PREVIEW_DIRECTORY/Chicory Floresta Preview.exe"
+      - name: Archive and smoke-test the ad hoc signed macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          PREVIEW_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          app_name='Chicory Floresta Preview.app'
+          test "$(basename "$PREVIEW_DIRECTORY")" = "$app_name"
+          archive="$RUNNER_TEMP/Chicory-Floresta-Preview-macOS-$PREVIEW_ARCH-adhoc.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$PREVIEW_DIRECTORY" "$archive"
+          extracted=$(mktemp -d "$RUNNER_TEMP/chicory-mac-smoke.XXXXXXXX")
+          /usr/bin/ditto -xk "$archive" "$extracted"
+          app="$extracted/$app_name"
+          main="$app/Contents/MacOS/Chicory Floresta Preview"
+          daemon="$app/Contents/Resources/runtime/floresta/florestad"
+          mach_arch="$PREVIEW_ARCH"
+          if [[ "$mach_arch" == x64 ]]; then mach_arch=x86_64; fi
+          /usr/bin/lipo "$main" -verify_arch "$mach_arch"
+          /usr/bin/lipo "$daemon" -verify_arch "$mach_arch"
+          test -L "$app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          /usr/bin/codesign --verify --deep --strict "$app"
+          /usr/bin/codesign --verify --strict "$daemon"
+          for signed in "$app" "$daemon"; do
+            signature=$(/usr/bin/codesign --display --verbose=2 "$signed" 2>&1)
+            grep -Fxq 'Signature=adhoc' <<< "$signature"
+          done
+          node scripts/qualification/floresta-preview-smoke.mjs "$main"
+          echo "PREVIEW_ARCHIVE=$archive" >> "$GITHUB_ENV"
       - name: Archive the verified unpacked directory
         if: runner.os != 'macOS'
         shell: pwsh
@@ -130,10 +167,9 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw 'Could not archive the preview.' }
           "PREVIEW_ARCHIVE=$archive" >> $env:GITHUB_ENV
-      - if: runner.os != 'macOS'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Floresta-preview-${{ runner.os }}-x64
+          name: Floresta-preview-${{ runner.os }}-${{ matrix.arch }}
           path: ${{ env.PREVIEW_ARCHIVE }}
           if-no-files-found: error
           compression-level: 0

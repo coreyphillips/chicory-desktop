@@ -86,13 +86,20 @@ The `Regtest qualification` workflow runs `preflight,payments,restart,crash`
 against the Linux x64 package on manual dispatch and uploads the report.
 
 The Floresta developer preview includes the daemon. In the PR's **Floresta
-candidate** workflow, download the artifact for Linux x64 or Windows x64 from
-a successful run. Extract the inner `.tar.gz` or `.zip` and keep its whole
-directory together. Launch `chicory-floresta-preview` on Linux or
-`Chicory Floresta Preview.exe` on Windows. The unsigned previews have their
-own app identity and profile and start with manual wallet setup. After opening
-a disposable wallet, use **Settings > Network & servers > Experimental
-Floresta node** to start the monitor. Workflow artifacts expire after three days.
+candidate** workflow, download the artifact for your computer from a successful
+run. The four artifacts are `Floresta-preview-macOS-arm64` for Apple silicon,
+`Floresta-preview-macOS-x64` for Intel Macs, `Floresta-preview-Linux-x64` and
+`Floresta-preview-Windows-x64`. Workflow artifacts expire after three days.
+
+On macOS, open the GitHub artifact ZIP and extract the inner
+`Chicory-Floresta-Preview-macOS-<arch>-adhoc.zip` with Archive Utility.
+Keep the resulting `Chicory Floresta Preview.app` intact. It is ad hoc signed
+for review. On Linux or Windows, extract the inner `.tar.gz` or `.zip` and
+keep the entire directory together. Launch `chicory-floresta-preview` on Linux
+or `Chicory Floresta Preview.exe` on Windows. Each preview has its own app
+identity and profile and starts with manual wallet setup. After opening a
+disposable wallet, use **Settings > Network & servers > Experimental Floresta
+node** to start the monitor.
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
 can grant the extracted executable the `userns` permission with a path-specific
 AppArmor profile. [Ubuntu's desktop sandbox guidance](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
@@ -101,9 +108,11 @@ To build on the target host, prepare the [wallet runtime and Floresta candidate]
 and run `npm run package:floresta-preview -- --sha256 <prepared-binary-sha256>`.
 The command prints the unpacked application path under `release/floresta-preview`.
 On macOS it produces an ad hoc signed app. Each package embeds its source
-and daemon hashes in `app.asar`. The Linux and Windows workflow checks launch
+and daemon hashes in `app.asar`. All four workflow jobs launch
 the packaged application with an empty profile, start the bundled daemon at
 regtest genesis through Settings IPC, stop it, and check the app exits cleanly.
+The Mac jobs run this check on a fresh extraction of the archive after verifying
+the bundle symlink, both ad hoc signatures and the packaged architecture.
 
 To exercise the packaged monitor during payments, point
 `CHICORY_ELECTRON_EXECUTABLE` at that application executable and select
@@ -170,8 +179,9 @@ passed:
 - A crash at a chosen point inside one encrypted write. The persistence stage
   kills the app while payments are being written, which is not the same as
   stopping it between two specific writes.
-- Windows, Linux and Intel macOS native runs. The harness's process handling
-  supports each, but only the Linux workflow exists, and the crash stage is
-  skipped on Windows. Record each manual run's report with its package digests.
+- Funded Windows, Linux and Intel macOS package runs. The manual
+  `Regtest qualification` workflow exercises the Linux package. The crash
+  stage requires a POSIX host. Record manual funded reports alongside the
+  tested package digests.
 - Restore across OS accounts. A fresh profile under the same account uses the
   same OS key store, so it does not prove a different account can restore.
