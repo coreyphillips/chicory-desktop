@@ -1,0 +1,67 @@
+name: Floresta candidate
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'build/floresta/**'
+      - 'desktop/floresta*.cjs'
+      - 'scripts/desktop/prepare-floresta.mjs'
+      - '.github/workflows/floresta.yml'
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - name: Prepare the Rust compiler
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install Boost and Clang on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev libclang-dev
+      - name: Install Boost on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install boost@1.85
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost@1.85)" >> "$GITHUB_ENV"
+          echo "Boost_DIR=$(brew --prefix boost@1.85)/lib/cmake/Boost-1.85.0" >> "$GITHUB_ENV"
+      - name: Install verified Boost headers on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'boost.tar.bz2'
+          curl.exe --fail --location --retry 3 --output $archive https://archives.boost.io/release/1.85.0/source/boost_1_85_0.tar.bz2
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash $archive).Hash -ne '7009fe1faa1697476bdc7027703a2badb84e849b7b0baad5086b087b971f8617') { throw 'Boost source verification failed.' }
+          tar.exe -xf $archive -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw 'Boost extraction failed.' }
+          Push-Location "$env:RUNNER_TEMP/boost_1_85_0"
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
+          $prefix = Join-Path $env:RUNNER_TEMP 'boost-install'
+          cmd.exe /d /c "`"`"$devcmd`" -arch=x64 && bootstrap.bat && b2.exe --with-system --prefix=`"$prefix`" install`""
+          if ($LASTEXITCODE -ne 0) { throw 'Boost installation failed.' }
+          Pop-Location
+          "CMAKE_PREFIX_PATH=$prefix" >> $env:GITHUB_ENV
+          "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
+      - name: Compile the pinned candidate
+        id: build
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: 1.99.1
+        run: |
+          $binary = node scripts/desktop/prepare-floresta.mjs --debug | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Candidate build failed.' }
+          "CHICORY_TEST_MANAGED_FLORESTA_BINARY=$binary" >> $env:GITHUB_ENV
+      - name: Test native control, storage ownership and exit
+        run: node --test desktop/floresta.test.cjs desktop/floresta-settings.test.cjs desktop/floresta-wallet-sync.test.cjs
