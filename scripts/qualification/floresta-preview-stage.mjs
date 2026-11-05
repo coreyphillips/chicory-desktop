@@ -21,10 +21,9 @@ async function openPanel(subject) {
   return button;
 }
 
-// The native consent prompt is answered only for this disposable regtest.
-// The screen, IPC, signed child, storage, and wallet engine are real.
-export async function startPreviewMonitor(subject) {
-  const build = await subject.electron.evaluate(({ app, dialog }) => {
+// Answer only the exact regtest prompt in the disposable packaged app.
+export function acceptRegtestStart(electron) {
+  return electron.evaluate(({ app, dialog }) => {
     if (!app.isPackaged || app.getName() !== 'Chicory Floresta Preview') throw new Error('Select the packaged Floresta preview.');
     const show = dialog.showMessageBox.bind(dialog);
     dialog.showMessageBox = (...args) => {
@@ -38,6 +37,10 @@ export async function startPreviewMonitor(subject) {
     };
     return app.getVersion();
   });
+}
+
+export async function startPreviewMonitor(subject) {
+  const build = await acceptRegtestStart(subject.electron);
   const status = () => subject.page.evaluate(() => window.chicoryDesktop.floresta.status('regtest'));
   assert.equal((await status()).requested, false, 'The fresh preview must start with the monitor disabled');
   const button = await openPanel(subject);

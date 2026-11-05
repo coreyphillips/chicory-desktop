@@ -33,6 +33,7 @@ const metadata = app.isPackaged ? require('../package.json') : {};
 const preview = metadata.chicoryChannel === 'floresta-preview';
 const manualSetup = preview || process.env.CHICORY_MANUAL_SETUP === '1';
 app.setName(preview ? 'Chicory Floresta Preview' : 'Chicory');
+if (preview && process.platform === 'win32') app.setAppUserModelId('com.chicory.desktop.floresta-preview');
 const profileName = (preview ? 'Chicory Floresta Preview' : 'Chicory Desktop') + (demo ? ' Demo' : '');
 const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), profileName);
 app.setPath('userData', profile);

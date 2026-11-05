@@ -32,3 +32,18 @@ test('package verification refuses a monitor in the normal release resources', a
   await asar.createPackage(source, path.join(resources, 'app.asar'));
   await assert.rejects(verifyPackage({ appOutDir: directory, electronPlatformName: 'linux' }), /dedicated development package/);
 });
+
+test('Linux and Windows x64 previews resolve only their unmodified host executable', () => {
+  for (const [platform, filename] of [['linux', 'florestad'], ['win32', 'florestad.exe']]) {
+    const sha256 = '1'.repeat(64);
+    const pin = { version: 1, platform, arch: 'x64', sha256, sourceBinarySha256: sha256 };
+    const metadata = { chicoryChannel: 'floresta-preview', chicoryFlorestaPreview: pin };
+    assert.deepEqual(previewCandidate(metadata, '/resources', platform, 'x64'),
+      { binary: path.join('/resources', 'runtime', 'floresta', filename), sha256 });
+    for (const [host, arch] of [[platform, 'arm64'], ['darwin', 'x64'], ['freebsd', 'x64']]) {
+      assert.equal(previewCandidate(metadata, '/resources', host, arch), null);
+      if (host !== 'darwin') assert.equal(previewCandidate({ ...metadata, chicoryFlorestaPreview: { ...pin, platform: host, arch } }, '/resources', host, arch), null);
+    }
+    assert.equal(previewCandidate({ ...metadata, chicoryFlorestaPreview: { ...pin, sha256: '2'.repeat(64) } }, '/resources', platform, 'x64'), null);
+  }
+});

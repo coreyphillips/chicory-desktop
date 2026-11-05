@@ -30,8 +30,8 @@ Its comparison branch points at the pinned v0.9.1 release.
    Experimental Floresta node**. Select the network and storage folder, check its available disk space
    and confirm the start. Use a disposable regtest profile for qualification.
    The source build rechecks the candidate against that digest before spawning
-   it. The ordinary release omits this control and executable. For the separate macOS
-   development preview, see the package and payment checks in the [desktop
+   it. The ordinary release omits this control and executable. For separate macOS,
+   Linux x64 and Windows x64 developer previews, see the package and payment checks in the [desktop
    qualification guide](desktop-qualification.md).
 4. Use **Stop** to stop syncing and preserve the local data. Opting in authorizes
    direct Bitcoin P2P connections and storage of public wallet and channel
@@ -267,6 +267,8 @@ A wallet-free macOS arm64 run on November 5, 2026 used an Apple M5 Pro with 64 G
 A separate cold startup used advertised peer services from Bitcoin handshakes and the public proof seed in newer Floresta. From launch it reported status in 0.34 seconds, connected to its first peer in 10.39 seconds and reported its first headers in 36.34 seconds. At 4 minutes 36 seconds it had installed the pinned checkpoint at 939,969. By the next sample its headers reached 974,692. The foreground validation index stayed at the checkpoint until shutdown after 14 minutes 22 seconds. The relay received 157,643,652 bytes and sent 535,838 bytes. The stopped node occupied 192,798,720 allocated bytes. The wallet was never opened. This run establishes a time to the checkpoint under those peer conditions. A time to the validated tip or a wallet handoff is still outstanding.
 
 The same network trial sent a confirmed-block proof request for height 939,970 to the five endpoints returned by the newer upstream proof seed. Two peers completed a Bitcoin v2 handshake and advertised the Utreexo proof service. Both delivered a 2,384,708-byte proof payload naming a recent block at height 974,692. Neither delivered any proof for 939,970 on a separate 40-second request. The comparison identifies an availability limit for the sampled peers and heights. It does not establish network-wide archival coverage or prove why either peer withheld its response. The control matched the requested block hashes. It did not independently validate the recent accumulator.
+
+The public trials used fresh data. The 18-patch preview inherits a v0.9.1 shutdown bug that can save an empty list of recently connected proof peers in `anchors.json`. The independent `peers.json` address book and fresh discovery can still supply candidates at restart. Warm mainnet recovery and the availability of a proof provider for the checkpoint gap remain unmeasured. [Anchor persistence and its upstream fix](floresta-upstream-bugs.md#connected-proof-peer-anchors-can-be-lost-at-shutdown)
 
 ## Before a wallet can switch
 

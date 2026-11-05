@@ -77,15 +77,43 @@ stops with `PORT_IN_USE`, but a headless peer keeps the run to one app window.
 The `Regtest qualification` workflow runs `preflight,payments,restart,crash`
 against the Linux x64 package on manual dispatch and uploads the report.
 
-On macOS, `npm run package:floresta-preview -- --sha256 <prepared-binary-sha256>`
-produces a separate ad hoc signed application under `release/floresta-preview`.
-It uses its own profile, starts with manual wallet setup, and serves as a local
-developer build. To exercise the packaged monitor during payments, point
+The Floresta developer preview includes the daemon. In the PR's **Floresta
+candidate** workflow, download the artifact for Linux x64 or Windows x64 from
+a successful run. Extract the inner `.tar.gz` or `.zip` and keep its whole
+directory together. Launch `chicory-floresta-preview` on Linux or
+`Chicory Floresta Preview.exe` on Windows. The unsigned previews have their
+own app identity and profile and start with manual wallet setup. After opening
+a disposable wallet, use **Settings > Network & servers > Experimental
+Floresta node** to start the monitor. Workflow artifacts expire after three days.
+On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
+can grant the extracted executable the `userns` permission with a path-specific
+AppArmor profile. [Ubuntu's desktop sandbox guidance](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
+
+To build on the target host, prepare the [wallet runtime and Floresta candidate](floresta-qualification.md#run-the-candidate-from-settings)
+and run `npm run package:floresta-preview -- --sha256 <prepared-binary-sha256>`.
+The command prints the unpacked application path under `release/floresta-preview`.
+On macOS it produces an ad hoc signed app. Each package embeds its source
+and daemon hashes in `app.asar`. The Linux and Windows workflow checks launch
+the packaged application with an empty profile, start the bundled daemon at
+regtest genesis through Settings IPC, stop it, and check the app exits cleanly.
+
+To exercise the packaged monitor during payments, point
 `CHICORY_ELECTRON_EXECUTABLE` at that application executable and select
 `CHICORY_QUALIFY_STAGES=floresta-preview,payments`. The optional stage clicks
 Start in Settings and accepts the regtest confirmation, keeps the monitor
 running through the selected payments, then stops it and checks that the
 generated data stays available.
+
+On November 5, 2026, the macOS arm64 preview passed all nine checks in
+`floresta-preview,payments,direct-funding,restart` with a fresh regtest and
+disposable profiles. The external wallet sent and received Lightning payments
+while the monitor ran. Its signed 20,000 sat direct funding payment spent the
+confirmed 22,000 sat coin and reached four confirmations. A complete app
+restart recovered six history entries. The tested app contained the 18-patch
+Floresta binary with build SHA-256
+`f12d69abf4eea959ee1f7e5204f9b5f84b4d69f6e7f8c8e9eaf366fd07918dc6`
+and nested signed SHA-256
+`25553c0365555005417d4e4229b98e9882e1ebe8c20823110a7bf20724e72785`.
 
 ## Stages
 

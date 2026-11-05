@@ -5,6 +5,9 @@ on:
     paths:
       - 'build/floresta/**'
       - 'desktop/floresta*.cjs'
+      - 'build/verify-package.cjs'
+      - 'scripts/desktop/package-floresta-preview.mjs'
+      - 'scripts/qualification/floresta-preview*.mjs'
       - 'scripts/desktop/prepare-floresta.mjs'
       - '.github/workflows/floresta.yml'
 permissions:
@@ -72,3 +75,59 @@ jobs:
           "CHICORY_TEST_MANAGED_FLORESTA_BINARY=$binary" >> $env:GITHUB_ENV
       - name: Test native control, storage ownership and exit
         run: node --test desktop/floresta.test.cjs desktop/floresta-settings.test.cjs desktop/floresta-wallet-sync.test.cjs
+      - name: Prepare wallet dependencies for the unpacked preview
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+          npm ci
+          npm --prefix server ci --omit=dev
+          npm run runtime:prepare
+          npm run build
+          node --test desktop/floresta-preview.test.cjs
+      - name: Verify the host preview
+        if: runner.os != 'macOS'
+        shell: pwsh
+        run: |
+          $sha = (Get-FileHash -LiteralPath $env:CHICORY_TEST_MANAGED_FLORESTA_BINARY).Hash.ToLowerInvariant()
+          $dir = node scripts/desktop/package-floresta-preview.mjs --sha256 $sha | Tee-Object -Variable log | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $dir -PathType Container)) { $log; throw 'Preview packaging failed.' }
+          "PREVIEW_DIRECTORY=$dir" >> $env:GITHUB_ENV
+      - name: Start and stop the packaged Linux monitor
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y gnome-keyring dbus-x11
+          # Permit Chromium's sandbox only for the verified executable in this job.
+          executable=$(realpath "$PREVIEW_DIRECTORY/chicory-floresta-preview")
+          [[ "$executable" =~ ^/[a-zA-Z0-9/._-]+$ ]]
+          profile=$(mktemp)
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\n"%s" flags=(unconfined) {\n  userns,\n}\n' "$executable" > "$profile"
+          sudo apparmor_parser -a "$profile"
+          trap 'sudo apparmor_parser -R "$profile"; rm -f "$profile"' EXIT
+          dbus-run-session -- sh -ec 'printf qualify | gnome-keyring-daemon --unlock --components=secrets > /dev/null; xvfb-run -a node scripts/qualification/floresta-preview-smoke.mjs "$PREVIEW_DIRECTORY/chicory-floresta-preview"'
+      - name: Start and stop the packaged Windows monitor
+        if: runner.os == 'Windows'
+        run: node scripts/qualification/floresta-preview-smoke.mjs "$env:PREVIEW_DIRECTORY/Chicory Floresta Preview.exe"
+      - name: Archive the verified unpacked directory
+        if: runner.os != 'macOS'
+        shell: pwsh
+        run: |
+          $dir = Get-Item -LiteralPath $env:PREVIEW_DIRECTORY
+          if ($env:RUNNER_OS -eq 'Linux') {
+            $archive = Join-Path $env:RUNNER_TEMP 'Chicory-Floresta-Preview-linux-x64.tar.gz'
+            tar -czf $archive -C $dir.Parent.FullName $dir.Name
+          } else {
+            $archive = Join-Path $env:RUNNER_TEMP 'Chicory-Floresta-Preview-windows-x64.zip'
+            tar -acf $archive -C $dir.Parent.FullName $dir.Name
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not archive the preview.' }
+          "PREVIEW_ARCHIVE=$archive" >> $env:GITHUB_ENV
+      - if: runner.os != 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Floresta-preview-${{ runner.os }}-x64
+          path: ${{ env.PREVIEW_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3

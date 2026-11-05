@@ -156,7 +156,7 @@ performed and remaining platform qualification. The inherited
 [regtest report](docs/regtest.md) documents the upstream browser and manager
 baseline, not new funded testing of this desktop package.
 
-A source build and a separate macOS developer preview can run Floresta and
+A source build and separate macOS, Linux x64 and Windows x64 developer previews can run Floresta and
 scan public wallet and channel history. Payments in both use the selected
 Electrum server. The funded regtest covers replacement notifications, reorgs
 and cold recovery of a spliced channel. See the [setup and qualification

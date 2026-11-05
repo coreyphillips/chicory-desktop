@@ -46,7 +46,8 @@ function candidate(root, digest) {
       !pin.patches.every(file => manifest.patches?.[file] === sha256(fs.readFileSync(path.join(recipe, file))))) {
     throw new Error('Rebuild the Floresta candidate from this source checkout.');
   }
-  return { binary: path.join(directory, executable), sha256: digest };
+  const { release, commit, archiveSha256, patches } = manifest;
+  return { binary: path.join(directory, executable), sha256: digest, receipt: { release, commit, archiveSha256, patches } };
 }
 
 class FlorestaSettings {

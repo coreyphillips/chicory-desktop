@@ -6,6 +6,7 @@ const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { extractFile } = require('@electron/asar');
 const { verifyTor } = require('./verify-runtime.cjs');
+const { previewCandidate } = require('../desktop/floresta-preview.cjs');
 
 module.exports = async function verifyPackage(context) {
   const resources = context.electronPlatformName === 'darwin'
@@ -16,7 +17,8 @@ module.exports = async function verifyPackage(context) {
   const preview = metadata.chicoryChannel === 'floresta-preview';
   const hasNode = fs.existsSync(path.join(resources, 'runtime', 'floresta'));
   if (preview !== hasNode || preview !== Object.hasOwn(metadata, 'chicoryFlorestaPreview') ||
-      preview && (context.packager.appInfo.id !== 'com.chicory.desktop.floresta-preview' || context.electronPlatformName !== 'darwin')) {
+      preview && (context.packager.appInfo.id !== 'com.chicory.desktop.floresta-preview' ||
+        !previewCandidate(metadata, resources, context.electronPlatformName, process.arch))) {
     throw new Error('The local node preview can only be included in its dedicated development package.');
   }
   for (const relative of ['dist/index.html', 'server/index.js', 'server/engine-bootstrap.js', 'server/engine-storage.cjs',
