@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { focusBrowserNode, setBrowserInert } from './browserFocus.ts';
+import { focusBrowserNode, setBrowserInert, watchInputModality } from './browserFocus.ts';
 
 function node(tagName = 'DIV') {
   const attributes = new Map<string, string>();
   const result = {
     tagName, attributes, isConnected: true, inert: false, focused: 0, blurred: 0,
-    options: undefined as FocusOptions | undefined,
+    options: undefined as (FocusOptions & { focusVisible?: boolean }) | undefined,
     hidden: false,
     child: null as unknown,
     contains: (value: unknown) => value !== null && value === result.child,
@@ -14,7 +14,7 @@ function node(tagName = 'DIV') {
     hasAttribute: (name: string) => attributes.has(name),
     setAttribute: (name: string, value: string) => { attributes.set(name, value); },
     removeAttribute: (name: string) => { attributes.delete(name); },
-    focus: (options?: FocusOptions) => { result.focused++; result.options = options; },
+    focus: (options?: FocusOptions & { focusVisible?: boolean }) => { result.focused++; result.options = options; },
     blur: () => { result.blurred++; },
   };
   return result;
@@ -24,8 +24,25 @@ test('a browser heading becomes programmatically focusable without adding a tab 
   const target = node();
   assert.equal(focusBrowserNode(target, { activeElement: null }), true);
   assert.equal(target.attributes.get('tabindex'), '-1');
-  assert.deepEqual(target.options, { preventScroll: true });
+  assert.deepEqual(target.options, { preventScroll: true, focusVisible: false });
   assert.equal(target.focused, 1);
+});
+
+test('a landing draws a focus ring only while the person is on the keyboard', () => {
+  const window = new EventTarget();
+  watchInputModality(window);
+  const target = node('BUTTON');
+  // As the app opens nothing has been pressed, so the balance takes focus without a ring.
+  focusBrowserNode(target, { activeElement: null });
+  assert.deepEqual(target.options, { preventScroll: true, focusVisible: false });
+  window.dispatchEvent(new Event('keydown'));
+  const keyed = node('BUTTON');
+  focusBrowserNode(keyed, { activeElement: null });
+  assert.deepEqual(keyed.options, { preventScroll: true });
+  window.dispatchEvent(new Event('pointerdown'));
+  const clicked = node('BUTTON');
+  focusBrowserNode(clicked, { activeElement: null });
+  assert.deepEqual(clicked.options, { preventScroll: true, focusVisible: false });
 });
 
 test('buttons, amount fields and existing tab order keep their focus semantics', () => {
