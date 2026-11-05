@@ -77,7 +77,11 @@ test('does not send a fixture to an endpoint serving a different genesis', async
 
 test('requires funded values and reports unsupported behavior even on a responsive endpoint', async t => {
   const { fixture, parent, funding, pending, header } = transactions();
-  const f = readFixture(fixture);
+  const orphan = { txid: 'bb'.repeat(32), height: 1, blockHash: 'cc'.repeat(32) };
+  const f = readFixture({ ...fixture, disconnected: orphan });
+  assert.throws(() => readFixture({ ...fixture, disconnected: { ...orphan, txid: funding.getId() } }), /distinct detached/);
+  assert.throws(() => readFixture({ ...fixture, disconnected: { ...orphan, blockHash: headerHash(header) } }), /replacement block/);
+  let orphanProof = true;
   const wire = new Map([parent, funding, pending].map(tx => [tx.getId(), tx]));
   let verbose = false;
   let badConfirmations = false;
@@ -109,6 +113,7 @@ test('requires funded values and reports unsupported behavior even on a responsi
         } };
       }
       case 'blockchain.transaction.get_merkle':
+        if (params[0] === orphan.txid && !orphanProof) return { error: { code: -32004 } };
         return { result: { block_height: 1, pos: 1, merkle: [parent.getId()] } };
       default: return { error: { code: -32602, message: 'Invalid params' } };
     }
@@ -127,6 +132,8 @@ test('requires funded values and reports unsupported behavior even on a responsi
     assert.equal(rows[name], 'failed', name);
   }
   assert.equal(rows['Dynamic fee estimates'], 'blocked');
+  assert.equal(rows['Detached funding proof withdrawn'], 'failed');
+  orphanProof = false;
   assert.equal(rows['Fee responses for Beignet targets'], 'observed');
   const utxoError = report.rows.find(r => r.check === 'Watched UTXOs').detail;
   assert.match(utxoError, /vout 2 with 2500 sats at height 1\. Received vouts \[1\]/);
@@ -135,6 +142,7 @@ test('requires funded values and reports unsupported behavior even on a responsi
   const valid = await probe(port, f);
   const verboseStatus = r => r.rows.find(row => row.check === 'Verbose watched transaction batch').status;
   assert.equal(verboseStatus(valid), 'passed');
+  assert.equal(valid.rows.find(r => r.check === 'Detached funding proof withdrawn').status, 'passed');
   badConfirmations = true;
   assert.equal(verboseStatus(await probe(port, f)), 'failed');
 

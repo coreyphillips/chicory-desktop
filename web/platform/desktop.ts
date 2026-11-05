@@ -1,4 +1,19 @@
 import type { BrowserKey } from './keyboard';
+import type { Network } from '@beignet/wallet-core';
+
+export interface FlorestaState {
+  requested: boolean;
+  storage: string;
+  customStorage: boolean;
+  phase: 'stopped' | 'starting' | 'running' | 'restarting' | 'failed';
+  height: number | null;
+  validatedHeight: number | null;
+  tipSynced: boolean | null;
+  watches: { observedWallets: number; confirmedScansCaughtUp: number } | { unavailable: true } | null;
+  error: string | null;
+}
+
+export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder', (network: Network) => Promise<FlorestaState>>;
 
 export type DesktopScene = 'home' | 'send' | 'receive' | 'activity' | 'settings';
 export type DesktopCommand = DesktopScene | 'payment-link';
@@ -16,6 +31,7 @@ export interface DesktopBridge {
   close(): void;
   /** The host's redacted support report, with the given wallet figures redacted into it. */
   diagnostics?(input: HostReportInput): Promise<string>;
+  floresta?: FlorestaSettingsBridge;
   /** The portable full backup, by passphrase only. */
   fullBackup?: import('./fullBackup').DesktopFullBackup;
   /** Erases every wallet in this profile. On success the host reloads into first-run setup. */

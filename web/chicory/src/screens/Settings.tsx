@@ -38,6 +38,7 @@ import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { unlockGlyph } from '../scenes/phases/visual';
 import { EmptyWallet } from '../scenes/settings/EmptyWallet';
 import { DiagnosticsPanel } from '../scenes/settings/Diagnostics';
+import { FlorestaQualification } from '../scenes/settings/FlorestaQualification';
 import { useFieldScan } from '../scenes/settings/fieldScan';
 import { AutoPayGlyph, HapticsGlyph } from '../scenes/settings/glyphMotion';
 import { ShareSlider } from '../scenes/settings/ShareSlider';
@@ -274,6 +275,9 @@ function NetworkPanel({
         </Reanimated.View>
       ) : null}
       {switchError ? <Note tone="error">{switchError}</Note> : null}
+      {!editing && target === current && typeof window !== 'undefined' && window.chicoryDesktop?.floresta ? (
+        <FlorestaQualification key={current} network={current} bridge={window.chicoryDesktop.floresta} />
+      ) : null}
       <Row
         glyph="cog"
         label={words.wallet.editServers}

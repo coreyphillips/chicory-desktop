@@ -89,7 +89,16 @@ export function readFixture(input) {
   const prevTxids = new Set(records.filter(r => !r.tx.isCoinbase()).flatMap(r => r.tx.ins.map(prev => reverseHex(prev.hash))));
   expect(parents.every(p => prevTxids.has(p.txid)), 'Expected a parent of a history transaction');
   for (const r of [...records, ...parents]) prevTxids.delete(r.txid);
-  return { scriptHash, history, unspent, balance, records, parents, missingParents: prevTxids.size };
+  const disconnected = input.disconnected;
+  if (disconnected !== undefined) {
+    expect(isDeepStrictEqual(Object.keys(disconnected || {}).sort(), ['blockHash', 'height', 'txid']) &&
+      [disconnected.txid, disconnected.blockHash].every(h => typeof h === 'string' && hashPattern.test(h)) &&
+      Number.isSafeInteger(disconnected.height) && disconnected.height > 0 &&
+      !records.some(r => r.txid === disconnected.txid) &&
+      records.some(r => r.height === disconnected.height && r.blockHash !== disconnected.blockHash),
+    'Expected a distinct detached transaction and a replacement block at the same height');
+  }
+  return { scriptHash, history, unspent, balance, records, parents, missingParents: prevTxids.size, disconnected };
 }
 
 // One connection for the entire run. Use actual JSON arrays for methods Beignet batches.
@@ -227,7 +236,7 @@ export async function probe(port, fixture) {
         }
         return { targets, btcPerKvB: values };
       }, 'observed');
-      if (fixture) await probeFixture(fixture, tipHeight, call, batch, check, blocked);
+      if (fixture) await probeFixture(fixture, tipHeight, call, batch, check, blocked, rpc.request);
       else blocked('Funded history, UTXOs, transactions, subscriptions and proofs', 'Supply an independently captured public regtest fixture');
     }
     blocked('Dynamic fee estimates', 'Requires independent estimates under controlled changes in fee pressure');
@@ -239,7 +248,17 @@ export async function probe(port, fixture) {
   }
 }
 
-async function probeFixture(f, tipHeight, call, batch, check, blocked) {
+async function probeFixture(f, tipHeight, call, batch, check, blocked, request) {
+  if (f.disconnected) {
+    await check('Detached funding proof withdrawn', async () => {
+      const { txid, height, blockHash } = f.disconnected;
+      const active = f.records.find(r => r.height === height);
+      const current = headerHash(await call('blockchain.block.header', [height]));
+      expect(current === active.blockHash && current !== blockHash, 'Electrum still follows the detached block');
+      const reply = await request('blockchain.transaction.get_merkle', [txid, height]);
+      expect(reply.error && !Object.hasOwn(reply, 'result'), 'Returned a proof for funding replaced on the active branch');
+    });
+  }
   const params = [[f.scriptHash]];
   let expectedStatus;
   const pending = f.history.filter(h => h.height <= 0).sort(byTxid);

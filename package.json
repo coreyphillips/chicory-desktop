@@ -26,6 +26,7 @@
     "test:gallery": "npm run gallery:build && node scripts/desktop/gallery.mjs",
     "test:gallery:full": "npm run gallery:build && node scripts/desktop/gallery.mjs --full",
     "runtime:prepare": "node scripts/desktop/prepare-runtime.mjs",
+    "runtime:prepare:floresta": "node scripts/desktop/prepare-floresta.mjs",
     "package": "npm run build && electron-builder --config build/electron-builder.yml --dir",
     "dist": "npm run build && electron-builder --config build/electron-builder.yml --publish never",
     "postinstall": "node node_modules/electron/install.js"

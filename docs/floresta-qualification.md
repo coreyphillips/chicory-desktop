@@ -1,11 +1,45 @@
 # Floresta compatibility lab
 
-Chicory is evaluating Floresta as an optional local Bitcoin backend. The first
-funded regtest run found that Floresta v0.9.1 could validate a block and prove a
-transaction's inclusion while reporting the wrong output for the wallet to
-spend. This blocks enabling it in Settings. Beignet continues to handle wallet
-keys, Lightning channels, signing, payments and recovery through the existing
-Electrum configuration. [Issue 33](https://github.com/coreyphillips/chicory-desktop/issues/33)
+The source checkout can run a verified Floresta candidate from Settings, register
+public Beignet wallet and channel watches, and scan confirmed history. The
+candidate is a separate process with a private data directory. The selected
+Electrum server still serves the wallet and Lightning. Stock v0.9.1 misses
+peer-originated unconfirmed activity and can retain history after a reorg.
+[Issue 33](https://github.com/coreyphillips/chicory-desktop/issues/33) ·
+[Floresta bug report for review](floresta-upstream-bugs.md)
+
+## Run the candidate from Settings
+
+1. Prepare the regular desktop runtime with `npm run runtime:prepare`.
+2. Build the pinned Floresta archive with the reviewed patches. Install Cargo,
+   CMake, a C++ compiler, libclang and Boost headers with CMake package metadata.
+   The macOS arm64 test used Rust 1.99.1, CMake 4.2.3 and Boost 1.85.
+   Run `npm run runtime:prepare:floresta -- --debug`. To reuse an existing
+   archive, pass `--archive /absolute/path/to/floresta-source.tgz`.
+   The recipe verifies the archive and pristine Cargo lock, applies the listed
+   patches and records their hashes alongside the digest of the built binary.
+3. Set `CHICORY_FLORESTA_CANDIDATE_SHA256` to the digest in the output
+   directory name, then run `npm run dev`. Open **Settings > Network & servers >
+   Experimental Floresta node**. Select the network and storage folder and
+   confirm the start. Use a disposable regtest profile for qualification.
+   The source build rechecks the candidate against that digest before spawning
+   it. Packaged releases omit this control and executable.
+4. Use **Stop** to stop syncing and preserve the local data. Opting in authorizes
+   direct Bitcoin P2P connections and storage of public wallet and channel
+   history. The current external Electrum server continues to see wallet queries.
+   A running node, a synced tip and a complete confirmed scan are separate
+   states. Each wallet still needs mempool and recovery coverage before handoff.
+
+The supervisor identifies the owned loopback service by its inherited pipe
+and genesis header. The managed service has no HTTP control listener. Its
+Electrum TCP listener allows chain-health queries only. The private owner pipe
+accepts bounded additive registrations. Wallet descriptors are derived locally
+over explicit receive/change ranges. The scanner fetches blocks from Bitcoin
+peers, checks them against local chain headers including transaction and witness
+commitments, and stores matching confirmed transactions, outpoints and proofs
+per owner. A changed range or a disconnected cursor triggers replay from
+genesis. Cold replay currently reads historical blocks sequentially and can
+require significant bandwidth. Missing blocks keep the scan incomplete.
 
 ## Reproduce the funded test
 
@@ -82,14 +116,32 @@ reviewed fee, wallet history after restart and the stale-channel hold on full
 backup restore. This was a source-checkout run with disposable profiles and a
 mock keychain. The harness skipped direct funding. [Reproduce the existing wallet tests](desktop-qualification.md)
 
+## Managed regtest results
+
+The macOS arm64 test on November 5, 2026 started with empty Floresta storage
+and a proof peer on loopback. Pass the prepared candidate as
+`--managed-florestad /absolute/path/to/candidate/florestad` alongside the
+two binaries in the lab command above to exercise both builds.
+
+| Fixture | Managed result |
+| --- | --- |
+| Funded script and unrelated wallet | After validating height 102, the two wallets found one matching transaction and zero respectively. |
+| Quit, restart and watch expansion | The funded wallet recovered its receipt. Adding its public script to the second wallet recovered the old transaction there as well. |
+| Descriptor recovery | The range through index 104 had zero matches. Extending the same public descriptor through 105 found the historical funding transaction. |
+| Competing confirmed spends | At height 103 an outpoint watch found one transaction on the initial branch. After a longer branch reached height 104, the same watch found zero and the funded wallet retained two canonical transactions. |
+| Existing external Lightning backend | All desktop regtest stages ran. Seventeen checks passed, including crash during submission, offline receive, send max, drain, restart, on-chain recovery and full-backup restore. Direct funding and transport-path inspection were skipped. Seed-only Lightning recovery is unsupported. |
+
+One 102-block run on an Apple M5 Pro with 64 GiB RAM took 32.1 seconds to
+reach the tip and 2.0 seconds to catch up two wallet scans on loopback. The
+debug binary was 59,207,640 bytes. These measurements describe that regtest
+fixture. Sustained mainnet sync, peak disk use, peer diversity and historical
+recovery require their own runs.
+
 ## Before a wallet can switch
 
-The next implementation needs correct outpoints, usable unconfirmed and verbose
-transaction data, historical parents and protected control access. Beignet
-also needs to export the complete public watch set and acknowledge safe
-lifecycle transitions. The desktop must distinguish a missing watch or failed
-scan from a genuinely empty history and enforce the user's endpoint permissions
-across wallet queries and fee requests. Full historical validation, completed
-wallet and channel scans, and a successful refresh are prerequisites for the
-initial handoff policy. Fresh-data recovery, peer outages, reorgs, platform
-packaging and resource measurements remain open. [Floresta source contract](floresta-upstream.md) · [Beignet calls and Lightning dependencies](floresta-beignet.md)
+The candidate's confirmed index passes the funded checks above. The remaining
+wallet-serving gates include proof-validated pending transactions and replacement
+notifications, historical parent availability, completed backfill, a safe live
+Lightning transition, and cold channel/guardian recovery. Production signing,
+platform qualification and sustained mainnet measurements also remain open.
+[Floresta source contract](floresta-upstream.md) · [Beignet calls and Lightning dependencies](floresta-beignet.md)

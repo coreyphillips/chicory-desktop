@@ -1,0 +1,11 @@
+{
+  "release": "v0.9.1",
+  "commit": "bc2db8d07e72651f9981ce589c5688f4d575dc7a",
+  "archiveSha256": "3095cee06f19b33475cf84d0de19bf68ad789b28b5c91fc602f96763217044e9",
+  "upstreamLockSha256": "8e81d17980309cf98da133cf865196d4ebddebb0e2964fd2a146e3c8fb72c8f1",
+  "patches": [
+    "managed-stdio.patch",
+    "electrum-wallet.patch",
+    "managed-watches.patch"
+  ]
+}

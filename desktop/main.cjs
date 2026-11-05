@@ -10,6 +10,8 @@ const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require
 const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
 const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
 const { installFullBackupIpc } = require('./full-backup-ipc.cjs');
+const { candidateDigest, FlorestaSettings, installFlorestaIpc } = require('./floresta-settings.cjs');
+const { setWatchCollection, reconcileQualificationWatches } = require('./floresta-wallet-sync.cjs');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
 const fs = require('node:fs');
@@ -50,6 +52,12 @@ let quitting;
 const token = randomBytes(32).toString('hex');
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const runtime = path.join(root, app.isPackaged ? 'runtime' : '.runtime');
+const candidate = candidateDigest({ isPackaged: app.isPackaged, demo, digest: process.env.CHICORY_FLORESTA_CANDIDATE_SHA256 });
+const floresta = candidate ? new FlorestaSettings({ root, profile, digest: candidate,
+  canCollect: () => !!manager?.connected && !!appLock && !appLock.required() && !stopping && !erasing,
+  setCollection: (network, enabled) => setWatchCollection(manager, network, enabled),
+  reconcile: (node, network, signal) => reconcileQualificationWatches({ node, network, manager, signal }),
+}) : null;
 const publicDirectory = path.join(root, 'dist');
 const coded = (message, code) => Object.assign(new Error(message), { code });
 // Redacted and bounded. Kept beside the profile so a failure before any
@@ -293,6 +301,7 @@ async function installUpdate(file, offer, signal) {
     // encrypted profile and its OS-protected key are left exactly in place.
     stopping = true;
     diagnostics.shutdownBegan();
+    await floresta?.stopAll();
     const managerOutcome = await stopManager().catch(() => 'failed');
     const torOutcome = await Promise.resolve(tor?.stop()).then(() => 'stopped', () => 'failed');
     diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' });
@@ -466,6 +475,7 @@ function createWindow(desktopSession) {
     icon: path.join(__dirname, '../build/icon.png'),
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 12 } } : { frame: false }),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), session: desktopSession,
+      additionalArguments: candidate ? ['--chicory-floresta-qualification'] : [],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       webviewTag: false, spellcheck: false, devTools: !app.isPackaged, backgroundThrottling: true },
   });
@@ -524,6 +534,7 @@ function trustedSender(event) {
 }
 
 function lockEvent(name, value) {
+  if (name === 'locked' || name === 'unlocked') floresta?.refreshCollection();
   if (!window || window.isDestroyed() || !isAppURL(window.webContents.getURL())) return;
   if (['locked', 'conceal', 'changed', 'unlocked'].includes(name))
     window.webContents.send('desktop:lock', name, typeof value === 'string' || typeof value === 'boolean' ? value : undefined);
@@ -537,6 +548,7 @@ function ensureManager() {
   if (!managerStart && loaded) diagnostics.startupBegan();
   managerStart ??= startManager().then(() => {
     if (loaded && !stopping) diagnostics.startupEnded('ready');
+    if (!stopping && !erasing && !appLock.required()) floresta?.resume();
   }, async (error) => {
     // A wallet service stopped by an erase did not fail to open.
     if (!stopping && !erasing) {
@@ -576,6 +588,7 @@ function createEraser(desktopSession) {
       return outcome;
     },
     stopTor: async () => {
+      await floresta?.stopAll({ reset: true });
       await Promise.resolve(tor?.stop()).catch(() => {});
       tor = undefined; torProxy = undefined; torRequests.clear();
     },
@@ -619,10 +632,11 @@ app.on('before-quit', (event) => {
   if (quitting) return;
   stopping = true;
   diagnostics.shutdownBegan();
+  const stopNode = Promise.resolve(floresta?.stopAll()).catch(() => {});
   quitting = stopManager().catch(() => 'failed')
     .then(managerOutcome => Promise.resolve(tor?.stop()).then(() => 'stopped', () => 'failed')
       .then(torOutcome => diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' })))
-    .finally(() => { stopped = true; app.quit(); });
+    .finally(async () => { await stopNode; stopped = true; app.quit(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', showWindow);
@@ -653,6 +667,8 @@ else app.whenReady().then(async () => {
   installPermissions(desktopSession);
   installMenu();
   installLock();
+  if (floresta) installFlorestaIpc({ ipcMain, settings: floresta, appLock, dialog, window: () => window,
+    trusted: trustedSender, allowed: () => !stopping && !erasing && !gate.active });
   if (!demo) installFullBackupIpc({ ipcMain, trusted: trustedSender, appLock, dialog, fs, call: managerCall,
     window: () => window, documents: () => app.getPath('documents') });
   // With the lock on, no key is loaded and no wallet engine starts until it opens.

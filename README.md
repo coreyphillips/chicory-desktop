@@ -154,9 +154,11 @@ performed and remaining platform qualification. The inherited
 [regtest report](docs/regtest.md) documents the upstream browser and manager
 baseline, not new funded testing of this desktop package.
 
-The [Floresta compatibility lab](docs/floresta-qualification.md) tests a
-candidate local Bitcoin backend against Beignet's wallet and Lightning
-requirements on a disposable regtest chain.
+A source build can run a managed Floresta qualification candidate and scan
+public wallet and channel history. Wallet payments continue through the selected
+Electrum server while the local backend is being qualified. The
+[setup guide and funded test results](docs/floresta-qualification.md) include
+a [report of Floresta issues](docs/floresta-upstream-bugs.md).
 
 ## Source and license
 

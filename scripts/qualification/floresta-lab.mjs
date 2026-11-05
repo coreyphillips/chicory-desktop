@@ -98,7 +98,18 @@ async function sha256(file) {
   return digest.digest('hex');
 }
 
-async function lab(root, florestad, utreexod) {
+function fundingSpend(parent, miner, watched, amount, fee) {
+  const vout = parent.outs.findIndex(out => out.script.equals(miner.output));
+  assert(parent.isCoinbase() && vout >= 0);
+  const tx = new Transaction();
+  tx.addInput(parent.getHash(), vout, 0xfffffffd, script.compile([miner.redeem.output]));
+  tx.addOutput(miner.output, parent.outs[vout].value - amount - fee - 1000);
+  tx.addOutput(miner.output, 1000);
+  tx.addOutput(watched.output, amount);
+  return tx;
+}
+
+async function lab(root, florestad, utreexod, managedFlorestad) {
   const env = { HOME: root, APPDATA: root, LOCALAPPDATA: root, TMPDIR: root, TEMP: root, TMP: root };
   if (process.platform === 'win32') env.SystemRoot = process.env.SystemRoot;
   const version = bin => execFileSync(bin, ['--version'], { env, cwd: root, encoding: 'utf8', timeout: 5000 }).trim();
@@ -111,7 +122,9 @@ async function lab(root, florestad, utreexod) {
   const proof = rpcClient(peerRpc, password);
   const local = rpcClient(nodeRpc);
   const miner = payments.p2sh({ network, redeem: { output: Buffer.from([opcodes.OP_TRUE]) } });
-  const watched = payments.p2wsh({ network, redeem: { output: script.compile([randomBytes(16), opcodes.OP_DROP, opcodes.OP_TRUE]) } });
+  const watched = managedFlorestad
+    ? payments.p2wpkh({ network, address: 'bcrt1qzyd6rjwx6tccux6l425mtwsyeagnch6me8peeu' })
+    : payments.p2wsh({ network, redeem: { output: script.compile([randomBytes(16), opcodes.OP_DROP, opcodes.OP_TRUE]) } });
   const peerConf = path.join(root, 'peer.conf');
   const nodeConf = path.join(root, 'node.toml');
   await fs.writeFile(peerConf, `rpcuser=lab\nrpcpass=${password}\n`, { mode: 0o600 });
@@ -142,15 +155,15 @@ async function lab(root, florestad, utreexod) {
     });
   }
   await validated(101, mined.at(-1));
+  const observedPeers = {
+    fromFloresta: (await local('getpeerinfo')).map(({ user_agent, services }) => ({ user_agent, services })),
+    fromProofPeer: (await proof('getpeerinfo')).filter(p => /Floresta/i.test(p.subver))
+      .map(({ subver, services, relaytxes }) => ({ subver, services, relaytxes }))
+  };
+  assert(observedPeers.fromFloresta.length && observedPeers.fromProofPeer.length, 'Missing connected peer advertisements');
   const firstBlock = Block.fromHex(await proof('getblock', [mined[0], 0]));
   const parent = firstBlock.transactions[0];
-  const vout = parent.outs.findIndex(out => out.script.equals(miner.output));
-  assert(parent.isCoinbase() && vout >= 0);
-  const funding = new Transaction();
-  funding.addInput(parent.getHash(), vout, 0xfffffffd, script.compile([miner.redeem.output]));
-  funding.addOutput(miner.output, parent.outs[vout].value - 52000);
-  funding.addOutput(miner.output, 1000);
-  funding.addOutput(watched.output, 50000);
+  const funding = fundingSpend(parent, miner, watched, 50000, 1000);
   await assertRegtest(proof);
   assert.equal(await proof('sendrawtransaction', [funding.toHex()]), funding.getId());
   assert((await proof('getrawmempool')).includes(funding.getId()));
@@ -179,16 +192,90 @@ async function lab(root, florestad, utreexod) {
   else if (anonymous.ok && (await anonymous.json()).result?.best_block === blockHash) authorization = 'failed';
   confirmed.rows.push({ check: 'Control RPC denies unauthenticated browser-origin POST', status: authorization,
     detail: `Anonymous text/plain POST returned HTTP ${anonymous.status}` });
+  let observer;
+  if (managedFlorestad) {
+    const { qualifyManagedWatches } = await import('./floresta-watch-lab.mjs');
+    observer = await qualifyManagedWatches({ binary: path.resolve(managedFlorestad), root, peerPort, proof,
+      script: watched.output.toString('hex'), outpoint: funding.getId() + ':2', height: 102, blockHash });
+  }
+  const transitions = [];
+  try {
+    const base = { hex: funding.toHex(), height: 102, blockHash, position };
+    const second = Block.fromHex(await proof('getblock', [mined[1], 0])).transactions[0];
+    const variants = [fundingSpend(second, miner, watched, 33000, 1000),
+      fundingSpend(second, miner, watched, 31000, 4000), fundingSpend(second, miner, watched, 23000, 8000)];
+    const [original, replacement, winning] = variants;
+    const txids = variants.map(tx => tx.getId());
+
+    async function submit(tx) {
+      await assertRegtest(proof);
+      assert.equal(await proof('sendrawtransaction', [tx.toHex()]), tx.getId());
+      const mempool = await proof('getrawmempool');
+      assert.deepEqual(mempool.filter(id => txids.includes(id)), [tx.getId()]);
+    }
+    async function snapshot(stage, tx, at = { height: 0 }, disconnected) {
+      const input = { ...fixture, parents: [parent.toHex(), second.toHex()],
+        transactions: [base, { hex: tx.toHex(), ...at }], disconnected };
+      const snapshot = await probe(electrumPort, readFixture(input));
+      const checks = ['Watched history', 'Watched UTXOs', 'Watched balance', 'Pending script transactions',
+        'Merkle branches and block positions', 'Detached funding proof withdrawn'];
+      transitions.push({ stage, txid: tx.getId(), ...at, rows: snapshot.rows.filter(row => checks.includes(row.check)) });
+    }
+    async function mine(tx, count) {
+      await assertRegtest(proof);
+      const hashes = await proof('generate', [count]);
+      const block = Block.fromHex(await proof('getblock', [hashes[0], 0]));
+      assert.equal(block.getId(), hashes[0]);
+      assert.equal(block.transactions.length, 2);
+      assert.equal(block.transactions[1].getId(), tx.getId());
+      await validated(102 + count, hashes.at(-1));
+      return { height: 103, blockHash: hashes[0], position: 1 };
+    }
+
+    await submit(original);
+    await sleep(2000, undefined, { signal: cancel.signal });
+    await snapshot('Original pending funding', original);
+    await submit(replacement);
+    // The conflicting original now has a lower fee. Confirm the peer rejected
+    // it for a transaction policy reason and retained only the replacement.
+    await assertRegtest(proof);
+    await assert.rejects(proof('sendrawtransaction', [original.toHex()]), /fee|replacement|conflict|double.spend/i);
+    assert.deepEqual((await proof('getrawmempool')).filter(id => txids.includes(id)), [replacement.getId()]);
+    await sleep(2000, undefined, { signal: cancel.signal });
+    await snapshot('Higher-fee replacement after rejecting the original', replacement);
+    const stale = await mine(replacement, 1);
+    await snapshot('Replacement confirmed on the first branch', replacement, stale);
+    await observer?.atTip({ tipHeight: 103, tipHash: stale.blockHash, outpoint: replacement.getId() + ':2',
+      expectedMatches: 2, stage: 'beforeFork' });
+    await assertRegtest(proof);
+    await proof('invalidateblock', [stale.blockHash]);
+    assert.equal(await proof('getbestblockhash'), blockHash);
+    await submit(winning);
+    const active = await mine(winning, 2);
+    assert.notEqual(active.blockHash, stale.blockHash);
+    await observer?.atTip({ tipHeight: 104, tipHash: await proof('getblockhash', [104]), outpoint: replacement.getId() + ':2',
+      expectedMatches: 2, stage: 'afterFork' });
+    await snapshot('Conflicting spend on the longer branch', winning, active,
+      { txid: replacement.getId(), height: stale.height, blockHash: stale.blockHash });
+  } catch (error) {
+    transitions.push({ stage: 'Replacement and reorg fixture', rows: [
+      { check: 'Complete controlled chain transitions', status: 'failed', detail: error.message }
+    ] });
+  } finally {
+    await observer?.stop();
+  }
+  const managedWatches = observer?.evidence;
   console.log(JSON.stringify({ versions, binarySha256, height: 102, blockHash, txid: funding.getId(), position, vout: 2,
-    qualified: false, pending, confirmed }, null, 2));
-  return [...pending.rows, ...confirmed.rows].some(row => row.status === 'failed') ? 1 : 2;
+    qualified: false, observedPeers, pending, confirmed, managedWatches, transitions }, null, 2));
+  const rows = [...pending.rows, ...confirmed.rows, ...transitions.flatMap(step => step.rows), ...(managedWatches?.rows || [])];
+  return rows.some(row => row.status === 'failed') ? 1 : 2;
 }
 
-const { values } = parseArgs({ options: { florestad: { type: 'string' }, utreexod: { type: 'string' } } });
+const { values } = parseArgs({ options: { florestad: { type: 'string' }, utreexod: { type: 'string' }, 'managed-florestad': { type: 'string' } } });
 if (!values.florestad || !values.utreexod) throw new Error('Supply --florestad <binary> --utreexod <binary>');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-lab-'));
 try {
-  process.exitCode = await lab(root, path.resolve(values.florestad), path.resolve(values.utreexod));
+  process.exitCode = await lab(root, path.resolve(values.florestad), path.resolve(values.utreexod), values['managed-florestad']);
 } catch (error) {
   console.error(cancel.signal.aborted ? cancel.signal.reason.message : error.message);
   process.exitCode = 1;
