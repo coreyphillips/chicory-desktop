@@ -5,10 +5,17 @@ on:
     paths:
       - 'build/floresta/**'
       - 'desktop/floresta*.cjs'
+      - 'desktop/main.cjs'
+      - 'build/electron-builder.yml'
       - 'build/verify-package.cjs'
+      - 'scripts/apply-storage-encryption.mjs'
       - 'scripts/desktop/package-floresta-preview.mjs'
+      - 'scripts/desktop/system-tar.mjs'
+      - 'scripts/desktop/prepare-runtime.mjs'
+      - 'scripts/desktop/prepare-tor.mjs'
       - 'scripts/qualification/floresta-preview*.mjs'
       - 'scripts/desktop/prepare-floresta.mjs'
+      - 'scripts/desktop/system-tar.mjs'
       - '.github/workflows/floresta.yml'
 permissions:
   contents: read
@@ -119,7 +126,7 @@ jobs:
             tar -czf $archive -C $dir.Parent.FullName $dir.Name
           } else {
             $archive = Join-Path $env:RUNNER_TEMP 'Chicory-Floresta-Preview-windows-x64.zip'
-            tar -acf $archive -C $dir.Parent.FullName $dir.Name
+            & "$env:SystemRoot/System32/tar.exe" -acf $archive -C $dir.Parent.FullName $dir.Name
           }
           if ($LASTEXITCODE -ne 0) { throw 'Could not archive the preview.' }
           "PREVIEW_ARCHIVE=$archive" >> $env:GITHUB_ENV

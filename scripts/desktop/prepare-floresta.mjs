@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { systemTar } from './system-tar.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const recipe = path.join(root, 'build', 'floresta');
@@ -58,7 +59,7 @@ async function build({ archive, debug, test }) {
     if (sha256(bytes) !== pin.archiveSha256) throw new Error('Floresta source archive checksum mismatch.');
     const tarball = path.join(work, 'source.tar.gz');
     await fs.writeFile(tarball, bytes);
-    execFileSync('tar', ['-xzf', tarball], { cwd: work, stdio: 'inherit' });
+    execFileSync(systemTar, ['-xzf', tarball], { cwd: work, stdio: 'inherit' });
     const source = path.join(work, 'Floresta-' + pin.commit);
     if (sha256(await fs.readFile(path.join(source, 'Cargo.lock'))) !== pin.upstreamLockSha256) {
       throw new Error('Floresta source lockfile checksum mismatch.');

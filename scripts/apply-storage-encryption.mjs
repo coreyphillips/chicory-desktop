@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { systemTar } from './desktop/system-tar.mjs';
 
 const NODE_VERSION = '24.22.1';
 const DRIVER_VERSION = '13.0.3';
@@ -83,7 +84,7 @@ async function headerDirectory(node, env) {
   await downloadChecked(`https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-headers.tar.gz`, HEADERS_SHA256, archive);
   await downloadChecked(`https://nodejs.org/dist/v${NODE_VERSION}/win-${process.arch}/node.lib`, WINDOWS_LIB_SHA256[process.arch], lib);
   const unpack = fs.mkdtempSync(path.join(cache, 'cipher-headers-'));
-  execFileSync('tar.exe', ['-xzf', archive, '-C', unpack], { env, stdio: 'inherit' });
+  execFileSync(systemTar, ['-xzf', archive, '-C', unpack], { env, stdio: 'inherit' });
   const headers = path.join(unpack, `node-v${NODE_VERSION}`);
   fs.mkdirSync(path.join(headers, 'Release'), { recursive: true });
   fs.copyFileSync(lib, path.join(headers, 'Release/node.lib'));
