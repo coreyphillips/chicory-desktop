@@ -17,6 +17,7 @@
     "test:regtest": "node scripts/regtest/payments.ts",
     "test:qualification": "node --test scripts/qualification/*.test.mjs",
     "qualify:regtest": "node scripts/qualification/desktop-regtest.mjs",
+    "qualify:floresta": "node scripts/qualification/floresta-lab.mjs",
     "demo": "npm run build && electron . --demo",
     "web:dev": "vite --host 127.0.0.1",
     "test:desktop": "node --test desktop/*.test.cjs",

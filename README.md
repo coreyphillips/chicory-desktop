@@ -154,6 +154,10 @@ performed and remaining platform qualification. The inherited
 [regtest report](docs/regtest.md) documents the upstream browser and manager
 baseline, not new funded testing of this desktop package.
 
+The [Floresta compatibility lab](docs/floresta-qualification.md) tests a
+candidate local Bitcoin backend against Beignet's wallet and Lightning
+requirements on a disposable regtest chain.
+
 ## Source and license
 
 The desktop adaptation reuses Chicory's production UI and the Chicory Umbrel
