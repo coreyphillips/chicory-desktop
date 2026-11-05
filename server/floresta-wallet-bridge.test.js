@@ -224,3 +224,92 @@ test('the real Beignet wallet checks an owner-scoped socket without reading a sy
   bridge.close();
   assert.equal(await ask('liveness'), false);
 });
+
+test('an authenticated subscription survives an owner rescan and tip race, reports fresh status once and closes on revocation', async t => {
+  const f = fixtures();
+  const realObservations = f.backend.pending.observations;
+  const bridge = await openWalletBridge(f.backend);
+  t.after(bridge.close);
+  const socket = connect(bridge.endpoint);
+  await once(socket, 'secureConnect');
+  const lines = createInterface({ input: socket })[Symbol.asyncIterator]();
+  let id = 0;
+  async function request(method, params) {
+    socket.write(JSON.stringify({ id: ++id, method, params }) + '\n');
+    const reply = JSON.parse((await lines.next()).value);
+    assert.equal(reply.id, id, 'An unverified or duplicate notification reached the wallet.');
+    return reply;
+  }
+  await request('server.version', ['wallet', '1.4']);
+  const query = 'blockchain.scripthash.subscribe';
+  const previous = (await request(query, [scriptHash])).result;
+  assert.match(previous, /^[a-f0-9]{64}$/);
+  f.backend.pending.observations = async () => null;
+  await bridge.refresh();
+  assert.ok((await request('blockchain.scripthash.get_history', [scriptHash])).error);
+  f.backend.pending.observations = realObservations;
+  f.state.tipSynced = false;
+  await bridge.refresh();
+  assert.ok((await request(query, [scriptHash])).error);
+  f.state.tipSynced = true;
+  f.observed.rows.push({ txid: id.toString(16).padStart(64, '0'), height: 0, fee: 100, spent: [], created: [] });
+  await bridge.refresh();
+  const notice = JSON.parse((await lines.next()).value);
+  assert.equal(notice.method, query); assert.equal(notice.params[0], scriptHash); assert.notEqual(notice.params[1], previous);
+  await bridge.refresh();
+  assert.equal((await request(query, [scriptHash])).result, notice.params[1]);
+  const end = once(socket, 'close');
+  f.signal.abort(); await end;
+  const replacement = connect(bridge.endpoint);
+  replacement.on('error', () => {});
+  await assert.rejects(once(replacement, 'secureConnect'));
+});
+
+test('a malformed or revoked backend still fails a subscription poll', async () => {
+  const f = fixtures(), view = walletElectrum(f.backend);
+  await view.call('blockchain.scripthash.subscribe', [scriptHash]);
+  f.backend.pending.observations = async () => ({ ...f.observed, tipHash: 'corrupt' });
+  await assert.rejects(view.refresh(() => assert.fail()));
+  f.backend.pending.observations = async () => { throw new Error('Session revoked'); };
+  await assert.rejects(view.refresh(() => assert.fail()), /revoked/);
+});
+
+test('one unavailable subscribed script cannot hide a verified change on a second registered script', async () => {
+  const f = fixtures();
+  const second = 'ce'.repeat(32);
+  f.backend.pending.observations = async () => f.observed;
+  const view = walletElectrum(f.backend);
+  const subscribe = 'blockchain.scripthash.subscribe';
+  const prior = await view.call(subscribe, [scriptHash]);
+  assert.equal(await view.call(subscribe, [second]), prior);
+  f.backend.pending.observations = async hash => hash === second ? f.observed : null;
+  f.observed.rows.push({ txid: id, fee: 1, height: 0, spent: [], created: [] });
+  const notices = [];
+  await view.refresh((method, params) => notices.push({ method, params }));
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].params[0], second);
+  assert.notEqual(notices[0].params[1], prior);
+});
+
+test('only declared chain transitions can defer a subscription', async () => {
+  const transitions = [
+    { phase: 'waiting-for-tip', tipSynced: null, height: null, validatedHeight: null, tipHash: null, historicalVerification: 'unknown' },
+    { tipSynced: false, height: 102 }, { historicalVerification: 'pending' }, { historicalVerification: 'verifying' },
+  ];
+  const fatal = [
+    { historicalVerification: 'error' }, { historicalVerification: 'unknown' }, { historicalVerification: 'future' },
+    { height: null, tipSynced: false }, { validatedHeight: -1 }, { validatedHeight: 102 },
+    { tipSynced: 'yes' }, { tipHash: 'malformed', historicalVerification: 'verifying' }, { height: 102, tipSynced: true },
+    { phase: 'waiting-for-tip', historicalVerification: 'error' },
+  ];
+  for (const [expected, statuses] of [['transition', transitions], ['fatal', fatal]]) {
+    for (const fields of statuses) {
+      const f = fixtures(), view = walletElectrum(f.backend);
+      await view.call('blockchain.scripthash.subscribe', [scriptHash]);
+      Object.assign(f.state, fields);
+      await assert.rejects(view.call('blockchain.scripthash.get_history', [scriptHash]));
+      const refresh = view.refresh(() => assert.fail('An unavailable chain produced a notification.'));
+      if (expected === 'transition') await refresh; else await assert.rejects(refresh);
+    }
+  }
+});

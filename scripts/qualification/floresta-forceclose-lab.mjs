@@ -1,6 +1,6 @@
 // All wallets, HTLCs and coins belong to the guarded local regtest run.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { REGTEST_GENESIS, assertRegtestWallets } from './guards.mjs';
 import { readPublicWatches, writeFundingFixture } from './floresta-funding-export.mjs';
@@ -22,7 +22,7 @@ async function until(label, read, accept = Boolean, timeout = 90000) {
   throw new Error('Timed out waiting for ' + label);
 }
 
-export async function qualifyForceClose({ peer, primaryId, payerId, gate, rpc, fixtureDirectory }) {
+export async function qualifyForceClose({ peer, primaryId, payerId, gate, rpc, fixtureDirectory, incoming = false }) {
   assert.ok(gate.verified);
   assert.equal(rpc('getblockhash', 0), REGTEST_GENESIS);
   assertRegtestWallets(await peer.api('/wallets'));
@@ -44,14 +44,15 @@ export async function qualifyForceClose({ peer, primaryId, payerId, gate, rpc, f
   const funding = outpoint(channel.fundingTxid, channel.fundingOutputIndex);
   assert((await watch()).outpoints.some(point => point.outpoint === funding));
   const current = async () => (await sender('channels')).find(c => c.channelId === channel.channelId);
-  const paymentHash = randomBytes(32).toString('hex');
+  const preimage = incoming ? randomBytes(32) : null;
+  const paymentHash = preimage ? createHash('sha256').update(preimage).digest('hex') : randomBytes(32).toString('hex');
   const amountSats = 30000;
   const syncedHeight = rpc('getblockcount');
   await until('both Lightning nodes at the independent chain tip', async () => {
     const tips = await Promise.all([sender('info'), receiver('info')]);
     return tips.every(info => info.blockHeight === syncedHeight);
   });
-  const invoice = await receiver('invoice/create-hold', { paymentHash, amountSats, minFinalCltvExpiry: 72, description: 'disposable expiry test' });
+  const invoice = await receiver('invoice/create-hold', { paymentHash, amountSats, minFinalCltvExpiry: 72, description: 'disposable recovery test' });
   const admission = await sender('invoice/pay-async', { bolt11: invoice.bolt11 });
   assert.equal(admission.status, 'PENDING');
   let lastState;
@@ -63,6 +64,11 @@ export async function qualifyForceClose({ peer, primaryId, payerId, gate, rpc, f
     return row?.htlcCount === 1 && row.heldAmountMsat === String(amountSats * 1000) && row.earliestExpiry > 0 ? row : null;
   });
   assert.equal((await current()).htlcCount, 1);
+  if (incoming) {
+    const { qualifyIncomingClaim } = await import('./floresta-incoming-claim.mjs');
+    return qualifyIncomingClaim({ peer, senderId: primaryId, receiverId: payerId, sender, receiver, gate, rpc, fixtureDirectory,
+      preimage, paymentHash, funding, channel, expiry: held.earliestExpiry, stopWallet, until });
+  }
   await stopWallet(payerId);
   const before = rpc('getblockcount');
   const deadline = held.earliestExpiry + 6;

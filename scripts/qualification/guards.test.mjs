@@ -21,7 +21,7 @@ test('funded remote recovery needs an explicit stage and a separate fixture', ()
     assert.equal(qualificationStages(name).recoveryStage, name);
     assert.throws(() => qualificationStages('payments,' + name), /fresh isolated fixture/);
   }
-  for (const name of ['forceclose-sweep', 'breach-justice']) {
+  for (const name of ['forceclose-sweep', 'breach-justice', 'incoming-preimage']) {
     assert.equal(stages.has(name), false);
     assert.equal(qualificationStages(name).stages.has(name), true);
     assert.throws(() => qualificationStages(name + ',payments'), /fresh isolated fixture/);

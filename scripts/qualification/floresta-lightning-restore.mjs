@@ -16,6 +16,7 @@ import { publicSnapshot } from '../../server/floresta-collection.js';
 import { REGTEST_GENESIS } from './guards.mjs';
 import { withProofPeer } from './floresta-pending-lab.mjs';
 import { penaltyWitness } from './floresta-breach-lab.mjs';
+import { verifyIncomingWitness } from './floresta-incoming-claim.mjs';
 
 const requireServer = createRequire(new URL('../../server/package.json', import.meta.url));
 const { Block } = requireServer('bitcoinjs-lib');
@@ -42,6 +43,17 @@ function references(input, keys) {
 }
 
 export function fixtureReferences(input) {
+  if (input.liveRole === 'incoming-claim') {
+    assert.equal(input.restored, undefined);
+    const claim = input.incoming;
+    assert(claim?.senderOfflineAtSettlement === true && claim.receiverRestarted === true);
+    assert(['accepted', 'pending'].includes(claim.settlement));
+    assert.equal(claim.heldSats, 30000);
+    assert.match(claim.paymentHash, /^[a-f0-9]{64}$/);
+    const byPoint = references(input, ['currentFunding', 'commitmentHtlc', 'claimOutput']);
+    assert.equal(new Set([...byPoint.values()].map(p => p.txid)).size, 3);
+    return { byPoint, incoming: true };
+  }
   if (input.liveRole === 'justice-monitor') {
     assert.equal(input.restored, undefined);
     assert(input.breach?.restarted === true && input.breach.resolved === true);
@@ -101,7 +113,7 @@ async function readFixture(directory) {
   assert.equal(input.network, 'regtest');
   assert(Number.isInteger(input.tipHeight) && input.tipHeight > 100 && input.tipHeight <= 5000);
   assert.match(input.tipHash, /^[a-f0-9]{64}$/);
-  const { remote, closing, justice, byPoint } = fixtureReferences(input);
+  const { remote, closing, justice, incoming, byPoint } = fixtureReferences(input);
   const text = await readLocal(path.join(directory, 'blocks.ndjson'), 64 * 1024 * 1024);
   const lines = text.trimEnd().split('\n');
   assert.equal(lines.length, input.tipHeight + 1);
@@ -129,7 +141,9 @@ async function readFixture(directory) {
   assert.equal(previous, input.tipHash);
   for (const item of byPoint.values()) assert(item.tx && item.height > 0, 'Expected confirmed funding input or output is absent');
   const current = byPoint.get('currentFunding');
-  if (justice) {
+  if (incoming) {
+    verifyIncomingClaim(byPoint, input.incoming);
+  } else if (justice) {
     verifyJusticeClaims(byPoint, input.breach);
   } else if (closing) {
     verifyCloseClaims(byPoint, input.close);
@@ -145,12 +159,30 @@ async function readFixture(directory) {
   }
   const scripts = new Map();
   const neededScripts = remote ? ['currentFunding'] : ['priorFunding', 'currentFunding'];
-  for (const id of closing || justice ? byPoint.keys() : neededScripts) {
+  for (const id of closing || justice || incoming ? byPoint.keys() : neededScripts) {
     const point = byPoint.get(id);
     const script = point.tx.outs[point.vout].script;
     scripts.set(script.toString('hex'), hashScript(script));
   }
-  return { input, blocks, byPoint, scripts, remote, closing, justice };
+  return { input, blocks, byPoint, scripts, remote, closing, justice, incoming };
+}
+
+export function verifyIncomingClaim(points, claim) {
+  const funding = points.get('currentFunding'), held = points.get('commitmentHtlc'), paid = points.get('claimOutput');
+  assert.deepEqual(held.tx.ins.map(inputPoint), [funding.point]);
+  assert.deepEqual(paid.tx.ins.map(inputPoint), [held.point]);
+  assert.equal(funding.tx.outs[funding.vout].value, claim.fundingSats);
+  assert.equal(held.tx.outs[held.vout].value, 30000);
+  assert.equal(paid.tx.outs.length, 1);
+  assert.equal(paid.tx.outs[paid.vout].value, claim.receivedSats);
+  assert(claim.receivedSats > 0 && claim.receivedSats < 30000);
+  assert.equal(held.height, claim.closeHeight);
+  assert.equal(paid.height, claim.claimHeight);
+  assert(Number.isSafeInteger(claim.expiry) && funding.height < held.height && held.height < paid.height && paid.height < claim.expiry);
+  const input = paid.tx.ins[0];
+  const { anchors } = verifyIncomingWitness(input.witness, held.tx.outs[held.vout].script, claim.paymentHash);
+  assert.equal(anchors, claim.anchors);
+  if (anchors) assert(paid.tx.version >= 2 && (input.sequence & 0x80400000) === 0 && (input.sequence & 0xffff) >= 1);
 }
 
 function verifyJusticeClaims(points, breach) {
@@ -240,13 +272,13 @@ async function waitFor(label, node, read, accept) {
 }
 
 async function checkWallet(node, source, fixture) {
-  const { input, byPoint, scripts, blocks, remote, closing, justice } = fixture;
+  const { input, byPoint, scripts, blocks, remote, closing, justice, incoming } = fixture;
   const { owner, snapshot } = source;
   assert.match(owner, /^[0-9a-f]{64}$/);
   const view = publicSnapshot(snapshot, 'regtest', { remaining: 8 * 1024 * 1024 });
   assert.equal(view.status, 'observed', 'A wallet supplied no observed public watch snapshot');
   assert.deepEqual(view, snapshot, 'Unexpected fields in the public watch snapshot');
-  const watched = closing || justice ? [...byPoint.values()] : remote ? [byPoint.get('currentFunding')] : [];
+  const watched = closing || justice || incoming ? [...byPoint.values()] : remote ? [byPoint.get('currentFunding')] : [];
   for (const item of watched) {
     const hex = item.tx.outs[item.vout].script.toString('hex');
     assert(view.scripts.includes(hex));
@@ -286,9 +318,9 @@ async function checkWallet(node, source, fixture) {
       histories.push({ scriptHash, history: history.rows, unspent: unspent.rows, confirmed: balance.confirmed });
     }
     const remaining = new Set(histories.flatMap(h => h.unspent.map(row => row.txid + ':' + row.vout)));
-    if (closing || justice) {
+    if (closing || justice || incoming) {
       for (const [name, item] of byPoint) {
-        const unspent = justice ? name.startsWith('justice') : ['balanceSweep', 'timeoutSweep'].includes(name);
+        const unspent = name.startsWith('justice') || ['balanceSweep', 'timeoutSweep', 'claimOutput'].includes(name);
         assert.equal(remaining.has(item.point), unspent, 'Wrong close disposition at ' + name);
       }
     } else {
@@ -336,6 +368,9 @@ async function qualify({ fixture: directory, utreexod, digest: sha256 }) {
         proofPeerSha256: digest(await fs.readFile(utreexod)), emptyStorage: true,
         historical: { state: sync.historicalVerification, height: sync.historicalHeight, target: sync.historicalTarget },
         liveRole: input.liveRole, live, restoredRole: input.restoredRole, restored,
+        ...(fixture.incoming && { incoming: { paymentHash: input.incoming.paymentHash, settlement: input.incoming.settlement,
+          heldSats: input.incoming.heldSats, receivedSats: input.incoming.receivedSats, closeHeight: input.incoming.closeHeight,
+          claimHeight: input.incoming.claimHeight, expiry: input.incoming.expiry, anchors: input.incoming.anchors } }),
         restore: input.restored && (fixture.remote ? { kind: input.restore.kind, chainOutcome: input.restore.chainOutcome,
           restoredPayment: input.restore.restoredPayment, fundedSats: input.restore.fundedSats } :
           { kind: input.restore.kind, heldOrClosed: input.restore.heldOrClosed }) };

@@ -33,7 +33,7 @@ const { stages, recoveryStage } = qualificationStages(process.env.CHICORY_QUALIF
 const fixtureDirectory = process.env.CHICORY_QUALIFY_FLORESTA_FIXTURE;
 if (fixtureDirectory) {
   assert.ok(stages.size === 1 && (stages.has('direct-funding') || stages.has('forceclose-sweep') ||
-    stages.has('breach-justice') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
+    stages.has('breach-justice') || stages.has('incoming-preimage') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
   assertDisposableProfile(fixtureDirectory);
   await fs.chmod(fixtureDirectory, 0o700);
 }
@@ -301,7 +301,8 @@ try {
   const config = await subject.api('/config');
   const subjectWallets = await subject.api('/wallets');
   assert.deepEqual(subjectWallets, [], 'A fresh profile starts with zero wallets');
-  const forceClose = stages.has('forceclose-sweep');
+  const incoming = stages.has('incoming-preimage');
+  const forceClose = incoming || stages.has('forceclose-sweep');
   const breach = stages.has('breach-justice');
   peer = await startPeer(peerPort, Boolean(fixtureDirectory || recoveryStage || forceClose || breach));
   if (fixtureDirectory || forceClose || breach) watchCollection.setWatchCollection(peer.child, 'regtest', true);
@@ -335,7 +336,7 @@ try {
   await until('payer spendable', mining(() => payer.snapshot()), snap => snap.balance.availableSats >= 150000);
   if (forceClose) {
     const { qualifyForceClose } = await import('./floresta-forceclose-lab.mjs');
-    record.pass('forceclose-sweep', await qualifyForceClose({ peer, primaryId: primary.id, payerId, gate, rpc, fixtureDirectory }));
+    record.pass(incoming ? 'incoming-preimage' : 'forceclose-sweep', await qualifyForceClose({ peer, primaryId: primary.id, payerId, gate, rpc, fixtureDirectory, incoming }));
     throw Object.assign(new Error('funded force close complete'), { done: true });
   }
   if (recoveryStage) {

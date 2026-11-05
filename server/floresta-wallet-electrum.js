@@ -7,6 +7,9 @@ const { GENESIS_CHAINS } = require('./electrum-probe');
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const uint = value => Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 const unavailable = () => new Error('Wallet observations are unavailable.');
+// Native null is an unavailable owner/tip view. Explicit wallet queries always
+// fail; an existing subscription may retry with fresh data on the next poll.
+class ObservationPending extends Error {}
 
 function verbose(proof, network) {
   const tx = Transaction.fromHex(proof.hex);
@@ -35,17 +38,28 @@ function walletElectrum({ qualification, network, status, confirmed, pending, re
   let subscribedTip;
   async function tip() {
     const state = await status();
-    if (state.network !== network || state.phase !== 'running' || state.historicalVerification !== 'verified' || !state.tipSynced ||
-        !uint(state.height) || state.height !== state.validatedHeight || !hash(state.tipHash)) throw unavailable();
+    if (state.network !== network || !['running', 'waiting-for-tip'].includes(state.phase)) throw unavailable();
+    if (state.phase === 'waiting-for-tip') {
+      if (state.historicalVerification !== 'unknown' || state.tipSynced !== null || state.height !== null ||
+          state.validatedHeight !== null || state.tipHash !== null) throw unavailable();
+      throw new ObservationPending();
+    }
+    if (!['pending', 'verifying', 'verified'].includes(state.historicalVerification) ||
+        typeof state.tipSynced !== 'boolean' || !uint(state.height) || !uint(state.validatedHeight) ||
+        state.validatedHeight > state.height || !hash(state.tipHash) || state.tipSynced && state.height !== state.validatedHeight) throw unavailable();
+    if (state.historicalVerification !== 'verified' || !state.tipSynced) throw new ObservationPending();
     return { tipHash: state.tipHash, tipHeight: state.height };
   }
   function anchored(view, anchor) {
-    if (!view || view.tipHash !== anchor.tipHash || view.tipHeight !== anchor.tipHeight) throw unavailable();
+    if (view === null) throw new ObservationPending();
+    if (!view || !hash(view.tipHash) || !uint(view.tipHeight)) throw unavailable();
+    if (view.tipHash !== anchor.tipHash || view.tipHeight !== anchor.tipHeight) throw new ObservationPending();
     return view;
   }
   async function header(height, anchor) {
     if (!uint(height) || height > anchor.tipHeight) throw unavailable();
     const hex = await readHeader(height, anchor);
+    if (hex === null) throw new ObservationPending();
     if (typeof hex !== 'string' || !/^[a-f0-9]{160}$/.test(hex)) throw unavailable();
     const id = createHash('sha256').update(createHash('sha256').update(Buffer.from(hex, 'hex')).digest()).digest().reverse().toString('hex');
     if ((height === 0 && id !== genesis) || (height === anchor.tipHeight && id !== anchor.tipHash)) throw unavailable();
@@ -91,7 +105,6 @@ function walletElectrum({ qualification, network, status, confirmed, pending, re
     if (method === 'blockchain.block.header') result = await header(params[0], anchor);
     else if (method === 'blockchain.headers.subscribe') {
       result = { height: anchor.tipHeight, hex: await header(anchor.tipHeight, anchor) };
-      subscribedTip = anchor.tipHash;
     } else if (/^blockchain\.scripthash\.(?:get_history|get_mempool|get_balance|listunspent|subscribe)$/.test(method)) {
       const action = method.split('.').at(-1);
       if (action === 'subscribe' && !subscriptions.has(params[0]) && subscriptions.size >= 1024) throw unavailable();
@@ -99,8 +112,8 @@ function walletElectrum({ qualification, network, status, confirmed, pending, re
       const mem = anchored(await pending.observations(params[0]), anchor);
       result = await scriptRead(action, params[0], anchor, mem);
       const latest = anchored(await pending.observations(params[0]), anchor);
-      if (latest.revision !== mem.revision || latest.scope !== 'observed-pending' || latest.coverageComplete !== false) throw unavailable();
-      if (action === 'subscribe') subscriptions.set(params[0], result);
+      if (latest.scope !== 'observed-pending' || latest.coverageComplete !== false) throw unavailable();
+      if (latest.revision !== mem.revision) throw new ObservationPending();
     } else if (method === 'blockchain.transaction.get' && hash(params[0]) && (params[1] === undefined || typeof params[1] === 'boolean')) {
       const proof = anchored(await confirmed.transaction(params[0]) ?? await pending.transaction(params[0]), anchor);
       if ((proof.scope !== 'confirmed-only' && !(proof.scope === 'observed-pending' && proof.coverageComplete === false && proof.confirmations === 0)) ||
@@ -120,17 +133,25 @@ function walletElectrum({ qualification, network, status, confirmed, pending, re
       return result;
     } else throw unavailable();
     anchored(await tip(), anchor);
+    if (method === 'blockchain.headers.subscribe') subscribedTip = anchor.tipHash;
+    if (method === 'blockchain.scripthash.subscribe') subscriptions.set(params[0], result);
     return result;
   }
-  async function refresh(notify) {
+  async function notifyChanges(notify) {
     const anchor = await tip();
     if (subscribedTip && subscribedTip !== anchor.tipHash) {
       await notify('blockchain.headers.subscribe', [await call('blockchain.headers.subscribe', [])]);
     }
     for (const [scriptHash, previous] of subscriptions) {
-      const current = await call('blockchain.scripthash.subscribe', [scriptHash]);
+      let current;
+      try { current = await call('blockchain.scripthash.subscribe', [scriptHash]); }
+      catch (error) { if (error instanceof ObservationPending) continue; throw error; }
       if (previous !== current) await notify('blockchain.scripthash.subscribe', [scriptHash, current]);
     }
+  }
+  async function refresh(notify) {
+    try { await notifyChanges(notify); }
+    catch (error) { if (!(error instanceof ObservationPending)) throw error; }
   }
   return { call, refresh };
 }

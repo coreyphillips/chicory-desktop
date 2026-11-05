@@ -516,12 +516,13 @@ export async function withProofPeer(utreexod, run) {
   }
 }
 
-async function standalone({ utreexod, digest, walletSend }) {
+async function standalone({ utreexod, digest, walletSend, lightningChannel }) {
   return withProofPeer(utreexod, async ({ root, proof, peerPort, peerEndpoint }) => {
     // The pinned full peer activates SegWit after three 144-block windows.
-    const initialHeight = walletSend ? 432 : 104;
+    const fundedWallets = walletSend || lightningChannel;
+    const initialHeight = fundedWallets ? 432 : 104;
     assert.equal((await proof('generate', [initialHeight])).length, initialHeight);
-    if (walletSend) assert.equal((await proof('getblockchaininfo')).bip9_softforks.segwit.status, 'active');
+    if (fundedWallets) assert.equal((await proof('getblockchaininfo')).bip9_softforks.segwit.status, 'active');
     const watchScript = '0014' + '33'.repeat(20);
     if (digest) {
       const { default: { candidate } } = await import('../../desktop/floresta-settings.cjs');
@@ -533,7 +534,11 @@ async function standalone({ utreexod, digest, walletSend }) {
         await node.start();
         const tip = await proof('getbestblockhash');
         await until('the candidate to validate the frozen tip', () => node.status(), state => state.tipHash === tip && state.tipSynced,
-          walletSend ? 240000 : 90000);
+          fundedWallets ? 240000 : 90000);
+        if (lightningChannel) {
+          const { qualifyManagedChannel } = await import('./floresta-channel-lab.mjs');
+          return await qualifyManagedChannel({ node, proof });
+        }
         if (walletSend) {
           const { qualifyWalletSend } = await import('./floresta-wallet-send-lab.mjs');
           const wallet = await qualifyWalletSend({ node, proof });
@@ -548,7 +553,8 @@ async function standalone({ utreexod, digest, walletSend }) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const { values } = parseArgs({ options: { utreexod: { type: 'string' }, digest: { type: 'string' }, 'wallet-send': { type: 'boolean' } } });
-  if (values['wallet-send'] && !values.digest) throw new Error('A wallet send requires the managed regtest candidate.');
-  console.log(JSON.stringify(await standalone({ ...values, walletSend: values['wallet-send'] }), null, 2));
+  const { values } = parseArgs({ options: { utreexod: { type: 'string' }, digest: { type: 'string' }, 'wallet-send': { type: 'boolean' }, 'lightning-channel': { type: 'boolean' } } });
+  if (values['wallet-send'] && values['lightning-channel']) throw new Error('Select one fresh funded wallet fixture per run.');
+  if ((values['wallet-send'] || values['lightning-channel']) && !values.digest) throw new Error('A wallet send requires the managed regtest candidate.');
+  console.log(JSON.stringify(await standalone({ ...values, walletSend: values['wallet-send'], lightningChannel: values['lightning-channel'] }), null, 2));
 }
