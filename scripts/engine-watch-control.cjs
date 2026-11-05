@@ -246,5 +246,65 @@ function invalidate() {
   }
 }
 
+// The existing signer and BOLT peer stay live. This qualification path
+// accepts one already confirmed, idle regtest channel. Reconcile that exact
+// funding output through the new authenticated connection before replying.
+async function reconnectConfirmedFunding({ previous, next, port, funding }) {
+  const node = liveNode?.deref();
+  const policy = require('rn-electrum-client/helpers/chicory-endpoint-policy.cjs');
+  const refused = () => new Error('Private channel funding could not be reconciled.');
+  function checkChannel() {
+    if (!node || node !== liveNode?.deref() || node.destroyed || node.networkName !== 'regtest' ||
+        !policy.walletSession || state?.requireWatchAck || recoveryPending(node) ||
+        ![funding?.txid, funding?.wtxid, funding?.scriptHash, funding?.tipHash].every(s => typeof s === 'string' && /^[a-f0-9]{64}$/.test(s)) ||
+        !Number.isSafeInteger(funding.height) || funding.height < 1 || !Number.isSafeInteger(funding.tipHeight) ||
+        funding.tipHeight < funding.height + 5) throw refused();
+    const channels = node.listChannels();
+    const [channel] = channels;
+    if (channels.length !== 1 || channel.state !== 'NORMAL' || !channel.htlcUsable || channel.htlcCount !== 0 ||
+        channel.fundingTxid !== funding.txid || channel.fundingOutputIndex !== funding.vout || channel.capacitySats !== funding.value) throw refused();
+    const record = node.node.getChannelManager().getChannel(Buffer.from(channel.channelId, 'hex'))?.getFullState();
+    if (!record || record.quiescenceState !== 'NORMAL' || record.spliceInFlight || record.preSpliceState ||
+        record.preSpliceSpendWatches?.length || channel.previousFundingTxids?.length) throw refused();
+  }
+  checkChannel();
+  policy.renewLocalSession(previous, next, port);
+  try {
+    await restoreFundingSubscriptions(node, policy, funding);
+    checkChannel();
+    return { reconciled: true, txid: funding.txid };
+  } catch (error) {
+    policy.abandonLocalSession(next);
+    throw error;
+  }
+}
+
+async function restoreFundingSubscriptions(node, policy, funding) {
+  const refused = () => new Error('Private funding subscriptions could not be restored.');
+  const wallet = node.wallet;
+  const backend = node.node.getChainWatcher().backend;
+  const result = await wallet.connectToElectrum();
+  if (result.isErr()) throw refused();
+  await backend.resubscribeAll();
+  // resubscribeAll is best-effort and swallows per-script failures. Require
+  // each retained dispatcher, including the funding watch, on this socket.
+  if (!backend.subscribedScriptHashes.has(funding.scriptHash)) throw refused();
+  for (const [scriptHash, entry] of backend.subscribedScriptHashes) {
+    const subscribed = await wallet.electrum.subscribeToAddresses({ scriptHashes: [scriptHash], onReceive: entry.dispatcher });
+    if (subscribed.isErr()) throw refused();
+  }
+  const { Transaction } = require('bitcoinjs-lib');
+  const tx = Transaction.fromBuffer(await backend.getTransaction(funding.txid));
+  const output = tx.outs[funding.vout];
+  const history = await backend.getScriptHashHistory(funding.scriptHash);
+  const unspent = await backend.listUnspent(funding.scriptHash);
+  const header = wallet.electrum.getBlockHeader();
+  if (tx.getId() !== funding.txid || Buffer.from(tx.getHash(true)).reverse().toString('hex') !== funding.wtxid ||
+      !output || hashScript(output.script) !== funding.scriptHash || output.value !== funding.value ||
+      !history.some(row => row.txid === funding.txid && row.height === funding.height) ||
+      !unspent.some(row => row.txid === funding.txid && row.outputIndex === funding.vout && row.height === funding.height && row.valueSat === funding.value) ||
+      header.hash !== funding.tipHash || header.height !== funding.tipHeight || !(await policy.pingWalletPeer('bitcoinRegtest'))) throw refused();
+}
+
 module.exports = { enable, disableObservation, attach, script, funding, outpoint, verifyParent, checkHash, checkAddress,
-  validateHistory, snapshot, acknowledge, invalidate };
+  validateHistory, snapshot, acknowledge, invalidate, reconnectConfirmedFunding };

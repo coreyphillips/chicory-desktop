@@ -221,3 +221,56 @@ test('prepared wallet mutually authenticates its private Electrum lease before s
   await dial(key.toString('hex'));
   assert.deepEqual(transcript, ['server.version']);
 });
+
+test('a renewed lease authenticates a new physical port once and rejects stale, concurrent and disabled renewals', { skip: !available }, async t => {
+  const { once } = require('node:events');
+  const { randomBytes } = require('node:crypto');
+  const keys = Array.from({ length: 3 }, () => randomBytes(32).toString('hex'));
+  const cipher = 'PSK-AES128-GCM-SHA256';
+  const seen = [];
+  async function endpoint(key, name) {
+    const server = tls.createServer({ minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2', ciphers: cipher,
+      pskCallback: (_, identity) => identity === 'chicory-wallet-1' ? Buffer.from(key, 'hex') : null }, socket => {
+      socket.on('error', () => {});
+      socket.on('data', bytes => { seen.push([name, bytes.toString()]); socket.end(); });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    return server.address().port;
+  }
+  const first = await endpoint(keys[0], 'first'), second = await endpoint(keys[1], 'second');
+  const policy = configure(t, requireEngine.resolve(policyName), { ...selected('regtest', first, true),
+    BEIGNET_ELECTRUM_HOST: '127.0.0.1', CHICORY_FLORESTA_WALLET_LAB: '1' });
+  policy.bindLocalSession(keys[0]);
+  await policy.resolveHost('regtest', '127.0.0.1', first, true, assert.fail);
+  const wire = policy.tlsForEndpoint(tls);
+  const dial = () => wire.connect({ host: '127.0.0.1', port: first }, () => {});
+  const renew = () => policy.renewLocalSession(keys[0], keys[1], second);
+  assert.throws(renew);
+  const original = dial();
+  await once(original, 'secureConnect');
+  assert.throws(renew);
+  const oldClose = once(original, 'close');
+  original.write('first wallet read');
+  await oldClose;
+  assert(policy.leaseDisconnected);
+  assert.throws(dial);
+  assert.throws(() => policy.renewLocalSession(keys[2], keys[1], second));
+  assert.throws(() => policy.renewLocalSession(keys[0], keys[0], second));
+  setEnv(t, 'CHICORY_FLORESTA_WALLET_LAB', undefined);
+  assert.throws(renew);
+  setEnv(t, 'CHICORY_FLORESTA_WALLET_LAB', '1');
+  renew();
+  assert.throws(renew);
+  assert.throws(() => wire.connect({ host: 'outside.invalid', port: first }, assert.fail));
+  const fresh = dial();
+  await once(fresh, 'secureConnect');
+  const newClose = once(fresh, 'close');
+  fresh.write('second wallet read');
+  await newClose;
+  assert.deepEqual(seen, [['first', 'first wallet read'], ['second', 'second wallet read']]);
+  policy.abandonLocalSession(keys[1]);
+  assert.throws(() => policy.renewLocalSession('00'.repeat(32), keys[2], second));
+  assert.throws(dial);
+});

@@ -209,6 +209,44 @@ export async function qualifyManagedChannel({ node, proof }) {
     });
     assert.equal(ready[0].channelId, ready[1].channelId);
     for (const c of ready) { assert.equal(c.fundingTxid, txid); assert.equal(c.capacitySats, amount); }
+    const fundingHeight = await proof('getblockcount') - 5;
+    const funding = { txid, wtxid, vout: proposal.vout, value: amount, scriptHash: jointHash };
+    log('stopping the managed daemon with both funded Lightning peers still live');
+    await node.stop();
+    assert(originalLifetime.aborted);
+    for (const w of wallets) {
+      await assert.rejects(w.session.transaction(txid));
+      await assert.rejects(w.lease.reopenConfirmedFunding(funding));
+      await until('closed authenticated wallet transport', () => w.ask('lease-status'), v => v.disconnected);
+      assert.throws(() => w.lease.authorizeBroadcast(txid, wtxid));
+    }
+    const [absentTip] = await proof('generate', [1]);
+    await node.start();
+    await verified(absentTip);
+    for (const w of wallets) {
+      await cover(w.owner, absentTip);
+      const prior = w.lease;
+      await assert.rejects(prior.reopenConfirmedFunding({ ...funding, value: amount + 1 }));
+      w.lease = await prior.reopenConfirmedFunding(funding);
+      assert.notEqual(w.lease.endpoint.psk, prior.endpoint.psk);
+      assert.throws(() => w.lease.authorizeBroadcast(txid, wtxid));
+      await assert.rejects(prior.reopenConfirmedFunding(funding));
+      assert.deepEqual(await w.ask('renew', { previous: prior.endpoint.psk, next: w.lease.endpoint.psk,
+        port: w.lease.endpoint.port, funding: w.lease.funding }), { reconciled: true, txid });
+      const resumed = await w.ask('lease-status');
+      assert.equal(resumed.disconnected, false);
+      assert.equal(resumed.witnessSignatures, w === opener ? 1 : 0);
+      await assert.rejects(w.session.transaction(txid));
+    }
+    await assert.rejects(opener.ask('resend'), /refused/);
+    assert.deepEqual(await proof('getrawmempool'), []);
+    const [nextTip] = await proof('generate', [1]);
+    await verified(nextTip);
+    const nextHeight = await proof('getblockcount');
+    for (const w of wallets) {
+      await until('live Lightning watcher on the renewed grant', () => w.ask('lease-status'), v => v.height === nextHeight);
+    }
+    assert.deepEqual(await channels(), ready);
     log('both channels are usable, exercising BOLT11 payments and cancellation');
     async function transfer(from, to, sats) {
       const invoice = await to.ask('invoice', { amount: sats });
@@ -236,7 +274,8 @@ export async function qualifyManagedChannel({ node, proof }) {
     assert.equal(Math.round(unspent.value * 1e8), amount);
     assert.equal(unspent.scriptPubKey.hex, joint.toString('hex'));
     return { network: 'regtest', twoPrivateOwnerSessions: true, sharedFundingCoveredBeforeRelease: true, channelFundingTxid: txid, wtxid,
-      channelCapacitySats: amount, fundingFeeSats: fee, fundingHeight: await proof('getblockcount') - 5, registeredOwnerCount: 2,
+      channelCapacitySats: amount, fundingFeeSats: fee, fundingHeight, registeredOwnerCount: 2,
+      renewedOwners: 2, reconnectAfterDaemonRestart: true, restoredWatcherHeight: nextHeight, repeatedFundingSignatures: 0, renewedBroadcastAuthority: false,
       protocol: 'BOLT 2 v2', publisher: automatic ? 'automatic' : 'opener signed-record provider', rejectedUnapprovedAndRepeatedBroadcast: true, openerPaidSats: 40000, acceptorPaidSats: 12000, holdCanceledSats: 5000,
       restoredBalances: true, confirmedUnspentFunding: true, heldExpiry: held.expiry, coldPendingCoverage: 'observed-only' };
   } finally {

@@ -17,6 +17,10 @@ const protocol = tls === 'true' ? 'ssl' : 'tcp';
 const onionName = process.env.CHICORY_ELECTRUM_ONION_NAME;
 let dialHost;
 let sessionKey;
+let sessionPort = port;
+let sessionSocket;
+let sessionAuthenticated = false;
+let abandoned = false;
 const sessionCipher = 'PSK-AES128-GCM-SHA256';
 
 if (onionName !== undefined && (!strict || host !== '127.0.0.1' || !/^[a-z2-7]{56}\.onion$/.test(onionName))) {
@@ -54,6 +58,31 @@ function bindLocalSession(key) {
   sessionKey = Buffer.from(key, 'hex');
 }
 
+// Beignet retains the original server configuration for subscriptions and
+// liveness checks. Only its authenticated regtest transport may replace the
+// physical loopback lease after the previous socket has closed. Bind the
+// replacement to the exact previous credential to reject delayed IPC.
+function renewLocalSession(previous, next, nextPort) {
+  const validKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  if (process.env.CHICORY_FLORESTA_WALLET_LAB !== '1' || abandoned || !sessionKey || !sessionAuthenticated || sessionSocket || !validKey(previous) || !validKey(next) ||
+      previous === next || !Number.isSafeInteger(nextPort) || nextPort < 1 || nextPort > 65535 ||
+      !require('node:crypto').timingSafeEqual(sessionKey, Buffer.from(previous, 'hex'))) {
+    throw new Error('Invalid private Electrum lease renewal.');
+  }
+  sessionKey.fill(0);
+  sessionKey = Buffer.from(next, 'hex');
+  sessionPort = nextPort;
+  sessionAuthenticated = false;
+}
+
+function abandonLocalSession(key) {
+  if (!sessionKey || typeof key !== 'string' || key !== sessionKey.toString('hex')) return;
+  abandoned = true;
+  sessionAuthenticated = true;
+  sessionKey.fill(0);
+  sessionSocket?.destroy();
+}
+
 function allows(transportNetwork, requestedHost, requestedPort, requestedProtocol) {
   return !strict || (dialHost !== undefined && requestedHost === dialHost && requestedPort === port &&
     requestedProtocol === protocol && transportNetwork === networks.get(network));
@@ -85,20 +114,24 @@ async function pingWalletPeer(transportNetwork) {
 function tlsForEndpoint(transport) {
   if (sessionKey) {
     return { ...transport, connect(options, secure) {
-      if (options.host !== host || options.port !== port || dialHost !== host) throw new Error('Unrecognized private Electrum endpoint.');
+      if (options.host !== host || options.port !== port || dialHost !== host || sessionSocket || sessionAuthenticated) throw new Error('Unrecognized private Electrum endpoint.');
       // This exclusive TLS 1.2 cipher authenticates both ends using the
       // ephemeral wallet lease. A certificate from a different listener
       // cannot substitute for the lease. Never pass caller-supplied sessions.
-      const socket = transport.connect({ host, port, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2',
+      const key = sessionKey;
+      const socket = transport.connect({ host, port: sessionPort, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2',
         ciphers: sessionCipher, rejectUnauthorized: false,
-        pskCallback: () => ({ identity: 'chicory-wallet-1', psk: sessionKey }) }, () => {
+        pskCallback: () => ({ identity: 'chicory-wallet-1', psk: key }) }, () => {
         if (socket.getProtocol() !== 'TLSv1.2' || socket.getCipher()?.name !== sessionCipher) {
           socket.destroy(new Error('Private Electrum authentication failed.'));
           return;
         }
+        sessionAuthenticated = true;
         socket.disableRenegotiation();
         secure.call(socket);
       });
+      sessionSocket = socket;
+      socket.once('close', () => { if (sessionSocket === socket) sessionSocket = undefined; });
       return socket;
     } };
   }
@@ -109,4 +142,5 @@ function tlsForEndpoint(transport) {
   } };
 }
 
-module.exports = { strict, resolveHost, allows, tlsForEndpoint, bindLocalSession, pingWalletPeer, get walletSession() { return Boolean(sessionKey); } };
+module.exports = { strict, resolveHost, allows, tlsForEndpoint, bindLocalSession, renewLocalSession, abandonLocalSession, pingWalletPeer,
+  get walletSession() { return Boolean(sessionKey); }, get leaseDisconnected() { return sessionAuthenticated && !sessionSocket; } };

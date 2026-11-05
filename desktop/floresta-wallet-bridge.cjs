@@ -8,7 +8,7 @@ const expired = () => new Error('The private wallet bridge lease is unavailable.
 // Trusted main-process callers supply a grant tied to the unlocked wallet and
 // its observation generation. No owner or routing choice comes from a wallet
 // query. A new managed child always requires a fresh grant.
-async function grantWalletBridge({ qualification, manager, node, owner, signal }) {
+async function grantWalletBridge({ qualification, manager, node, owner, signal }, readOnly = false) {
   if (qualification !== true || !manager?.connected || !idHash(owner) || !(signal instanceof AbortSignal)) throw expired();
   signal.throwIfAborted();
   const network = node.status().network;
@@ -21,6 +21,7 @@ async function grantWalletBridge({ qualification, manager, node, owner, signal }
   const child = node.watch;
   let approved;
   let issued = false;
+  let renewing = false;
   let revoke;
   let accept;
   let reject;
@@ -48,6 +49,55 @@ async function grantWalletBridge({ qualification, manager, node, owner, signal }
   };
   function alive() {
     if (activity.aborted || !child?.active || node.watch !== child) { revoke(); throw expired(); }
+  }
+  async function reopenConfirmedFunding(funding) {
+    if (!control.signal.aborted || signal.aborted || renewing || !manager.connected) throw expired();
+    const { txid, wtxid, scriptHash, vout, value } = funding || {};
+    if (![txid, wtxid, scriptHash].every(idHash) || !uint(vout) || !Number.isSafeInteger(value) || value < 1 || value > 21e6 * 1e8) throw expired();
+    renewing = true;
+    let next, view, observations;
+    try {
+      const watch = node.watch;
+      const lifetime = watch?.lifetime?.signal;
+      const initial = node.status();
+      function current() {
+        const state = node.status();
+        if (signal.aborted || !manager.connected || node.watch !== watch || !watch?.active || !lifetime ||
+            lifetime.aborted || lifetime !== watch.lifetime.signal ||
+            state.network !== 'regtest' || state.phase !== 'running' || state.historicalVerification !== 'verified' ||
+            state.tipSynced !== true || !uint(state.height) || state.validatedHeight !== state.height ||
+            !idHash(state.tipHash) || state.tipHash !== initial.tipHash || state.height !== initial.height) throw expired();
+      }
+      current();
+      view = node.openConfirmedWallet(owner, signal);
+      observations = node.openPendingWallet(owner, signal);
+      async function pending() {
+        const page = await observations.observations(scriptHash);
+        current();
+        if (page?.scope !== 'observed-pending' || page.coverageComplete !== false ||
+            page.tipHash !== initial.tipHash || page.tipHeight !== initial.height ||
+            !Number.isSafeInteger(page.revision) || page.revision < 0 || !Array.isArray(page.rows) ||
+            page.rows.some(row => row.spent.some(point => point.txid === txid && point.vout === vout))) throw expired();
+        return page.revision;
+      }
+      const revision = await pending();
+      const [proof, unspent] = await Promise.all([view.transaction(txid), view.unspent(scriptHash)]);
+      current();
+      if (![proof, unspent].every(row => row?.scope === 'confirmed-only' && row.tipHash === initial.tipHash && row.tipHeight === initial.height) ||
+          proof.txid !== txid || proof.wtxid !== wtxid || !uint(proof.confirmations) || proof.confirmations < 6 ||
+          !unspent.rows.some(row => row.txid === txid && row.vout === vout && row.value === value && row.height === proof.height)) throw expired();
+      next = await grantWalletBridge({ qualification, manager, node, owner, signal }, true);
+      if (await pending() !== revision) throw expired();
+      current();
+      return { ...next, funding: { txid, wtxid, scriptHash, vout, value, height: proof.height,
+        tipHash: initial.tipHash, tipHeight: initial.height } };
+    } catch (error) {
+      next?.close();
+      renewing = false;
+      throw error;
+    } finally {
+      observations?.close(); view?.close();
+    }
   }
   async function read(method, args) {
     alive();
@@ -84,10 +134,10 @@ async function grantWalletBridge({ qualification, manager, node, owner, signal }
       const e = message.endpoint;
       if (e?.host !== '127.0.0.1' || e.tls !== true || !uint(e.port) || !e.port || e.port > 65535 || !idHash(e.psk)) { revoke(); return; }
       clearTimeout(startTimer);
-      accept({ endpoint: { host: '127.0.0.1', tls: true, port: e.port, psk: e.psk }, close: revoke, authorizeBroadcast(txid, wtxid) {
+      accept({ endpoint: { host: '127.0.0.1', tls: true, port: e.port, psk: e.psk }, close: revoke, reopenConfirmedFunding, authorizeBroadcast(txid, wtxid) {
         alive();
         const state = node.status();
-        if (!idHash(txid) || !idHash(wtxid) || issued || !child.walletOffersActive || state.phase !== 'running' || state.network !== 'regtest' ||
+        if (readOnly || !idHash(txid) || !idHash(wtxid) || issued || !child.walletOffersActive || state.phase !== 'running' || state.network !== 'regtest' ||
             state.historicalVerification !== 'verified' || !state.tipSynced || state.validatedHeight !== state.height || !idHash(state.tipHash)) throw expired();
         issued = true;
         approved = { txid, wtxid, tipHash: state.tipHash, tipHeight: state.height };

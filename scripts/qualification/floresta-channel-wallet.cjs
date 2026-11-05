@@ -29,8 +29,13 @@ if (!isMainThread) {
   derive().catch(() => process.exit(1));
 } else if (process.connected) {
   const mnemonic = pinned('bip39').generateMnemonic(256);
-  let node, proposal, release, selected, consumed = false;
+  let node, proposal, release, selected, consumed = false, witnessSignatures = 0;
   async function action(m) {
+    if (m.type === 'lease-status' && node) return {
+      disconnected: pinned('rn-electrum-client/helpers/chicory-endpoint-policy.cjs').leaseDisconnected,
+      witnessSignatures, height: node.node.getChainWatcher().getCurrentBlockHeight(),
+    };
+    if (m.type === 'renew' && node) return pinned('./dist/chicory-watch-control.cjs').reconnectConfirmedFunding(m);
     if (m.type === 'prepare' && !node) {
       const offline = new Worker(__filename, { workerData: mnemonic, env: { ...process.env, BEIGNET_ELECTRUM_PORT: '1' } });
       try {
@@ -76,6 +81,7 @@ if (!isMainThread) {
         assert.equal(tx.ins.length, 1);
         assert(tx.getHash().equals(fundingTxid) && tx.ins[0].witness.length === 0);
         const { valueSats, script } = record.inputPrevouts[0];
+        witnessSignatures++;
         const witness = selected.signWitness(tx, 0, valueSats, { scripts: [script], values: [valueSats] });
         tx.setWitness(0, witness);
         proposal = { hex: tx.toHex(), vout: fundingOutputIndex, txid: tx.getId() };

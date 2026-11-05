@@ -15,7 +15,7 @@ process.once('disconnect', () => {
   else if (process.listenerCount('SIGTERM')) process.emit('SIGTERM');
   else process.exit(0);
 });
-process.on('message', message => {
+process.on('message', async message => {
   // Only our fork parent has this channel. No HTTP endpoint or renderer IPC
   // can request descriptors, acknowledge coverage or stop startup.
   if (message?.type === 'chicory-chain-control/v1') {
@@ -48,6 +48,10 @@ process.on('message', message => {
         case 'invalidate-watch':
           chainWatch?.invalidate();
           result = { invalidated: true };
+          break;
+        case 'reconnect-confirmed-funding':
+          result = initialized && !fenced && process.env.CHICORY_FLORESTA_WALLET_LAB === '1'
+            ? await require(path.join(engineRoot, 'chicory-watch-control.cjs')).reconnectConfirmedFunding(message) : { reconciled: false };
           break;
         default: return;
       }

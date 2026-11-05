@@ -118,6 +118,9 @@ test('actual patched CLI receives keys privately and encrypts config and schema 
   const initializer = f.launch(['init', '--network', 'regtest']);
   await delay(100);
   assert.equal(fs.existsSync(config), false, 'The CLI executed before receiving storage keys.');
+  const reply = require('node:events').once(initializer.child, 'message');
+  initializer.child.send({ type: 'chicory-chain-control/v1', id: 18, action: 'reconnect-confirmed-funding' });
+  assert.deepEqual((await reply)[0], { type: 'chicory-chain-reply/v1', id: 18, result: { reconciled: false } });
   initializer.child.send({ type: 'initialize-storage', ...f.keys });
   await until(() => initializer.lines.some((line) => line.ok === true && line.result?.message === 'Initialized'), 'Actual CLI initialization did not finish.');
   await disconnect(initializer);
