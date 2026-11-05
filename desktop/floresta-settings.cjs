@@ -31,6 +31,14 @@ function candidate(root, digest) {
   const recipe = path.join(root, 'build', 'floresta');
   const pin = JSON.parse(fs.readFileSync(path.join(recipe, 'source.json'), 'utf8'));
   const directory = path.join(root, '.runtime', 'floresta-candidates', process.platform + '-' + process.arch, digest);
+  const executable = process.platform === 'win32' ? 'florestad.exe' : 'florestad';
+  const files = [executable, 'bundle.json', 'LICENSE.md', 'LICENSE-APACHE', 'LICENSE-MIT'];
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  if (!fs.lstatSync(directory).isDirectory() || entries.length !== files.length ||
+      !entries.every(entry => entry.isFile() && files.includes(entry.name)) ||
+      fs.statSync(path.join(directory, 'bundle.json')).size > 16384) {
+    throw new Error('The prepared Floresta directory contains an unexpected or missing file.');
+  }
   const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'bundle.json'), 'utf8'));
   if (manifest.sha256 !== digest || manifest.commit !== pin.commit || manifest.release !== pin.release ||
       manifest.archiveSha256 !== pin.archiveSha256 || manifest.platform !== process.platform || manifest.arch !== process.arch ||
@@ -38,7 +46,7 @@ function candidate(root, digest) {
       !pin.patches.every(file => manifest.patches?.[file] === sha256(fs.readFileSync(path.join(recipe, file))))) {
     throw new Error('Rebuild the Floresta candidate from this source checkout.');
   }
-  return { binary: path.join(directory, process.platform === 'win32' ? 'florestad.exe' : 'florestad'), sha256: digest };
+  return { binary: path.join(directory, executable), sha256: digest };
 }
 
 class FlorestaSettings {
@@ -125,7 +133,7 @@ class FlorestaSettings {
     let volumeAvailable = true;
     try { if (folder) volumeAvailable = fs.statSync(folder).isDirectory(); } catch { volumeAvailable = false; }
     return { requested: enabled, storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
-      customStorage: process.platform !== 'win32', removalAvailable: process.platform === 'darwin',
+      customStorage: process.platform !== 'win32', removalAvailable: ['darwin', 'linux'].includes(process.platform),
       phase: this.errors.has(network) ? 'failed' : node?.phase || 'stopped', height: node?.height ?? null,
       validatedHeight: node?.validatedHeight ?? null, tipSynced: node?.tipSynced ?? null, error: this.errors.get(network) || node?.error || null,
       historicalVerification: node?.historicalVerification ?? 'unknown', historicalHeight: node?.historicalHeight ?? null,

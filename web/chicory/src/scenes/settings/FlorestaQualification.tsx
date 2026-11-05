@@ -73,7 +73,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
         {!state.requested && !state.storageUsed && state.customStorage ? <Link label="Choose storage folder" onPress={() => change('folder')} disabled={busy} /> : null}
         {!state.requested && state.storageUsed ? state.removalAvailable
           ? <Link label="Remove local node data" onPress={() => change('remove')} disabled={busy} />
-          : <Note>Automatic node data removal requires a local macOS APFS volume. On this platform, close every node before manually removing its generated data from the selected location.</Note> : null}
+          : <Note>Automatic node data removal requires local macOS APFS or Linux ext4 storage. On this platform, close every node before manually removing its generated data from the selected location.</Note> : null}
         {!state.requested || state.phase === 'failed' ? <Action label={state.requested ? 'Retry local node' : 'Start local node'}
           onPress={() => change('start')} disabled={busy} /> : null}
         {state.requested ? <Action label="Stop and disable local node" tone="quiet" onPress={() => change('stop')} disabled={busy} /> : null}

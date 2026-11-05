@@ -15,6 +15,7 @@
     "managed-pending.patch",
     "pending-transactions.patch",
     "managed-wallet-offers.patch",
-    "managed-reorg-reads.patch"
+    "managed-reorg-reads.patch",
+    "linux-ext4-removal.patch"
   ]
 }

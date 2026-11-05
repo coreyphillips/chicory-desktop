@@ -33,6 +33,24 @@ test('only an explicit unpackaged source launch can opt in to local node control
   assert.throws(() => candidate('.', '../outside'), /locally prepared/);
 });
 
+test('refuse extra files beside a source candidate before launching it', t => {
+  const { profile } = fixture(t);
+  const recipe = path.join(profile, 'build', 'floresta');
+  fs.mkdirSync(recipe, { recursive: true });
+  const pin = { release: 'test', commit: 'abc', archiveSha256: digest, patches: [] };
+  fs.writeFileSync(path.join(recipe, 'source.json'), JSON.stringify(pin));
+  const directory = path.join(profile, '.runtime', 'floresta-candidates', process.platform + '-' + process.arch, digest);
+  fs.mkdirSync(directory, { recursive: true });
+  const name = process.platform === 'win32' ? 'florestad.exe' : 'florestad';
+  for (const file of [name, 'LICENSE.md', 'LICENSE-APACHE', 'LICENSE-MIT']) fs.writeFileSync(path.join(directory, file), '');
+  fs.writeFileSync(path.join(directory, 'bundle.json'), JSON.stringify({
+    ...pin, patches: {}, sha256: digest, platform: process.platform, arch: process.arch,
+  }));
+  assert.equal(candidate(profile, digest).binary, path.join(directory, name));
+  fs.writeFileSync(path.join(directory, 'unexpected.dll'), '');
+  assert.throws(() => candidate(profile, digest), /unexpected or missing/);
+});
+
 test('persist consent per candidate and network, resume only on opt-in and stop collection on disable', async t => {
   const { settings, options, calls } = fixture(t);
   settings.resume();

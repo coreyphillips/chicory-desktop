@@ -110,7 +110,7 @@ async function prepareStorage(profileDirectory, storageDirectory, network, initi
 }
 
 async function removeOwnedData({ profileDirectory, storageDirectory, network, binary, sha256 }) {
-  if (process.platform !== 'darwin') throw new Error('Automatic node data removal is qualified only on macOS.');
+  if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Automatic node data removal requires local APFS or Linux ext4.');
   if (!Object.hasOwn(NETWORKS, network)) throw new Error('Unsupported local node network.');
   const profile = await fsp.realpath(profileDirectory);
   const parent = storageDirectory ? await fsp.realpath(storageDirectory) : profile;
@@ -125,7 +125,7 @@ async function removeOwnedData({ profileDirectory, storageDirectory, network, bi
   const args = ['--managed-cleanup-for', owner, '--data-dir', dir, '--network', NETWORKS[network][0]];
   const { stdout } = await promisify(execFile)(binary, args, { cwd: dir, env: { HOME: dir, TMPDIR: dir },
     timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 }).catch(() => {
-    throw new Error('Node storage is unavailable, in use, or contains unexpected files. Reconnect the original volume and retry.');
+    throw new Error('Node storage is unavailable, in use, on an unsupported filesystem, or contains unexpected files. Reconnect the original local APFS or Linux ext4 volume and retry.');
   });
   if (stdout.trim() !== 'chicory.storage-removed/1') throw new Error('The verified node did not confirm data removal.');
 }

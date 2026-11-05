@@ -301,8 +301,8 @@ test('native managed build enforces a chain-only listener, exclusive store and o
   assert.equal(await readFile(path.join(data, 'chicory-owner.json'), 'utf8'), owner);
 });
 
-test('native cleanup requires the actual owner, stopped store, recognized layout and stable lock',
-  { skip: !nativeBinary || process.platform !== 'darwin', timeout: 180000 }, async t => {
+test('native cleanup requires the actual owner, stopped store, qualified volume, recognized layout and stable lock',
+  { skip: !nativeBinary || !['darwin', 'linux'].includes(process.platform), timeout: 180000 }, async t => {
     const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-remove-'));
     const volume = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-volume-'));
     const storageDirectory = await fs.promises.realpath(volume);
@@ -321,13 +321,33 @@ test('native cleanup requires the actual owner, stopped store, recognized layout
     await assert.rejects(removeOwnedData(options), /in use/);
     assert.ok((await fs.promises.stat(db)).size);
     await node.stop();
+    if (process.platform === 'linux') {
+      const filesystem = execFileSync('findmnt', ['-n', '-o', 'FSTYPE', '-T', volume], { encoding: 'utf8' }).trim();
+      if (filesystem !== 'ext4') {
+        await assert.rejects(removeOwnedData(options), /unsupported filesystem/);
+        assert.ok((await fs.promises.stat(db)).size);
+        t.diagnostic(`Verified refusal on ${filesystem}. The positive removal case requires an ext4 test directory.`);
+        return;
+      }
+      t.diagnostic('Testing removal on a local ext4 volume.');
+    }
     const other = path.join(profileDirectory, 'other');
     await mkdir(other, { mode: 0o700 });
     await assert.rejects(removeOwnedData({ ...options, profileDirectory: other }), /unavailable/);
     const backup = path.join(storageDirectory, 'saved-wallet.chicory');
     await writeFile(backup, 'public backup fixture');
-    const link = path.join(dir, 'chaindata', 'unrecognized');
+    const unknown = path.join(dir, 'chaindata', 'unrecognized');
+    await writeFile(unknown, 'unrelated user file');
+    await assert.rejects(removeOwnedData(options), /unexpected/);
+    assert.equal(await readFile(unknown, 'utf8'), 'unrelated user file');
+    await fs.promises.unlink(unknown);
+    // A familiar basename must still pass all link checks in the helper.
+    const link = path.join(dir, 'chicory-backfill-v1.state.tmp');
     await fs.promises.symlink(backup, link);
+    await assert.rejects(removeOwnedData(options), /unexpected/);
+    assert.ok((await fs.promises.stat(db)).size);
+    await fs.promises.unlink(link);
+    await fs.promises.link(backup, link);
     await assert.rejects(removeOwnedData(options), /unexpected/);
     assert.ok((await fs.promises.stat(db)).size);
     await fs.promises.unlink(link);

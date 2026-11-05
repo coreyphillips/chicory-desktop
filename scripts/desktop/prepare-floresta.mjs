@@ -5,13 +5,43 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const recipe = path.join(root, 'build', 'floresta');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const name = process.platform === 'win32' ? 'florestad.exe' : 'florestad';
+
+// A digest may already have been installed by another build. Only reuse its
+// complete verified payload. A correct executable alone cannot vouch for a
+// stale receipt, replaced license, or extra library beside it on Windows.
+export async function publishCandidate(staging, destination) {
+  try {
+    await fs.rename(staging, destination);
+    return;
+  } catch (error) {
+    if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error.code)) throw error;
+    const existing = await fs.lstat(destination).catch(err => {
+      if (err.code === 'ENOENT') throw error;
+      throw err;
+    });
+    if (!existing.isDirectory()) throw new Error('Existing candidate is not a directory.');
+  }
+  const changed = () => new Error('Existing candidate differs from the verified build. Move it aside before rebuilding.');
+  const expected = (await fs.readdir(staging)).sort();
+  const actual = (await fs.readdir(destination)).sort();
+  if (expected.length !== actual.length || expected.some((entry, i) => entry !== actual[i])) throw changed();
+  for (const entry of expected) {
+    const output = path.join(staging, entry);
+    const cached = path.join(destination, entry);
+    const [source, installed] = await Promise.all([fs.lstat(output), fs.lstat(cached)]);
+    if (!installed.isFile() || source.size !== installed.size ||
+        (process.platform !== 'win32' && (source.mode & 0o111) !== (installed.mode & 0o111))) throw changed();
+    const [left, right] = await Promise.all([fs.readFile(output), fs.readFile(cached)]);
+    if (!left.equals(right)) throw changed();
+  }
+}
 
 async function build({ archive, debug, test }) {
   const pin = JSON.parse(await fs.readFile(path.join(recipe, 'source.json'), 'utf8'));
@@ -67,11 +97,7 @@ async function build({ archive, debug, test }) {
         cargoLockSha256: sha256(await fs.readFile(path.join(source, 'Cargo.lock'))), profile,
         platform: process.platform, arch: process.arch, sha256: digest };
       await fs.writeFile(path.join(staging, 'bundle.json'), JSON.stringify(manifest, null, 2) + '\n');
-      try { await fs.rename(staging, destination); }
-      catch (error) {
-        if (!['EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
-        if (sha256(await fs.readFile(path.join(destination, name))) !== digest) throw new Error('Existing candidate was modified.');
-      }
+      await publishCandidate(staging, destination);
     } finally {
       await fs.rm(staging, { recursive: true, force: true });
     }
@@ -81,5 +107,7 @@ async function build({ archive, debug, test }) {
   }
 }
 
-const { values } = parseArgs({ options: { archive: { type: 'string' }, debug: { type: 'boolean' }, test: { type: 'boolean' } } });
-console.log(await build(values));
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const { values } = parseArgs({ options: { archive: { type: 'string' }, debug: { type: 'boolean' }, test: { type: 'boolean' } } });
+  console.log(await build(values));
+}
