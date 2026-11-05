@@ -1,5 +1,8 @@
 'use strict';
 
+const { validateTransactionChunk } = require('./floresta-transactions.cjs');
+const { validateConfirmedPage } = require('./floresta-confirmed-reads.cjs');
+
 const PROTOCOL = 'chicory.watch/1';
 const hexHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const uint = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
@@ -60,7 +63,7 @@ class WatchRequests {
     if (Buffer.byteLength(line) > 65536) throw new Error('Split large local node watch registrations into smaller requests.');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.fail(new Error('Local node watch acknowledgement timed out.')), this.timeoutMs);
-      this.requests.set(id, { resolve, reject, timer });
+      this.requests.set(id, { command, resolve, reject, timer });
       this.write(line);
     });
   }
@@ -71,7 +74,8 @@ class WatchRequests {
     }
     const failed = Object.hasOwn(reply, 'error');
     if (failed && typeof reply.error !== 'string') throw new Error('Invalid local node watch error.');
-    const result = failed ? null : validated(reply.result);
+    const validate = { transaction: validateTransactionChunk, confirmed: validateConfirmedPage }[req.command.action];
+    const result = failed ? null : validate ? validate(req.command, reply.result) : validated(reply.result);
     clearTimeout(req.timer);
     this.requests.delete(reply.id);
     if (failed) req.reject(new Error('The local node refused this watch request.'));

@@ -3,12 +3,22 @@
 const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { ManagedFloresta } = require('./floresta.cjs');
+const { ManagedFloresta, removeOwnedData } = require('./floresta.cjs');
 
 const networks = ['mainnet', 'testnet', 'regtest'];
 const validDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const prefsFile = 'floresta-sync.json';
+const cleanupFile = 'floresta-cleanup.json';
+const validFolder = folder => folder === null || typeof folder === 'string' && path.isAbsolute(folder);
+
+function writePrivate(file, value) {
+  const stage = file + '.' + randomUUID();
+  try {
+    fs.writeFileSync(stage, JSON.stringify(value), { mode: 0o600, flag: 'wx', flush: true });
+    fs.renameSync(stage, file);
+  } finally { fs.rmSync(stage, { force: true }); }
+}
 
 function candidateDigest({ isPackaged, demo, digest }) {
   return !isPackaged && !demo && validDigest(digest) ? digest : null;
@@ -32,12 +42,15 @@ function candidate(root, digest) {
 
 class FlorestaSettings {
   constructor({ root, profile, digest, create = options => new ManagedFloresta(options), load = candidate,
-    canCollect = () => false, setCollection = () => {}, reconcile = async () => ({}) }) {
+    remove = removeOwnedData, canCollect = () => false, setCollection = () => {}, reconcile = async () => ({}) }) {
     this.profile = profile;
     this.file = path.join(profile, prefsFile);
     this.root = root;
     this.digest = digest;
     this.create = create;
+    this.remove = remove;
+    this.cleanupFile = path.join(profile, cleanupFile);
+    this.removals = new Map();
     this.load = load;
     this.nodes = new Map();
     this.errors = new Map();
@@ -56,7 +69,7 @@ class FlorestaSettings {
       if (prefs.version !== 1 || !prefs.networks || typeof prefs.networks !== 'object') throw new Error();
       for (const [network, value] of Object.entries(prefs.networks)) {
         if (!networks.includes(network) || !validDigest(value.digest) || typeof value.enabled !== 'boolean' ||
-            !(value.folder === null || (typeof value.folder === 'string' && path.isAbsolute(value.folder)))) throw new Error();
+            !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean') throw new Error();
       }
       return prefs.networks;
     } catch (error) {
@@ -67,24 +80,50 @@ class FlorestaSettings {
   _saved(network) {
     if (!networks.includes(network)) throw new Error('Unsupported Floresta network.');
     const entry = this._read()[network];
-    return entry?.digest === this.digest ? entry : { digest: this.digest, enabled: false, folder: null };
+    const locations = this._locations();
+    return { digest: this.digest, enabled: entry?.digest === this.digest && entry.enabled || false,
+      folder: Object.hasOwn(locations, network) ? locations[network] : entry?.folder ?? null,
+      used: Object.hasOwn(locations, network) || !!entry && entry.used !== false };
+  }
+  _locations() {
+    try {
+      const stat = fs.lstatSync(this.cleanupFile);
+      if (!stat.isFile() || stat.size > 16384) throw new Error();
+      const values = JSON.parse(fs.readFileSync(this.cleanupFile, 'utf8'));
+      if (!values || Array.isArray(values) || typeof values !== 'object' ||
+          Object.entries(values).some(([network, folder]) => !networks.includes(network) || !validFolder(folder))) throw new Error();
+      return values;
+    } catch (error) {
+      if (error.code === 'ENOENT') return {};
+      throw new Error('The saved local node storage locations could not be read.');
+    }
+  }
+  _saveLocations(locations) {
+    if (Object.keys(locations).length) writePrivate(this.cleanupFile, locations);
+    else fs.rmSync(this.cleanupFile, { force: true });
   }
   _save(network, entry) {
-    const entries = this._read();
-    entries[network] = entry;
-    const stage = this.file + '.' + randomUUID();
+    writePrivate(this.file, { version: 1, networks: { ...this._read(), [network]: entry } });
+  }
+  _path(network, folder) { return path.join(folder || this.profile, 'chicory-floresta', network); }
+  _hasProfileData(network) {
+    const dir = this._path(network, null);
+    const store = network === 'mainnet' ? dir : path.join(dir, network === 'testnet' ? 'testnet3' : network);
     try {
-      fs.writeFileSync(stage, JSON.stringify({ version: 1, networks: entries }), { mode: 0o600, flag: 'wx', flush: true });
-      fs.renameSync(stage, this.file);
-    } finally { fs.rmSync(stage, { force: true }); }
+      return fs.readdirSync(store).some(name => !['chicory-managed.lock', 'chicory-owner.json', '.DS_Store', 'config.toml'].includes(name));
+    } catch (error) { return error.code !== 'ENOENT'; }
   }
   status(network) {
-    const { enabled, folder } = this._saved(network);
+    const { enabled, folder, used } = this._saved(network);
     const node = this.nodes.get(network)?.status();
-    return { requested: enabled, storage: folder ? path.basename(folder) : 'Profile folder', customStorage: process.platform !== 'win32',
+    let volumeAvailable = true;
+    try { if (folder) volumeAvailable = fs.statSync(folder).isDirectory(); } catch { volumeAvailable = false; }
+    return { requested: enabled, storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
+      customStorage: process.platform !== 'win32', removalAvailable: process.platform === 'darwin',
       phase: this.errors.has(network) ? 'failed' : node?.phase || 'stopped', height: node?.height ?? null,
       validatedHeight: node?.validatedHeight ?? null, tipSynced: node?.tipSynced ?? null, error: this.errors.get(network) || node?.error || null,
-      watches: this.collection.get(network)?.summary ?? null };
+      historicalVerification: node?.historicalVerification ?? 'unknown', historicalHeight: node?.historicalHeight ?? null,
+      historicalTarget: node?.historicalTarget ?? null, watches: this.collection.get(network)?.summary ?? null };
   }
   pauseCollection(network) {
     const lease = this.collection.get(network);
@@ -92,7 +131,7 @@ class FlorestaSettings {
     this.collection.delete(network);
     clearInterval(lease.timer);
     lease.controller.abort();
-    Promise.resolve(this.setCollection(network, false)).catch(() => {});
+    try { Promise.resolve(this.setCollection(network, false)).catch(() => {}); } catch { /* The manager may have exited. */ }
   }
   refreshCollection() {
     for (const [network, node] of this.nodes) {
@@ -162,7 +201,7 @@ class FlorestaSettings {
       if (operation === 'start') {
         if (!prefs.enabled && !await confirm()) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
-        this._save(network, { ...prefs, enabled: true });
+        this._save(network, { ...prefs, enabled: true, used: true });
         this._start(network, prefs);
       } else if (operation === 'stop') {
         this._save(network, { ...prefs, enabled: false });
@@ -170,7 +209,19 @@ class FlorestaSettings {
         this.errors.delete(network);
         const node = this.nodes.get(network);
         if (node) { await node.stop(); this.nodes.delete(network); }
-      } else if (operation === 'folder' && !prefs.enabled && process.platform !== 'win32') {
+        this.errors.delete(network);
+      } else if (operation === 'remove' && !prefs.enabled && prefs.used && !this.nodes.has(network)) {
+        if (!await confirm('remove', this._path(network, prefs.folder))) return this.status(network);
+        if (!admitted()) throw new Error('Unlock Chicory and try again.');
+        try {
+          await this._remove(network, prefs.folder);
+          this._save(network, { ...prefs, used: false });
+          const locations = this._locations();
+          delete locations[network];
+          this._saveLocations(locations);
+          this.errors.delete(network);
+        } catch { this.errors.set(network, 'Removal is pending. Reconnect the original local APFS volume, stop any other node using it, and retry with the prepared build. Unrecognized files prevent removal.'); }
+      } else if (operation === 'folder' && !prefs.used && !prefs.enabled && process.platform !== 'win32') {
         const picked = await folder();
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
         if (picked) this._save(network, { ...prefs, folder: fs.realpathSync(picked) });
@@ -178,16 +229,59 @@ class FlorestaSettings {
       return this.status(network);
     } finally { this.inFlight.delete(network); }
   }
+  _remove(network, folder) {
+    const build = this.load(this.root, this.digest);
+    const task = this.remove({ ...build, network, profileDirectory: this.profile, storageDirectory: folder });
+    this.removals.set(network, task);
+    return task.finally(() => this.removals.delete(network));
+  }
+  async prepareErase(confirmRemaining) {
+    // A still-live node keeps the kernel lock. It can leave its own data
+    // pending but must never prevent an explicitly confirmed wallet key erase.
+    await this.stopAll().catch(() => {});
+    const epoch = this.epoch;
+    // Persist only unresolved locations after an explicit wallet erase, so
+    // an absent removable drive cannot hold the wallet keys hostage.
+    const remaining = {};
+    let unreadable = false;
+    let entries = {}, locations = {};
+    try { entries = this._read(); } catch { unreadable = true; }
+    try { locations = this._locations(); } catch { unreadable = true; }
+    for (const network of networks) {
+      const known = Object.hasOwn(locations, network);
+      const entry = entries[network];
+      const folder = known ? locations[network] : entry?.folder ?? null;
+      if (!known && (!entry || entry.used === false) && !this._hasProfileData(network)) continue;
+      try { await this._remove(network, folder); }
+      catch { remaining[network] = folder; }
+    }
+    const paths = Object.entries(remaining).map(([network, folder]) => this._path(network, folder));
+    if (unreadable) paths.push('An unreadable storage location record. Check any location previously selected in Settings.');
+    const consent = !paths.length || await confirmRemaining(paths);
+    if (!consent || this.epoch !== epoch) {
+      if (this.epoch === epoch) { this.closed = false; this.resume(); }
+      return false;
+    }
+    this._saveLocations(remaining);
+    fs.rmSync(this.file, { force: true });
+    return true;
+  }
+  afterErase() {
+    if (this.nodes.size === 0) this.closed = false;
+  }
   async stopAll({ reset = false } = {}) {
     this.closed = true;
     this.epoch++;
     for (const network of this.collection.keys()) this.pauseCollection(network);
-    const nodes = [...this.nodes.values()];
-    await Promise.all(nodes.map(node => node.stop()));
-    this.nodes.clear();
+    const outcomes = await Promise.allSettled([...this.nodes].map(async ([network, node]) => {
+      await node.stop();
+      this.nodes.delete(network);
+    }));
+    await Promise.allSettled(this.removals.values());
     this.errors.clear();
+    if (outcomes.some(outcome => outcome.status === 'rejected')) throw new Error('A local node is still stopping.');
     if (reset) {
-      fs.rmSync(this.file, { force: true }); // Preserve chain data even on an external volume.
+      fs.rmSync(this.file, { force: true });
       this.closed = false;
     }
   }
@@ -205,7 +299,11 @@ function installFlorestaIpc({ ipcMain, settings, trusted, allowed, appLock, dial
     if (op === 'status') return settings.status(network);
     const state = await settings.change(network, op, {
       current,
-      confirm: async () => (await appLock.duringPrompt(() => dialog.showMessageBox(window(), {
+      confirm: async (action, location) => (await appLock.duringPrompt(() => dialog.showMessageBox(window(), action === 'remove' ? {
+        type: 'warning', title: 'Remove local node data', message: 'Remove generated ' + network + ' node data?',
+        detail: 'This removes the chain database, public wallet and channel watches, and verification records in ' + location + '. A future sync starts over.',
+        buttons: ['Remove node data', 'Cancel'], defaultId: 1, cancelId: 1
+      } : {
         type: 'question', title: 'Floresta qualification', message: 'Start a ' + network + ' node?',
         detail: 'Floresta downloads blocks over its own peer connections and stores public wallet and channel watches in the selected node folder. Initial sync and historical backfill can use substantial storage and bandwidth. Your wallet and Lightning channels keep using your selected Electrum server. Sync resumes when you reopen this development build with the same candidate.',
         buttons: ['Start node', 'Cancel'], defaultId: 1, cancelId: 1

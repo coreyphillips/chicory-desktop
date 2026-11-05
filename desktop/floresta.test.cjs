@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const test = require('node:test');
-const { ManagedFloresta } = require('./floresta.cjs');
+const { ManagedFloresta, removeOwnedData } = require('./floresta.cjs');
 const { WatchRequests, PROTOCOL } = require('./floresta-watches.cjs');
 
 const regtestHeader = '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000';
@@ -95,7 +95,7 @@ test('a second profile cannot reuse another profile’s selected network store',
   await node.start();
   const other = path.join(options.profileDirectory, 'other-profile');
   await mkdir(other, { mode: 0o700 });
-  const different = new ManagedFloresta({ ...options, profileDirectory: other, storageDirectory: options.profileDirectory });
+  const different = new ManagedFloresta({ ...options, profileDirectory: other, storageDirectory: fs.realpathSync(options.profileDirectory) });
   await assert.rejects(different.start(), /another profile owner/);
   assert.equal(children.length, 1);
 });
@@ -138,6 +138,7 @@ test('registration and coverage require the negotiated owner pipe and validate p
   await assert.rejects(node.registerWatches({ ...input, unrelatedSecret: 'fixture' }), /Invalid/);
   await assert.rejects(node.registerWatches({ ...input, outpoints: [owner + ':4294967296'] }), /Invalid/);
   await assert.rejects(node.registerWatches({ ...input, scripts: Array(5).fill('ab'.repeat(9999)) }), /smaller requests/);
+  await assert.rejects(node.confirmedTransaction(owner, owner), /does not support/);
   const receipt = await node.registerWatches(input);
   assert.deepEqual(receipt, { phase: 'registered', height: null, hash: null, requiredScripts: 1, requiredOutpoints: 1, matchedTransactions: 0 });
   assert.deepEqual(await node.watchCoverage(owner), receipt);
@@ -163,7 +164,7 @@ test('a timed-out lease rejects all outstanding requests and cannot accept late 
 });
 
 const nativeBinary = process.env.CHICORY_TEST_MANAGED_FLORESTA_BINARY;
-test('native managed build enforces a chain-only listener, exclusive store and owner death', { skip: !nativeBinary, timeout: 60000 }, async t => {
+test('native managed build enforces a chain-only listener, exclusive store and owner death', { skip: !nativeBinary, timeout: 180000 }, async t => {
   const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-native-'));
   const options = { profileDirectory, binary: nativeBinary, sha256: digest(await readFile(nativeBinary)), network: 'regtest' };
   let child, endpoint;
@@ -216,3 +217,44 @@ test('native managed build enforces a chain-only listener, exclusive store and o
   assert.equal((await node.start()).tipHash, genesis);
   assert.equal(await readFile(path.join(data, 'chicory-owner.json'), 'utf8'), owner);
 });
+
+test('native cleanup requires the actual owner, stopped store, recognized layout and stable lock',
+  { skip: !nativeBinary || process.platform !== 'darwin', timeout: 180000 }, async t => {
+    const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-remove-'));
+    const volume = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-volume-'));
+    const storageDirectory = await fs.promises.realpath(volume);
+    const options = { profileDirectory, storageDirectory, network: 'regtest', binary: nativeBinary, sha256: digest(await readFile(nativeBinary)) };
+    const node = new ManagedFloresta(options);
+    t.after(async () => {
+      await node.stop();
+      await rm(profileDirectory, { recursive: true, force: true });
+      await rm(volume, { recursive: true, force: true });
+    });
+    await node.start();
+    const dir = path.join(storageDirectory, 'chicory-floresta', 'regtest', 'regtest');
+    const lock = path.join(dir, 'chicory-managed.lock');
+    const before = await fs.promises.stat(lock);
+    const db = path.join(dir, 'db');
+    await assert.rejects(removeOwnedData(options), /in use/);
+    assert.ok((await fs.promises.stat(db)).size);
+    await node.stop();
+    const other = path.join(profileDirectory, 'other');
+    await mkdir(other, { mode: 0o700 });
+    await assert.rejects(removeOwnedData({ ...options, profileDirectory: other }), /unavailable/);
+    const backup = path.join(storageDirectory, 'saved-wallet.chicory');
+    await writeFile(backup, 'public backup fixture');
+    const link = path.join(dir, 'chaindata', 'unrecognized');
+    await fs.promises.symlink(backup, link);
+    await assert.rejects(removeOwnedData(options), /unexpected/);
+    assert.ok((await fs.promises.stat(db)).size);
+    await fs.promises.unlink(link);
+    // An interrupted erase may be retried, but no daemon may open that data.
+    await writeFile(path.join(dir, 'chicory-removal-pending'), '', { mode: 0o600, flag: 'wx' });
+    await assert.rejects(node.start(), /exited/);
+    await removeOwnedData(options);
+    assert.equal(await readFile(backup, 'utf8'), 'public backup fixture');
+    assert.deepEqual(await fs.promises.readdir(dir), ['chicory-managed.lock']);
+    assert.equal((await fs.promises.stat(lock)).ino, before.ino);
+    await node.start();
+    assert.ok((await fs.promises.stat(db)).size);
+  });

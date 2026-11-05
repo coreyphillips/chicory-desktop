@@ -579,6 +579,19 @@ function createEraser(desktopSession) {
     authorize: () => appLock.takeGrant(),
     busy: () => !!gate.active,
     exclusive: task => gate.run('erase', task),
+    prepareNodeErase: () => {
+      const generation = appLock.generation;
+      const settings = floresta || new FlorestaSettings({ root, profile, digest: null });
+      return settings.prepareErase(async paths => {
+        const { response } = await appLock.duringPrompt(() => dialog.showMessageBox(window, {
+          type: 'warning', title: 'Local node data remains', message: 'Erase wallet keys and accessible data now?',
+          detail: 'Some node records could not be removed. Accessible node data was cleared where possible. Public wallet or channel history may remain in these locations:\n\n' +
+            paths.join('\n') + '\n\nReconnect the original volume and use Remove local node data in the experimental node Settings on a local macOS APFS volume. Other volumes and platforms require manual cleanup of the listed node store with every node stopped. Chicory remembers only the unresolved storage locations.',
+          buttons: ['Erase wallet keys and accessible data', 'Cancel wallet erase'], defaultId: 1, cancelId: 1
+        }));
+        return response === 0 && !stopping && !appLock.required() && generation === appLock.generation;
+      });
+    },
     stopService: async () => {
       erasing = true;
       // The manager stops every engine and waits for each to exit before it
@@ -588,7 +601,6 @@ function createEraser(desktopSession) {
       return outcome;
     },
     stopTor: async () => {
-      await floresta?.stopAll({ reset: true });
       await Promise.resolve(tor?.stop()).catch(() => {});
       tor = undefined; torProxy = undefined; torRequests.clear();
     },
@@ -597,6 +609,7 @@ function createEraser(desktopSession) {
     clearRendererState: () => desktopSession.clearStorageData(),
     startOver: async () => {
       erasing = false;
+      floresta?.afterErase();
       // A new storage key and an empty wallet service, then first-run setup,
       // which creates nothing until asked.
       await ensureManager();

@@ -100,3 +100,73 @@ test('corrupt qualification preferences cannot stop the wallet opening', t => {
   assert.deepEqual(calls, []);
   assert.throws(() => settings.status('regtest'), /could not be read/);
 });
+
+test('removal is explicit and serialized with enable, folder changes and quit', async t => {
+  const { profile, options } = fixture(t);
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const attempts = [];
+  const settings = new FlorestaSettings({ ...options, remove: async input => { attempts.push(input); await pending; } });
+  t.after(() => settings.stopAll());
+  await settings.change('regtest', 'start', yes);
+  await assert.rejects(settings.change('regtest', 'remove', yes), /unavailable/);
+  await settings.change('regtest', 'stop', yes);
+  assert.equal((await settings.change('regtest', 'remove', { ...yes, confirm: async () => false })).storageUsed, true);
+  assert.equal(attempts.length, 0);
+  const removing = settings.change('regtest', 'remove', yes);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(attempts.map(({ network, profileDirectory, storageDirectory }) => [network, profileDirectory, storageDirectory]), [['regtest', profile, null]]);
+  await assert.rejects(settings.change('regtest', 'start', yes), /busy/);
+  await assert.rejects(settings.change('regtest', 'folder', yes), /busy/);
+  let finished = false;
+  const quitting = settings.stopAll().then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  release();
+  assert.equal((await removing).storageUsed, false);
+  await quitting;
+  assert.equal(settings.status('regtest').requested, false);
+});
+
+test('an offline drive remains visible across an explicit wallet erase and is retried on reconnect', async t => {
+  const { options, profile } = fixture(t);
+  // Use temporary path names only. This mock physically represents a disconnected selected volume.
+  const volume = path.join(profile, 'fixture-offline-volume');
+  const taken = [];
+  let online = false;
+  const settings = new FlorestaSettings({ ...options, remove: async ({ network, storageDirectory }) => {
+    taken.push([network, storageDirectory]);
+    if (storageDirectory && !online) throw new Error('Volume unavailable');
+  } });
+  for (const [network, folder] of [['mainnet', null], ['regtest', volume]]) {
+    settings._save(network, { enabled: false, used: true, digest, folder });
+  }
+  const pending = path.join(volume, 'chicory-floresta', 'regtest');
+  assert.equal(settings.status('regtest').volumeAvailable, false);
+  await assert.rejects(settings.change('regtest', 'folder', yes), /unavailable/);
+  assert.equal(await settings.prepareErase(async paths => { assert.deepEqual(paths, [pending]); return false; }), false);
+  assert.equal(fs.existsSync(settings.file), true);
+  assert.equal(await settings.prepareErase(async paths => { assert.deepEqual(paths, [pending]); return true; }), true);
+  assert.equal(fs.existsSync(settings.file), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings.cleanupFile)), { regtest: volume });
+  assert.deepEqual(taken.slice(-2), [['mainnet', null], ['regtest', volume]]);
+  const reopened = new FlorestaSettings({ ...options, digest: 'd0'.repeat(32), remove: settings.remove });
+  assert.equal(reopened.status('regtest').requested, false);
+  assert.equal(reopened.status('regtest').storage, volume);
+  assert.equal(reopened.status('regtest').storageUsed, true);
+  fs.mkdirSync(volume, { mode: 0o700 });
+  online = true;
+  assert.equal(reopened.status('regtest').volumeAvailable, true);
+  assert.equal((await reopened.change('regtest', 'remove', yes)).storageUsed, false);
+  assert.equal(fs.existsSync(reopened.cleanupFile), false);
+});
+
+test('a missing source candidate can still erase wallet keys after a native disclosure', async t => {
+  const { settings, options } = fixture(t);
+  settings._save('testnet', { digest, folder: null, used: true, enabled: true });
+  const normalBuild = new FlorestaSettings({ ...options, digest: null, load: () => { throw new Error('No trusted build'); } });
+  let asked = false;
+  assert.equal(await normalBuild.prepareErase(async paths => { asked = true; assert.equal(paths.length, 1); return true; }), true);
+  assert.equal(asked, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(normalBuild.cleanupFile)), { testnet: null });
+});

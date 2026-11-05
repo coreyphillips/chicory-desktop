@@ -1,13 +1,17 @@
 'use strict';
 
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = fs.promises;
 const net = require('node:net');
 const path = require('node:path');
+const { promisify } = require('node:util');
 const { setTimeout: delay } = require('node:timers/promises');
 const { WatchRequests, PROTOCOL, register, coverage } = require('./floresta-watches.cjs');
+
+const { readConfirmedTransaction } = require('./floresta-transactions.cjs');
+const { openConfirmedWallet } = require('./floresta-confirmed-reads.cjs');
 
 const NETWORKS = {
   mainnet: ['bitcoin', '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f'],
@@ -48,6 +52,10 @@ async function checkSpace(directory) {
 async function prepareStorage(profileDirectory, storageDirectory, network) {
   const profile = await fsp.realpath(profileDirectory);
   const parent = storageDirectory ? await fsp.realpath(storageDirectory) : profile;
+  if (storageDirectory && parent !== storageDirectory) throw new Error('Reselect the original local node volume.');
+  if (parent !== profile && (parent.startsWith(profile + path.sep) || parent.split(path.sep).includes('chicory-floresta'))) {
+    throw new Error('Select the profile root or a separate storage folder outside wallet and node data.');
+  }
   const stat = await fsp.stat(parent);
   if (!stat.isDirectory() || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & 0o022)))) {
     throw new Error('Choose a storage folder owned by this user without shared write permissions.');
@@ -82,6 +90,8 @@ async function prepareStorage(profileDirectory, storageDirectory, network) {
   if (!markerStat.isFile() || markerStat.size > 1024 || (await fsp.readFile(file, 'utf8')) !== owner) {
     throw new Error('This local node directory has another profile owner or an incompatible storage format.');
   }
+  // App-owned profile and external volume markers must never alias other files.
+  if (markerStat.nlink !== 1) throw new Error('Invalid local node storage owner marker.');
   if (network !== 'mainnet') {
     // Upstream appends a second network-specific directory. A selected volume
     // must never redirect the actual chain store to another profile via a link.
@@ -92,6 +102,27 @@ async function prepareStorage(profileDirectory, storageDirectory, network) {
   return { dir, identity };
 }
 
+async function removeOwnedData({ profileDirectory, storageDirectory, network, binary, sha256 }) {
+  if (process.platform !== 'darwin') throw new Error('Automatic node data removal is qualified only on macOS.');
+  if (!Object.hasOwn(NETWORKS, network)) throw new Error('Unsupported local node network.');
+  const profile = await fsp.realpath(profileDirectory);
+  const parent = storageDirectory ? await fsp.realpath(storageDirectory) : profile;
+  if (storageDirectory && parent !== storageDirectory || parent !== profile && parent.startsWith(profile + path.sep) ||
+      parent.split(path.sep).includes('chicory-floresta')) throw new Error('The selected storage location changed.');
+  const dir = path.join(parent, 'chicory-floresta', network);
+  const owner = sha(profile).toString('hex');
+  await verifyBinary(binary, sha256);
+  // The verified helper validates the private owner marker and each allowed
+  // database entry while holding the running daemon's kernel lock. It never
+  // starts network services. A timeout leaves a durable retry marker.
+  const args = ['--managed-cleanup-for', owner, '--data-dir', dir, '--network', NETWORKS[network][0]];
+  const { stdout } = await promisify(execFile)(binary, args, { cwd: dir, env: { HOME: dir, TMPDIR: dir },
+    timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 }).catch(() => {
+    throw new Error('Node storage is unavailable, in use, or contains unexpected files. Reconnect the original volume and retry.');
+  });
+  if (stdout.trim() !== 'chicory.storage-removed/1') throw new Error('The verified node did not confirm data removal.');
+}
+
 function validateStatus(state, network) {
   const [name, genesis] = NETWORKS[network];
   const match = /^127\.0\.0\.1:([1-9]\d{0,4})$/.exec(state.endpoint);
@@ -100,7 +131,16 @@ function validateStatus(state, network) {
       !Number.isSafeInteger(state.validated) || state.validated < 0 || state.validated > state.height ||
       typeof state.tip !== 'string' || !/^[a-f0-9]{64}$/.test(state.tip) || typeof state.ibd !== 'boolean' ||
       (state.height === 0 && state.tip !== genesis)) throw new Error('The local node returned an invalid identity or chain state.');
-  return { port: Number(match[1]), height: state.height, validatedHeight: state.validated, tipHash: state.tip,
+  const historical = state.historical;
+  const height = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+  if (historical !== undefined && (!['pending', 'verifying', 'verified', 'error'].includes(historical?.state) ||
+      !height(historical.height) || !height(historical.target) || historical.height > historical.target ||
+      (historical.state === 'verified' && (historical.height !== historical.target || historical.target > state.height ||
+        state.ibd || state.validated !== state.height)))) {
+    throw new Error('The local node returned an invalid historical validation status.');
+  }
+  return { historicalVerification: historical?.state ?? 'unknown', historicalHeight: historical?.height ?? null,
+    historicalTarget: historical?.target ?? null, port: Number(match[1]), height: state.height, validatedHeight: state.validated, tipHash: state.tip,
     tipSynced: !state.ibd && state.height === state.validated };
 }
 
@@ -148,15 +188,24 @@ class ManagedFloresta {
     if (!this.watch) throw new Error('Start the local node before checking watch coverage.');
     return this.watch.request(command);
   }
+  async confirmedTransaction(owner, txid) {
+    const watch = this.watch;
+    if (!watch?.active || !watch.transactionsActive) throw new Error('The running local node does not support confirmed transaction proofs.');
+    return readConfirmedTransaction(command => watch.request(command), owner, txid);
+  }
+  openConfirmedWallet(owner, signal) {
+    return openConfirmedWallet(this.watch, owner, signal, () => this.status());
+  }
   _state(phase, fields = {}) {
     this.state = { network: this.options.network, phase, error: null, height: null, validatedHeight: null, tipHash: null,
-      tipSynced: null, walletScan: 'unqualified', historicalVerification: 'unknown', walletReady: false, ...fields };
+      tipSynced: null, walletScan: 'unqualified', historicalVerification: 'unknown', historicalHeight: null, historicalTarget: null, walletReady: false, ...fields };
     this.onStatus(this.status());
   }
   start() {
     if (this.task) return this.controller.signal.aborted ? this.task.then(() => this.start()) : this.ready.then(() => this.status());
     const controller = new AbortController();
     this.controller = controller;
+    this.stopError = null;
     let ready;
     this.ready = new Promise((resolve, reject) => { ready = { resolve, reject }; });
     this.task = this._run(controller.signal, ready).catch(error => {
@@ -175,8 +224,9 @@ class ManagedFloresta {
     let timer;
     try {
       await Promise.race([this.task, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Local node shutdown has not finished. Its storage remains locked.')), 22000);
+        timer = setTimeout(() => reject(new Error('Local node shutdown has not finished. Its storage remains locked.')), 65000);
       })]);
+      if (this.stopError) throw this.stopError;
     } finally { clearTimeout(timer); }
   }
   async _run(signal, ready) {
@@ -217,7 +267,9 @@ class ManagedFloresta {
       watch.close(failure || cancelled());
       connection.abort();
       child.stdin.destroy(); // Close the OS pipe, including Windows. EOF releases the child.
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 15000);
+      // Upstream flush hashes the complete preallocated header and index maps.
+      // On a slow disk this can exceed the normal heartbeat deadline.
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 60000);
     };
     const fail = error => { failure = error; stop(); };
     const watch = new WatchRequests(line => child.stdin.write(line, error => {
@@ -246,7 +298,10 @@ class ManagedFloresta {
         if (stopping || signal.aborted) return;
         first = false;
         watch.active = message.watchProtocol === PROTOCOL;
-        this._state('running', { height: state.height, validatedHeight: state.validatedHeight, tipHash: state.tipHash, tipSynced: state.tipSynced });
+        watch.transactionsActive = message.transactionProtocol === 'chicory.tx/1';
+        watch.confirmedReadsActive = message.confirmedReadsProtocol === 'chicory.confirmed/1';
+        this._state('running', { height: state.height, validatedHeight: state.validatedHeight, tipHash: state.tipHash, tipSynced: state.tipSynced,
+          historicalVerification: state.historicalVerification, historicalHeight: state.historicalHeight, historicalTarget: state.historicalTarget });
         heartbeat();
         ready.resolve(this.status());
       } finally { checking = false; }
@@ -279,6 +334,7 @@ class ManagedFloresta {
         });
         child.once('close', resolve);
       });
+      if (signal.aborted && exitCode !== 0) this.stopError = new Error('The local node did not exit cleanly. Retry before changing its storage.');
       if (failure) throw failure;
       if (exitCode === 73) throw new Error('The local node data directory is in use by another process.');
       return !first;
@@ -294,4 +350,4 @@ class ManagedFloresta {
   }
 }
 
-module.exports = { ManagedFloresta };
+module.exports = { ManagedFloresta, removeOwnedData };

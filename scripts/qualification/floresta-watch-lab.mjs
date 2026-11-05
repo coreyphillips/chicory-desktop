@@ -9,6 +9,8 @@ import os from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import supervisor from '../../desktop/floresta.cjs';
 import { REGTEST_GENESIS } from './guards.mjs';
+import { checkpointSize, verifyManagedParents } from './floresta-parent-lab.mjs';
+import { confirmedFixture } from './floresta-confirmed-lab.mjs';
 
 export async function qualifyManagedWatches({ binary, root, peerPort, proof, script, outpoint, height, blockHash }) {
   assert.equal(await proof('getblockhash', [0]), REGTEST_GENESIS);
@@ -39,6 +41,22 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
     throw new Error(label + ' timed out: ' + JSON.stringify(last));
   }
   const atTip = state => state.phase === 'caught-up' && state.height === height && state.hash === blockHash;
+  const verifyConfirmed = manifest.patches?.['confirmed-reads.patch'] && confirmedFixture({
+    node, proof, waitFor, owners: { miner: hash('regtest mining wallet'), wallet: owner }, script
+  });
+  async function verifyHistory(target, tip, tipHash) {
+    const anchor = await proof('getblockhash', [target]);
+    const status = await waitFor('Historical verification', () => node.status(), state => {
+      if (state.historicalVerification === 'error') throw new Error('Managed historical verification failed at target ' + target);
+      return state.historicalVerification === 'verified' && state.historicalHeight === target &&
+        state.historicalTarget === target && state.height === tip && state.validatedHeight === tip &&
+        state.tipHash === tipHash && state.tipSynced;
+    });
+    assert.equal(await proof('getblockhash', [tip]), status.tipHash);
+    assert.equal(await proof('getblockhash', [target]), anchor);
+    return { state: status.historicalVerification, height: status.historicalHeight,
+      target: status.historicalTarget, referenceAnchor: anchor, tip, tipHash };
+  }
   const start = performance.now();
   let handingOff = false;
   try {
@@ -55,10 +73,20 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
     assert.equal(funded.matchedTransactions, 1);
     assert.equal(negative.matchedTransactions, 0);
     assert.deepEqual(await node.registerWatches(watch), funded);
+    const lookup = { node, owner, otherOwner: other, proof, matchedHeight: height, matchedTxid: outpoint.split(':')[0], parentHeight: 1 };
+    const parents = { initial: await verifyManagedParents(lookup) };
+    // Fresh regtest starts at genesis and validates the fixture blocks on the
+    // foreground chain. Reopening replays to the stored validation anchor.
+    const historical = { initial: await verifyHistory(0, height, blockHash) };
+    const confirmed = verifyConfirmed ? { initial: await verifyConfirmed(height, blockHash) } : null;
     await node.stop();
+    const checkpoint = await checkpointSize(parent);
     await node.start();
     const recovered = await waitFor('Recovered durable scan', () => node.watchCoverage(owner), atTip);
     assert.deepEqual(recovered, funded);
+    parents.reopened = await verifyManagedParents(lookup);
+    historical.reopened = await verifyHistory(height, height, blockHash);
+    if (confirmed) confirmed.reopened = await verifyConfirmed(height, blockHash);
     // Adding an existing funded script to an initially empty wallet must find
     // history older than registration, without losing the other owner's data.
     await node.registerWatches({ owner: other, scripts: [script], outpoints: [] });
@@ -78,7 +106,7 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
     const afterExpansion = await derive(105);
     assert.equal(afterExpansion.matchedTransactions, 1);
     assert.equal(afterExpansion.requiredScripts, 106);
-    const evidence = { funded, negative, recovered, expanded, beforeExpansion, afterExpansion,
+    const evidence = { funded, negative, recovered, expanded, beforeExpansion, afterExpansion, parents, checkpoint, historical, confirmed,
       walletReady: node.status().walletReady, forks: [],
       environment: { platform: process.platform, arch: process.arch, cpu: os.cpus()[0].model,
         memoryBytes: os.totalmem(), proofPeer: 'loopback', network: 'regtest', binarySha256: manifest.sha256,
@@ -91,7 +119,14 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
         waitFor('Fork-specific watch coverage', () => node.watchCoverage(id), reached)));
       assert.equal(funded.matchedTransactions, expectedMatches);
       assert.equal(detached.matchedTransactions, stage === 'beforeFork' ? 1 : 0);
-      evidence.forks.push({ stage, funded, detached });
+      const proofs = await verifyManagedParents({ node, owner, proof, matchedHeight: 103, parentHeight: 2,
+        ...(stage === 'beforeFork' ? { matchedTxid: outpoint.split(':')[0] } : { detachedTxid: outpoint.split(':')[0] }) });
+      if (stage === 'afterFork') {
+        assert.equal(await node.confirmedTransaction(forkOwner, proofs.parent.txid), null);
+      }
+      const history = await verifyHistory(height, tipHeight, tipHash);
+      evidence.forks.push({ stage, funded, detached, proofs, historical: history,
+        confirmed: verifyConfirmed ? await verifyConfirmed(tipHeight, tipHash) : null });
     } };
   } finally {
     if (!handingOff) await node.stop();

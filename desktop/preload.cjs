@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
       status: network => ipcRenderer.invoke('floresta:settings', network, 'status'),
       start: network => ipcRenderer.invoke('floresta:settings', network, 'start'),
       stop: network => ipcRenderer.invoke('floresta:settings', network, 'stop'),
+      remove: network => ipcRenderer.invoke('floresta:settings', network, 'remove'),
       folder: network => ipcRenderer.invoke('floresta:settings', network, 'folder'),
     }),
   } : {}),

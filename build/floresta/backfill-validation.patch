@@ -1,0 +1,1000 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 08073a4..59ac718 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1221,6 +1221,7 @@ dependencies = [
+  "rustreexo",
+  "serde",
+  "serde_json",
++ "tempfile",
+  "tokio",
+  "tracing",
+  "ureq",
+diff --git a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs b/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
+index d90b247..5eef880 100644
+--- a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
++++ b/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
+@@ -1220,11 +1220,23 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
+     }
+ 
+     fn mark_block_as_valid(&self, block: BlockHash) -> Result<(), BlockchainError> {
+-        let header = self.get_disk_block_header(&block)?;
++        // The foreground may have moved while a replay was running. Validate and promote
++        // under the same lock so a detached block cannot overwrite the active height.
++        let mut inner = write_lock!(self);
++        let header = inner
++            .chainstore
++            .get_header(&block)?
++            .ok_or(BlockchainError::BlockNotPresent)?;
+         let height = header.try_height()?;
+-
+-        let new_header = DiskBlockHeader::FullyValid(*header, height);
+-        self.update_header(&new_header)
++        if inner.chainstore.get_block_hash(height)? != Some(block) {
++            return Err(BlockchainError::OrphanOrInvalidBlock);
++        }
++        if matches!(header, DiskBlockHeader::FullyValid(_, _)) {
++            return Ok(());
++        }
++        Ok(inner
++            .chainstore
++            .save_header(&DiskBlockHeader::FullyValid(*header, height))?)
+     }
+ 
+     fn mark_chain_as_assumed(
+@@ -1232,7 +1244,8 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
+         acc: Stump,
+         assumed_hash: BlockHash,
+     ) -> Result<bool, BlockchainError> {
+-        let mut curr_header = self.get_disk_block_header(&assumed_hash)?;
++        let anchor = self.get_disk_block_header(&assumed_hash)?;
++        let mut curr_header = anchor;
+ 
+         while let Ok(header) = self.get_disk_block_header(&curr_header.block_hash()) {
+             if self.is_genesis(&header) {
+@@ -1244,11 +1257,9 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
+             curr_header = self.get_ancestor(&header)?;
+         }
+ 
+-        self.update_view(curr_header.try_height()?, &curr_header, acc.clone())?;
+-
+-        let mut guard = write_lock!(self);
+-        guard.best_block.validation_index = assumed_hash;
+-        guard.acc = acc;
++        // Persist the assumed accumulator at its actual block, so startup can reload
++        // the same stump even if the node exits before the next block arrives.
++        self.update_view(anchor.try_height()?, &anchor, acc)?;
+ 
+         Ok(true)
+     }
+@@ -1429,16 +1440,15 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
+         final_height: u32,
+         acc: Stump,
+     ) -> Result<super::partial_chain::PartialChainState, BlockchainError> {
++        if initial_height > final_height {
++            return Err(BlockchainError::BadValidationIndex);
++        }
+         let blocks = (0..=final_height)
+             .map(|height| {
+-                let hash = self
+-                    .get_block_hash(height)
+-                    .expect("Block should be present");
+-                *self
+-                    .get_disk_block_header(&hash)
+-                    .expect("Block should be present")
++                let hash = self.get_block_hash(height)?;
++                self.get_disk_block_header(&hash).map(|header| *header)
+             })
+-            .collect();
++            .collect::<Result<_, _>>()?;
+ 
+         let inner = PartialChainStateInner {
+             error: None,
+@@ -1688,6 +1698,39 @@ mod test {
+         }
+     }
+ 
++    #[test]
++    fn replay_preserves_persisted_stump_at_the_selected_block() {
++        let mut parsed = include_str!("../../testdata/blocks.txt")
++            .lines()
++            .map(|line| deserialize_hex::<Block>(line).unwrap());
++        let _genesis = parsed.next().unwrap();
++        let block = parsed.next().unwrap();
++        let chain = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled);
++        chain.accept_header(block.header).unwrap();
++        chain
++            .connect_block(&block, Proof::default(), HashMap::new(), Vec::new())
++            .unwrap();
++        let expected = chain.acc();
++        assert_ne!(expected, Stump::default());
++        chain.mark_block_as_valid(block.block_hash()).unwrap();
++        assert_eq!(
++            chain.get_roots_for_block(1).unwrap(),
++            Some(expected.clone())
++        );
++
++        let assumed = setup_test_chain(Network::Regtest, AssumeValidArg::Disabled);
++        assumed.accept_header(block.header).unwrap();
++        assumed
++            .mark_chain_as_assumed(expected.clone(), block.block_hash())
++            .unwrap();
++        assert_eq!(assumed.get_validation_index().unwrap(), 1);
++        assert_eq!(assumed.get_roots_for_block(1).unwrap(), Some(expected));
++        assert_eq!(
++            assumed.get_roots_for_block(0).unwrap().unwrap_or_default(),
++            Stump::default()
++        );
++    }
++
+     #[test]
+     fn test_calc_next_work_required() {
+         let first_block: BlockHeader = deserialize_hex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a008f4d5fae77031e8ad22203").unwrap();
+diff --git a/crates/floresta-chain/src/pruned_utreexo/mod.rs b/crates/floresta-chain/src/pruned_utreexo/mod.rs
+index 1aa2b2a..2b255bf 100644
+--- a/crates/floresta-chain/src/pruned_utreexo/mod.rs
++++ b/crates/floresta-chain/src/pruned_utreexo/mod.rs
+@@ -158,6 +158,11 @@ pub trait UpdatableChainstate {
+     fn handle_transaction(&self) -> Result<(), BlockchainError>;
+     /// Persists our data. Should be invoked periodically.
+     fn flush(&self) -> Result<(), BlockchainError>;
++    /// First historical validation failure, if this backend is replaying a partial chain.
++    fn replay_failure(&self) -> Option<String> {
++        None
++    }
++
+     /// Toggle IBD on/off
+     fn toggle_ibd(&self, is_ibd: bool);
+     /// Tells this blockchain to consider this block invalid, and not build on top of it
+diff --git a/crates/floresta-chain/src/pruned_utreexo/partial_chain.rs b/crates/floresta-chain/src/pruned_utreexo/partial_chain.rs
+index d7c7c50..819c9c5 100644
+--- a/crates/floresta-chain/src/pruned_utreexo/partial_chain.rs
++++ b/crates/floresta-chain/src/pruned_utreexo/partial_chain.rs
+@@ -59,7 +59,7 @@ pub(crate) struct PartialChainStateInner {
+     pub(crate) final_height: u32,
+     /// The error that occurred during validation, if any. It is here so we can
+     /// pull that afterwards.
+-    pub(crate) error: Option<BlockValidationErrors>,
++    pub(crate) error: Option<String>,
+     /// The consensus parameters, we need this to validate the blocks.
+     pub(crate) consensus: Consensus,
+     /// Whether we assume the signatures in this interval as valid, this is used to
+@@ -139,16 +139,15 @@ impl PartialChainStateInner {
+     ) -> Result<u32, BlockchainError> {
+         let height = self.current_height + 1;
+ 
+-        if let Err(BlockchainError::BlockValidation(e)) = self.validate_block(block, height, inputs)
+-        {
+-            self.error = Some(e.clone());
+-            return Err(BlockchainError::BlockValidation(e));
++        if let Err(error) = self.validate_block(block, height, inputs) {
++            self.error = Some(error.to_string());
++            return Err(error);
+         }
+ 
+         let acc = match Consensus::update_acc(&self.current_acc, block, height, proof, del_hashes) {
+             Ok(acc) => acc,
+             Err(_) => {
+-                self.error = Some(BlockValidationErrors::InvalidProof);
++                self.error = Some(BlockValidationErrors::InvalidProof.to_string());
+                 return Err(BlockchainError::InvalidProof);
+             }
+         };
+@@ -177,13 +176,15 @@ impl PartialChainStateInner {
+         self.consensus.check_block(block, height)?;
+ 
+         let prev_block = self.get_ancestor(height)?;
+-        if block.header.prev_blockhash != prev_block.block_hash() {
++        if block.header.prev_blockhash != prev_block.block_hash()
++            || self.get_block(height).map(BlockHeader::block_hash) != Some(block.block_hash())
++        {
+             return Err(BlockValidationErrors::BlockExtendsAnOrphanChain)?;
+         }
+ 
+         // Validate block transactions
+         let subsidy = self.consensus.get_subsidy(height);
+-        let verify_script = self.assume_valid;
++        let verify_script = !self.assume_valid;
+ 
+         #[cfg(feature = "bitcoinkernel")]
+         let flags = self
+@@ -247,7 +248,7 @@ impl PartialChainState {
+         self.inner()
+             .blocks
+             .iter()
+-            .take(self.inner().current_height as usize)
++            .take(self.inner().current_height as usize + 1)
+             .collect()
+     }
+ 
+@@ -279,6 +280,10 @@ impl UpdatableChainstate for PartialChainState {
+ 
+     //these are no-ops, you can call them, but they won't do anything
+ 
++    fn replay_failure(&self) -> Option<String> {
++        self.inner().error.clone()
++    }
++
+     fn flush(&self) -> Result<(), BlockchainError> {
+         // no-op: we keep everything on memory
+         Ok(())
+@@ -520,6 +525,63 @@ mod tests {
+         .into()
+     }
+ 
++    #[cfg(feature = "bitcoinkernel")]
++    #[test]
++    fn managed_replay_rejects_invalid_input_script_without_advancing() {
++        use crate::pruned_utreexo::utxo_data::UtxoData;
++        use bitcoin::hashes::Hash;
++        use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
++
++        let mut blocks = include_str!("../../testdata/blocks.txt")
++            .lines()
++            .map(parse_block);
++        let genesis = blocks.next().unwrap();
++        let mut block = blocks.next().unwrap();
++        let outpoint = OutPoint::new(Txid::all_zeros(), 0);
++        let input = TxIn {
++            previous_output: outpoint,
++            ..Default::default()
++        };
++        let output = TxOut {
++            value: Amount::from_sat(1000),
++            script_pubkey: ScriptBuf::new(),
++        };
++        block.txdata.push(Transaction {
++            version: bitcoin::transaction::Version::TWO,
++            lock_time: bitcoin::absolute::LockTime::ZERO,
++            input: vec![input],
++            output: vec![output.clone()],
++        });
++        block.header.merkle_root = block.compute_merkle_root().unwrap();
++        let mut spent = output;
++        spent.script_pubkey = ScriptBuf::from_bytes(vec![0xac]); // OP_CHECKSIG with no signature or public key
++        let inputs = HashMap::from([(
++            outpoint,
++            UtxoData {
++                txout: spent,
++                is_coinbase: false,
++                creation_height: 0,
++                creation_time: 0,
++            },
++        )]);
++        let chain = get_empty_pchain(vec![genesis.header, block.header]);
++        chain
++            .inner()
++            .validate_block(&block, 1, inputs.clone())
++            .unwrap(); // assume signatures in the control
++        chain.inner_mut().assume_valid = false;
++        let error = chain
++            .connect_block(&block, Proof::default(), inputs, vec![])
++            .unwrap_err();
++        assert!(
++            matches!(error, BlockchainError::TransactionError(ref tx) if matches!(tx.error, BlockValidationErrors::ScriptValidationError(_))),
++            "{error:?}"
++        );
++        assert_eq!(chain.inner().current_height, 0);
++        assert_eq!(chain.inner().current_acc, Stump::default());
++        assert!(chain.has_invalid_blocks());
++    }
++
+     #[test]
+     fn test_updating_single_chain() {
+         let blocks = include_str!("../../testdata/blocks.txt");
+diff --git a/crates/floresta-node/src/florestad.rs b/crates/floresta-node/src/florestad.rs
+index ce29bf5..a04bf1e 100644
+--- a/crates/floresta-node/src/florestad.rs
++++ b/crates/floresta-node/src/florestad.rs
+@@ -382,7 +382,11 @@ impl Florestad {
+         let blockchain_state = Arc::new(Self::load_chain_state(
+             data_dir.clone(),
+             self.config.network,
+-            self.config.assume_valid,
++            if self.config.managed_stdio {
++                AssumeValidArg::Disabled
++            } else {
++                self.config.assume_valid
++            },
+         )?);
+ 
+         #[cfg(feature = "compact-filters")]
+@@ -418,7 +422,9 @@ impl Florestad {
+             .map(|addr| Self::resolve_hostname(addr, 9050))
+             .transpose()?;
+ 
++        let historical = self.config.managed_stdio.then(floresta_wire::Historical::default);
+         let config = UtreexoNodeConfig {
++            historical: historical.clone(),
+             disable_dns_seeds: self.config.disable_dns_seeds,
+             network: self.config.network,
+             pow_fraud_proofs: false,
+@@ -426,8 +432,12 @@ impl Florestad {
+             datadir: data_dir.clone(),
+             fixed_peer: self.config.connect.clone(),
+             compact_filters: self.config.cfilters,
+-            assume_utreexo: self.config.assumeutreexo_value.clone().or(assume_utreexo),
+-            backfill: self.config.backfill,
++            assume_utreexo: if self.config.managed_stdio {
++                Some(ChainParams::get_assume_utreexo(self.config.network))
++            } else {
++                self.config.assumeutreexo_value.clone().or(assume_utreexo)
++            },
++            backfill: self.config.managed_stdio || self.config.backfill,
+             filter_start_height: self.config.filters_start_height,
+             user_agent: self.config.user_agent.clone(),
+             allow_v1_fallback: self.config.allow_v1_fallback,
+@@ -534,6 +544,7 @@ impl Florestad {
+                 self.stop_signal.clone(),
+             )?;
+             electrum_server.restrict_to_chain_health();
++            let historical = historical.expect("managed status constructed with managed config");
+             let endpoint = non_tls_listener.local_addr()?;
+             let chain = blockchain_state.clone();
+             let network = self.config.network;
+@@ -551,6 +562,7 @@ impl Florestad {
+                     let status = serde_json::json!({
+                         "protocol": "chicory.floresta/1", "watchProtocol": "chicory.watch/1",
+                         "network": network.to_string(),
++                        "historical": historical.snapshot(height, validated, chain.is_in_ibd(), |at| chain.get_block_hash(at).ok()),
+                         "endpoint": endpoint.to_string(), "genesis": genesis.to_string(),
+                         "height": height, "tip": tip.to_string(), "validated": validated, "ibd": chain.is_in_ibd()
+                     });
+diff --git a/crates/floresta-wire/Cargo.toml b/crates/floresta-wire/Cargo.toml
+index 5817b6a..5788270 100644
+--- a/crates/floresta-wire/Cargo.toml
++++ b/crates/floresta-wire/Cargo.toml
+@@ -19,6 +19,7 @@ bip324 = { version = "0.10", features = [ "tokio" ] }
+ bitcoin = { workspace = true }
+ dns-lookup = { workspace = true }
+ rand = { workspace = true }
++tempfile = { workspace = true }
+ rustls = "=0.23.27"
+ rustreexo = { workspace = true }
+ serde = { workspace = true }
+diff --git a/crates/floresta-wire/src/lib.rs b/crates/floresta-wire/src/lib.rs
+index ec09beb..ef1c301 100644
+--- a/crates/floresta-wire/src/lib.rs
++++ b/crates/floresta-wire/src/lib.rs
+@@ -36,6 +36,7 @@ pub use p2p_wire::node_context;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub use p2p_wire::node_interface;
+ pub use p2p_wire::transport::TransportProtocol;
++pub use p2p_wire::historical::Historical;
+ pub use p2p_wire::UtreexoNodeConfig;
+ 
+ /// NodeHooks is a trait that defines the hooks that a node can use to interact with the network
+diff --git a/crates/floresta-wire/src/p2p_wire/historical.rs b/crates/floresta-wire/src/p2p_wire/historical.rs
+new file mode 100644
+index 0000000..fb46ffb
+--- /dev/null
++++ b/crates/floresta-wire/src/p2p_wire/historical.rs
+@@ -0,0 +1,385 @@
++// SPDX-License-Identifier: MIT OR Apache-2.0
++
++//! Managed replay checkpoints are private to the directory locked by the daemon.
++//! Legacy .sync_node_state files cannot establish or advance historical verification.
++use std::fs::File;
++use std::io::{self, Read, Write};
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, Mutex};
++
++use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
++use bitcoin::BlockHash;
++use floresta_chain::AssumeUtreexoValue;
++use rand::{rngs::OsRng, RngCore};
++use rustreexo::stump::Stump;
++use serde::{Deserialize, Serialize};
++use tempfile::Builder;
++
++#[derive(Clone, Debug, Serialize)]
++pub struct Progress {
++    state: &'static str,
++    height: u32,
++    target: u32,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    error: Option<String>,
++    #[serde(skip)]
++    anchor: Option<BlockHash>,
++}
++
++impl Default for Progress {
++    fn default() -> Self {
++        Self {
++            state: "pending",
++            height: 0,
++            target: 0,
++            error: None,
++            anchor: None,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Default)]
++pub struct Historical(Arc<Mutex<Progress>>);
++
++impl Historical {
++    pub(crate) fn begin(&self, height: u32, anchor: &AssumeUtreexoValue) {
++        *self.0.lock().unwrap() = Progress {
++            state: "verifying",
++            height,
++            target: anchor.height,
++            error: None,
++            anchor: Some(anchor.block_hash),
++        };
++    }
++
++    pub(crate) fn failed(&self) -> bool {
++        self.0.lock().unwrap().state == "error"
++    }
++
++    pub(crate) fn advance(&self, height: u32) {
++        self.0.lock().unwrap().height = height;
++    }
++
++    pub(crate) fn verified(&self) {
++        self.0.lock().unwrap().state = "verified";
++    }
++
++    pub(crate) fn fail(&self, message: &str) {
++        let mut state = self.0.lock().unwrap();
++        state.state = "error";
++        state.error = Some(message.to_owned());
++    }
++
++    pub fn snapshot(
++        &self,
++        tip: u32,
++        validated: u32,
++        ibd: bool,
++        hash: impl FnOnce(u32) -> Option<BlockHash>,
++    ) -> Progress {
++        let mut result = self.0.lock().unwrap().clone();
++        if result.state == "verified" {
++            if hash(result.target) != result.anchor {
++                result.state = "error";
++                result.error = Some("Historical anchor left the active chain".to_owned());
++            } else if ibd || validated != tip {
++                result.state = "verifying";
++            }
++        }
++        result
++    }
++}
++
++const KEY_FILE: &str = "chicory-backfill-v1.key";
++const STATE_FILE: &str = "chicory-backfill-v1.state";
++const MAX_RECORD: usize = 16384;
++const MAC_SIZE: usize = 32;
++
++fn invalid(message: &str) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, message)
++}
++
++fn read_bounded(path: &Path, max: usize) -> io::Result<Vec<u8>> {
++    let mut bytes = Vec::new();
++    File::open(path)?
++        .take(max as u64 + 1)
++        .read_to_end(&mut bytes)?;
++    if bytes.len() > max {
++        return Err(invalid("Oversized historical checkpoint"));
++    }
++    Ok(bytes)
++}
++
++fn save(path: &Path, bytes: &[u8]) -> io::Result<()> {
++    let dir = path
++        .parent()
++        .ok_or_else(|| invalid("Missing checkpoint directory"))?;
++    let name = path
++        .file_name()
++        .ok_or_else(|| invalid("Missing checkpoint filename"))?;
++    let mut staging = name.to_os_string();
++    staging.push(".tmp");
++    // The daemon holds the data directory lock. Only an interrupted previous write may
++    // have left this exact staging pathname. Removing a symlink never follows its target.
++    match std::fs::remove_file(dir.join(&staging)) {
++        Ok(()) => {}
++        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
++        Err(error) => return Err(error),
++    }
++    let mut file = Builder::new()
++        .prefix(&staging)
++        .rand_bytes(0)
++        .tempfile_in(dir)?;
++    file.write_all(bytes)?;
++    file.as_file().sync_all()?;
++    file.persist(path)?;
++    #[cfg(unix)]
++    File::open(dir)?.sync_all()?;
++    Ok(())
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Record {
++    version: u8,
++    target: u32,
++    anchor: [u8; 32],
++    height: u32,
++    hash: [u8; 32],
++    complete: bool,
++    stump: Vec<u8>,
++}
++
++fn encode_stump(stump: &Stump) -> io::Result<Vec<u8>> {
++    if stump.roots.len() != stump.leaves.count_ones() as usize {
++        return Err(invalid("Invalid accumulator root count"));
++    }
++    let mut bytes = Vec::new();
++    stump
++        .serialize(&mut bytes)
++        .map_err(|_| invalid("Invalid accumulator"))?;
++    Ok(bytes)
++}
++
++#[derive(Clone)]
++pub(crate) struct Checkpoint {
++    path: PathBuf,
++    key: [u8; MAC_SIZE],
++    pub anchor: AssumeUtreexoValue,
++}
++
++// NodeContext requires Debug. Keep the integrity key out of logs.
++impl std::fmt::Debug for Checkpoint {
++    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        fmt.debug_struct("Checkpoint")
++            .field("target", &self.anchor.height)
++            .finish()
++    }
++}
++
++impl Checkpoint {
++    pub(crate) fn open(dir: &Path, anchor: AssumeUtreexoValue) -> io::Result<Self> {
++        let key_path = dir.join(KEY_FILE);
++        let key = match read_bounded(&key_path, MAC_SIZE) {
++            Ok(bytes) => bytes
++                .try_into()
++                .map_err(|_| invalid("Invalid historical checkpoint key"))?,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => {
++                let mut key = [0; MAC_SIZE];
++                OsRng.try_fill_bytes(&mut key).map_err(io::Error::other)?;
++                save(&key_path, &key)?;
++                key
++            }
++            Err(error) => return Err(error),
++        };
++        Ok(Self {
++            path: dir.join(STATE_FILE),
++            key,
++            anchor,
++        })
++    }
++
++    fn tag(&self, bytes: &[u8]) -> [u8; MAC_SIZE] {
++        let mut engine = HmacEngine::<sha256::Hash>::new(&self.key);
++        engine.input(bytes);
++        Hmac::from_engine(engine).to_byte_array()
++    }
++
++    pub(crate) fn matches(&self, stump: &Stump) -> bool {
++        self.anchor.leaves == stump.leaves && self.anchor.roots == stump.roots
++    }
++
++    pub(crate) fn store(
++        &self,
++        height: u32,
++        hash: BlockHash,
++        stump: &Stump,
++        complete: bool,
++    ) -> io::Result<()> {
++        if height > self.anchor.height
++            || (height == self.anchor.height
++                && (hash != self.anchor.block_hash || !self.matches(stump)))
++            || (complete && height != self.anchor.height)
++        {
++            return Err(invalid(
++                "Historical checkpoint differs from the selected anchor",
++            ));
++        }
++        let record = Record {
++            version: 1,
++            target: self.anchor.height,
++            anchor: self.anchor.block_hash.to_byte_array(),
++            height,
++            hash: hash.to_byte_array(),
++            complete,
++            stump: encode_stump(stump)?,
++        };
++        let bytes = serde_json::to_vec(&record)?;
++        let mut signed = self.tag(&bytes).to_vec();
++        signed.extend(bytes);
++        save(&self.path, &signed)
++    }
++
++    pub(crate) fn recover(
++        &self,
++        hash_at: impl FnOnce(u32) -> Option<BlockHash>,
++    ) -> io::Result<(u32, Stump, bool)> {
++        let bytes = match read_bounded(&self.path, MAX_RECORD) {
++            Ok(bytes) => bytes,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => {
++                return Ok((0, Stump::default(), false))
++            }
++            Err(error) => return Err(error),
++        };
++        if bytes.len() <= MAC_SIZE || self.tag(&bytes[MAC_SIZE..]) != bytes[..MAC_SIZE] {
++            return Err(invalid("Invalid historical checkpoint integrity tag"));
++        }
++        let record: Record = serde_json::from_slice(&bytes[MAC_SIZE..])?;
++        if record.version != 1
++            || record.target != self.anchor.height
++            || record.anchor != self.anchor.block_hash.to_byte_array()
++            || record.height > record.target
++            || hash_at(record.height) != Some(BlockHash::from_byte_array(record.hash))
++            || (record.complete && record.height != record.target)
++        {
++            return Err(invalid(
++                "Historical checkpoint does not match the selected chain",
++            ));
++        }
++        // Check declared root count before handing any bytes to the accumulator decoder.
++        let header = record
++            .stump
++            .get(..16)
++            .ok_or_else(|| invalid("Missing accumulator header"))?;
++        let leaves = u64::from_le_bytes(header[..8].try_into().unwrap());
++        let roots = u64::from_le_bytes(header[8..].try_into().unwrap());
++        if roots != u64::from(leaves.count_ones()) || record.stump.len() > 16 + 64 * 33 {
++            return Err(invalid("Invalid historical accumulator dimensions"));
++        }
++        let stump = Stump::deserialize(record.stump.as_slice())
++            .map_err(|_| invalid("Invalid accumulator"))?;
++        if encode_stump(&stump)? != record.stump
++            || (record.height == record.target && !self.matches(&stump))
++        {
++            return Err(invalid("Historical accumulator mismatch"));
++        }
++        Ok((record.height, stump, record.complete))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use bitcoin::Network;
++    use floresta_chain::ChainParams;
++    use rustreexo::node_hash::BitcoinNodeHash;
++
++    fn anchor() -> AssumeUtreexoValue {
++        let mut anchor = ChainParams::get_assume_utreexo(Network::Regtest);
++        anchor.height = 2;
++        anchor.leaves = 1;
++        anchor.roots = vec![BitcoinNodeHash::new([2; 32])];
++        anchor
++    }
++
++    #[test]
++    fn checkpoints_authenticate_progress_and_compare_final_roots_and_count() {
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::write(dir.path().join(".sync_node_state"), []).unwrap();
++        let anchor = anchor();
++        let checkpoint = Checkpoint::open(dir.path(), anchor.clone()).unwrap();
++        assert_eq!(
++            checkpoint.recover(|_| None).unwrap(),
++            (0, Stump::default(), false)
++        );
++        let hash = BlockHash::all_zeros();
++        checkpoint.store(1, hash, &Stump::default(), false).unwrap();
++        let reopened = Checkpoint::open(dir.path(), anchor.clone()).unwrap();
++        assert_eq!(
++            reopened.recover(|_| Some(hash)).unwrap(),
++            (1, Stump::default(), false)
++        );
++        assert!(reopened.recover(|_| Some(anchor.block_hash)).is_err());
++        assert!(reopened.store(1, hash, &Stump::default(), true).is_err());
++        assert!(reopened
++            .store(2, anchor.block_hash, &Stump::default(), true)
++            .is_err());
++        let mut stump = Stump {
++            leaves: 1,
++            roots: vec![BitcoinNodeHash::new([1; 32])],
++        };
++        assert!(reopened.store(2, anchor.block_hash, &stump, true).is_err());
++        stump.roots.clone_from(&anchor.roots);
++        reopened.store(2, anchor.block_hash, &stump, true).unwrap();
++        assert_eq!(
++            reopened.recover(|_| Some(anchor.block_hash)).unwrap(),
++            (2, stump, true)
++        );
++        let bytes = std::fs::read(&reopened.path).unwrap();
++        let mut corrupt = bytes.clone();
++        corrupt[0] ^= 1;
++        for torn in [
++            vec![],
++            bytes[..4].to_vec(),
++            corrupt,
++            vec![0; MAX_RECORD + 1],
++        ] {
++            std::fs::write(&reopened.path, torn).unwrap();
++            assert!(reopened.recover(|_| Some(anchor.block_hash)).is_err());
++        }
++    }
++
++    #[test]
++    fn verified_snapshot_requires_active_anchor_and_foreground_validation() {
++        let progress = Historical::default();
++        let anchor = anchor();
++        progress.begin(0, &anchor);
++        assert_eq!(
++            progress
++                .snapshot(5, 5, false, |_| Some(anchor.block_hash))
++                .state,
++            "verifying"
++        );
++        progress.advance(2);
++        progress.verified();
++        assert_eq!(
++            progress
++                .snapshot(5, 5, true, |_| Some(anchor.block_hash))
++                .state,
++            "verifying"
++        );
++        assert_eq!(
++            progress
++                .snapshot(5, 4, false, |_| Some(anchor.block_hash))
++                .state,
++            "verifying"
++        );
++        assert_eq!(
++            progress
++                .snapshot(5, 5, false, |_| Some(anchor.block_hash))
++                .state,
++            "verified"
++        );
++        assert_eq!(progress.snapshot(5, 5, false, |_| None).state, "error");
++    }
++}
+diff --git a/crates/floresta-wire/src/p2p_wire/mod.rs b/crates/floresta-wire/src/p2p_wire/mod.rs
+index a345e03..ec92723 100644
+--- a/crates/floresta-wire/src/p2p_wire/mod.rs
++++ b/crates/floresta-wire/src/p2p_wire/mod.rs
+@@ -49,6 +49,8 @@ pub struct UtreexoNodeConfig {
+     /// is that we are vulnerable to a fraud proof attack for a few hours, but we can spot it
+     /// and react in a couple of hours at most, so the attack window is very small.
+     pub backfill: bool,
++    /// Managed historical verification status shared with the inherited control channel.
++    pub historical: Option<historical::Historical>,
+     /// If we are using network-provided block filters, we may not need to download the whole
+     /// chain of filters, as our wallets may not have been created at the beginning of the chain.
+     /// With this option, we can make a rough estimate of the block height we need to start
+@@ -79,6 +81,7 @@ impl Default for UtreexoNodeConfig {
+             datadir: ".floresta-node".to_string(),
+             proxy: None,
+             backfill: false,
++            historical: None,
+             assume_utreexo: None,
+             filter_start_height: None,
+             user_agent: format!("floresta:{}", env!("CARGO_PKG_VERSION")),
+@@ -90,6 +93,7 @@ impl Default for UtreexoNodeConfig {
+ pub mod address_man;
+ pub mod block_proof;
+ pub mod error;
++pub mod historical;
+ pub mod node;
+ pub mod node_context;
+ pub mod node_interface;
+diff --git a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+index 9a7ef9f..2fc5e95 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+@@ -181,6 +181,116 @@ where
+         Ok(())
+     }
+ 
++    /// Reconstruct the managed network anchor from genesis and execute historical scripts.
++    /// The full foreground validator continues above this boundary.
++    fn managed_backfill(
++        &self,
++        status: crate::Historical,
++        done: std::sync::mpsc::Sender<()>,
++    ) -> Result<bool, WireError> {
++        use crate::p2p_wire::historical::Checkpoint;
++        use floresta_chain::ChainParams;
++        use std::io;
++        use std::path::Path;
++
++        let mut anchor = ChainParams::get_assume_utreexo(self.config.network);
++        if anchor.height == 0 {
++            // No assumed interval on this network. On restart independently replay any
++            // already persisted prefix under the current verification policy.
++            let height = self.chain.get_validation_index()?;
++            let stump = self.chain.get_acc();
++            anchor.height = height;
++            anchor.block_hash = self.chain.get_block_hash(height)?;
++            anchor.leaves = stump.leaves;
++            anchor.roots = stump.roots;
++        }
++        if self.chain.get_block_hash(anchor.height)? != anchor.block_hash {
++            return Err(io::Error::other(
++                "Selected chain does not include the pinned historical anchor",
++            )
++            .into());
++        }
++
++        let checkpoint = Checkpoint::open(Path::new(&self.config.datadir), anchor.clone())?;
++        let (height, stump, complete) = checkpoint
++            .recover(|at| self.chain.get_block_hash(at).ok())
++            .unwrap_or_else(|error| {
++                warn!("Restarting historical validation from genesis: {error}");
++                (0, Stump::default(), false)
++            });
++        status.begin(height, &anchor);
++        if complete || anchor.height == 0 {
++            if anchor.height == 0 && !checkpoint.matches(&Stump::default()) {
++                return Err(io::Error::other("Genesis accumulator mismatch").into());
++            }
++            status.verified();
++            return Ok(false);
++        }
++
++        let chain = self.chain.get_partial_chain(height, anchor.height, stump)?;
++        let mut node = UtreexoNode::<PartialChainState, SyncNode>::new(
++            self.config.clone(),
++            chain,
++            self.mempool.clone(),
++            None,
++            self.kill_signal.clone(),
++            self.address_man.clone(),
++        )?;
++        node.context.replay = Some((checkpoint.clone(), status.clone(), height));
++        let outer = self.chain.clone();
++        let progress = status.clone();
++        let worker = tokio::spawn(async move {
++            let node = node.run(|_| {}).await;
++            let chain = &node.chain;
++            if let Some(error) = chain.replay_failure() {
++                return Err(io::Error::other(error));
++            }
++            if progress.failed() {
++                return Ok(());
++            }
++            let height = chain.get_validation_index().map_err(io::Error::other)?;
++            progress.advance(height);
++            let hash = chain.get_block_hash(height).map_err(io::Error::other)?;
++            let stump = chain.get_acc();
++            if height < anchor.height {
++                checkpoint.store(height, hash, &stump, false)?;
++                return Ok(());
++            }
++            if height != anchor.height
++                || hash != anchor.block_hash
++                || !checkpoint.matches(&stump)
++                || outer.get_block_hash(height).ok() != Some(hash)
++            {
++                return Err(io::Error::other(
++                    "Replayed accumulator or active header differs from the historical anchor",
++                ));
++            }
++            for block in chain.list_valid_blocks() {
++                outer
++                    .mark_block_as_valid(block.block_hash())
++                    .map_err(io::Error::other)?;
++            }
++            outer.flush().map_err(io::Error::other)?;
++            if outer.get_block_hash(height).ok() != Some(hash) {
++                return Err(io::Error::other(
++                    "Historical anchor changed while publishing verification",
++                ));
++            }
++            checkpoint.store(height, hash, &stump, true)?;
++            progress.verified();
++            Ok::<_, io::Error>(())
++        });
++        tokio::spawn(async move {
++            match worker.await {
++                Err(_) => status.fail("Historical verification worker exited unexpectedly"),
++                Ok(Err(error)) => status.fail(&error.to_string()),
++                Ok(Ok(())) => {}
++            }
++            let _ = done.send(());
++        });
++        Ok(true)
++    }
++
+     /// If either PoW fraud proofs or assumeutreexo are enabled, we will "skip" IBD for all
+     /// historical blocks. This allow us to start the node faster, making it usable in a few
+     /// minutes. If you still want to validate all blocks, you can enable the backfill option.
+@@ -314,8 +424,17 @@ where
+         let is_backfilling = match self.config.backfill {
+             true => {
+                 info!("Starting backfill task...");
+-                self.backfill(sender)
+-                    .expect("Failed to spawn backfill thread")
++                match self.config.historical.clone() {
++                    Some(status) => self
++                        .managed_backfill(status.clone(), sender)
++                        .unwrap_or_else(|error| {
++                            status.fail(&error.to_string());
++                            false
++                        }),
++                    None => self
++                        .backfill(sender)
++                        .expect("Failed to spawn backfill thread"),
++                }
+             }
+             false => false,
+         };
+@@ -331,6 +450,9 @@ where
+         };
+ 
+         if *self.kill_signal.read().await {
++            if is_backfilling {
++                let _ = tokio::task::spawn_blocking(move || recv.recv()).await;
++            }
+             self.shutdown();
+             stop_signal.send(()).unwrap();
+             return;
+@@ -385,7 +507,7 @@ where
+         // ignore the error here because if the backfill task already
+         // finished, this channel will be closed
+         if is_backfilling {
+-            let _ = recv.recv();
++            let _ = tokio::task::spawn_blocking(move || recv.recv()).await;
+         }
+ 
+         self.shutdown();
+diff --git a/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
+index b2df2d2..baf1447 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
+@@ -35,7 +35,13 @@ use crate::p2p_wire::peer::PeerMessages;
+ ///
+ /// see [node_context](crates/floresta-wire/src/p2p_wire/node_context.rs) and [node.rs](crates/floresta-wire/src/p2p_wire/node.rs) for more information.
+ #[derive(Clone, Debug, Default)]
+-pub struct SyncNode {}
++pub struct SyncNode {
++    pub(crate) replay: Option<(
++        crate::p2p_wire::historical::Checkpoint,
++        crate::Historical,
++        u32,
++    )>,
++}
+ 
+ impl NodeContext for SyncNode {
+     /// Get the required [services](ServiceFlags) for the [`SyncNode`].
+@@ -240,6 +246,34 @@ where
+             .expect("best block should present")
+             .0;
+ 
++        if let Some((checkpoint, status, saved)) = &mut self.context.replay {
++            status.advance(validation_index);
++            if let Some(error) = self.common.chain.replay_failure() {
++                status.fail(&error);
++                return LoopControl::Break;
++            }
++            if validation_index.saturating_sub(*saved) >= 2016 && validation_index < best_block {
++                let result = self
++                    .common
++                    .chain
++                    .get_block_hash(validation_index)
++                    .map_err(|_| std::io::Error::other("Historical header unavailable"))
++                    .and_then(|hash| {
++                        checkpoint.store(
++                            validation_index,
++                            hash,
++                            &self.common.chain.get_acc(),
++                            false,
++                        )
++                    });
++                if let Err(error) = result {
++                    status.fail(&error.to_string());
++                    return LoopControl::Break;
++                }
++                *saved = validation_index;
++            }
++        }
++
+         if validation_index == best_block {
+             info!("IBD is finished, switching to normal operation mode");
+             self.chain.toggle_ibd(false);

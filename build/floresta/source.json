@@ -6,6 +6,10 @@
   "patches": [
     "managed-stdio.patch",
     "electrum-wallet.patch",
-    "managed-watches.patch"
+    "managed-watches.patch",
+    "backfill-validation.patch",
+    "managed-parents.patch",
+    "managed-removal.patch",
+    "confirmed-reads.patch"
   ]
 }

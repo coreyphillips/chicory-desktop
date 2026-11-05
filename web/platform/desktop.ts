@@ -4,16 +4,22 @@ import type { Network } from '@beignet/wallet-core';
 export interface FlorestaState {
   requested: boolean;
   storage: string;
+  storageUsed: boolean;
+  volumeAvailable: boolean;
+  removalAvailable: boolean;
   customStorage: boolean;
   phase: 'stopped' | 'starting' | 'running' | 'restarting' | 'failed';
   height: number | null;
   validatedHeight: number | null;
   tipSynced: boolean | null;
+  historicalVerification: 'unknown' | 'pending' | 'verifying' | 'verified' | 'error';
+  historicalHeight: number | null;
+  historicalTarget: number | null;
   watches: { observedWallets: number; confirmedScansCaughtUp: number } | { unavailable: true } | null;
   error: string | null;
 }
 
-export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder', (network: Network) => Promise<FlorestaState>>;
+export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder' | 'remove', (network: Network) => Promise<FlorestaState>>;
 
 export type DesktopScene = 'home' | 'send' | 'receive' | 'activity' | 'settings';
 export type DesktopCommand = DesktopScene | 'payment-link';

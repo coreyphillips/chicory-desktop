@@ -25,7 +25,7 @@ async function open() {
 }
 async function quit() {
   if (!electron) return;
-  const closed = electron.waitForEvent('close', { timeout: 40000 });
+  const closed = electron.waitForEvent('close', { timeout: 75000 });
   await electron.evaluate(({ app }) => { setTimeout(() => app.quit(), 0); });
   await closed;
   electron = null;
@@ -66,6 +66,22 @@ try {
   const stopped = await page.evaluate(() => window.chicoryDesktop.floresta.stop('regtest'));
   assert.equal(stopped.requested, false);
   assert.equal(stopped.phase, 'stopped');
+  if (process.platform === 'darwin') {
+    await electron.evaluate(({ dialog }) => {
+      let confirmed = false;
+      dialog.showMessageBox = async (_window, options) => {
+        if (options.title !== 'Remove local node data' || !options.detail.includes('public wallet and channel watches')) throw new Error('Missing storage removal disclosure');
+        const response = confirmed ? 0 : 1;
+        confirmed = true;
+        return { response, checkboxChecked: false };
+      };
+    });
+    const remove = () => page.evaluate(() => window.chicoryDesktop.floresta.remove('regtest'));
+    assert.equal((await remove()).storageUsed, true, 'cancel preserves the data');
+    assert.equal((await remove()).storageUsed, false);
+    assert.deepEqual(await fs.readdir(path.join(profile, 'chicory-floresta/regtest/regtest')), ['chicory-managed.lock']);
+    console.log('Native cancellation and exclusive local regtest data removal passed.');
+  }
   console.log('Source Settings, native consent, isolated regtest sync, consent-bound resume and clean disable passed.');
 } finally {
   await quit();

@@ -8,6 +8,8 @@ peer-originated unconfirmed activity and can retain history after a reorg.
 [Issue 33](https://github.com/coreyphillips/chicory-desktop/issues/33) ·
 [Floresta bug report for review](floresta-upstream-bugs.md)
 
+[Bug filing register for Chicory, Beignet and Floresta](issue-33-bug-review.md)
+
 ## Run the candidate from Settings
 
 1. Prepare the regular desktop runtime with `npm run runtime:prepare`.
@@ -129,19 +131,27 @@ two binaries in the lab command above to exercise both builds.
 | Quit, restart and watch expansion | The funded wallet recovered its receipt. Adding its public script to the second wallet recovered the old transaction there as well. |
 | Descriptor recovery | The range through index 104 had zero matches. Extending the same public descriptor through 105 found the historical funding transaction. |
 | Competing confirmed spends | At height 103 an outpoint watch found one transaction on the initial branch. After a longer branch reached height 104, the same watch found zero and the funded wallet retained two canonical transactions. |
+| Parent and confirmed wallet recovery | The seven-patch candidate recovered the unwatched 105-byte height-1 coinbase that funded the watched spend. Two bounded owner sessions returned independent history. The miner's script had 103 entries at tip 102, 105 at tip 103 and 106 after the competing tip reached 104. All history and spendable outpoints matched independently decoded blocks. |
+| Historical verification after restart | A foreground sync from genesis verified through height 102. On reopen, independent replay reached its persisted height-102 accumulator. Truncating the saved replay certificate to seven bytes forced safe replay through the same anchor. That anchor stayed verified through the competing tips. |
+| Node data removal | An explicit Settings action on macOS APFS removed recognized managed data only while the cleanup helper held the node's exclusive lock. The funded wallet backup and node data have separate lifecycles. The native test also covered refusal of unrecognized files and links. |
 | Existing external Lightning backend | All desktop regtest stages ran. Seventeen checks passed, including crash during submission, offline receive, send max, drain, restart, on-chain recovery and full-backup restore. Direct funding and transport-path inspection were skipped. Seed-only Lightning recovery is unsupported. |
 
 One 102-block run on an Apple M5 Pro with 64 GiB RAM took 32.1 seconds to
 reach the tip and 2.0 seconds to catch up two wallet scans on loopback. The
 debug binary was 59,207,640 bytes. These measurements describe that regtest
-fixture. Sustained mainnet sync, peak disk use, peer diversity and historical
-recovery require their own runs.
+fixture. On the seven-patch candidate, a fresh 102-block sync took 32.6
+seconds, and two wallet scans took 2.0 seconds. The test snapshot occupied
+67,710,976 allocated bytes across 16 files with a combined logical size of
+2,217,205,149 bytes. The difference includes sparse chain store files.
+Sustained mainnet sync, peak disk use, peer diversity and recovery of a live
+channel from cold data require their own runs.
 
 ## Before a wallet can switch
 
 The candidate's confirmed index passes the funded checks above. The remaining
 wallet-serving gates include proof-validated pending transactions and replacement
-notifications, historical parent availability, completed backfill, a safe live
-Lightning transition, and cold channel/guardian recovery. Production signing,
+notifications, complete recovery of older channel ancestry, qualification of
+mainnet checkpoint replay, a safe live Lightning transition and cold
+channel/guardian recovery. Production signing,
 platform qualification and sustained mainnet measurements also remain open.
 [Floresta source contract](floresta-upstream.md) · [Beignet calls and Lightning dependencies](floresta-beignet.md)
