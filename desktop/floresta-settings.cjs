@@ -34,6 +34,7 @@ function candidate(root, digest) {
   const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'bundle.json'), 'utf8'));
   if (manifest.sha256 !== digest || manifest.commit !== pin.commit || manifest.release !== pin.release ||
       manifest.archiveSha256 !== pin.archiveSha256 || manifest.platform !== process.platform || manifest.arch !== process.arch ||
+      Object.keys(manifest.patches || {}).length !== pin.patches.length ||
       !pin.patches.every(file => manifest.patches?.[file] === sha256(fs.readFileSync(path.join(recipe, file))))) {
     throw new Error('Rebuild the Floresta candidate from this source checkout.');
   }
@@ -69,7 +70,8 @@ class FlorestaSettings {
       if (prefs.version !== 1 || !prefs.networks || typeof prefs.networks !== 'object') throw new Error();
       for (const [network, value] of Object.entries(prefs.networks)) {
         if (!networks.includes(network) || !validDigest(value.digest) || typeof value.enabled !== 'boolean' ||
-            !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean') throw new Error();
+            !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean' ||
+            value.initialized !== undefined && typeof value.initialized !== 'boolean') throw new Error();
       }
       return prefs.networks;
     } catch (error) {
@@ -83,6 +85,10 @@ class FlorestaSettings {
     const locations = this._locations();
     return { digest: this.digest, enabled: entry?.digest === this.digest && entry.enabled || false,
       folder: Object.hasOwn(locations, network) ? locations[network] : entry?.folder ?? null,
+      // Older versions recorded the selected folder before the first start.
+      // Treat a previously used custom volume as initialized to avoid creating
+      // replacement data on another disk mounted at its old path.
+      initialized: Object.hasOwn(locations, network) || (entry?.initialized ?? Boolean(entry?.folder && entry.used !== false)),
       used: Object.hasOwn(locations, network) || !!entry && entry.used !== false };
   }
   _locations() {
@@ -124,6 +130,17 @@ class FlorestaSettings {
       validatedHeight: node?.validatedHeight ?? null, tipSynced: node?.tipSynced ?? null, error: this.errors.get(network) || node?.error || null,
       historicalVerification: node?.historicalVerification ?? 'unknown', historicalHeight: node?.historicalHeight ?? null,
       historicalTarget: node?.historicalTarget ?? null, watches: this.collection.get(network)?.summary ?? null };
+  }
+  async inspectStorage(network, state) {
+    if (!state.volumeAvailable) return { ...state, freeBytes: null };
+    const folder = this._saved(network).folder || this.profile;
+    try {
+      const { bavail, bsize } = await fs.promises.statfs(folder, { bigint: true });
+      const free = bavail * bsize;
+      return { ...state, freeBytes: free >= 0n && free <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(free) : null };
+    } catch {
+      return { ...state, freeBytes: null };
+    }
   }
   pauseCollection(network) {
     const lease = this.collection.get(network);
@@ -167,11 +184,15 @@ class FlorestaSettings {
     try {
       if (!this.nodes.has(network)) {
         const build = this.load(this.root, this.digest);
-        this.nodes.set(network, this.create({ ...build, network, profileDirectory: this.profile, storageDirectory: prefs.folder }));
+        this.nodes.set(network, this.create({ ...build, network, profileDirectory: this.profile, storageDirectory: prefs.folder, initialized: prefs.initialized }));
       }
       const node = this.nodes.get(network);
       void node.start().then(() => {
-        if (this.nodes.get(network) === node && this._saved(network).enabled) this.refreshCollection();
+        if (this.nodes.get(network) !== node) return;
+        const saved = this._saved(network);
+        if (!saved.enabled) return;
+        if (!saved.initialized) this._save(network, { ...saved, initialized: true });
+        this.refreshCollection();
       }).catch(error => {
         if (this.nodes.get(network) === node) this.errors.set(network, error.message);
       });
@@ -215,7 +236,7 @@ class FlorestaSettings {
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
         try {
           await this._remove(network, prefs.folder);
-          this._save(network, { ...prefs, used: false });
+          this._save(network, { ...prefs, used: false, initialized: false });
           const locations = this._locations();
           delete locations[network];
           this._saveLocations(locations);
@@ -296,8 +317,7 @@ function installFlorestaIpc({ ipcMain, settings, trusted, allowed, appLock, dial
       return trusted(event) && allowed() && !appLock.required() && appLock.generation === generation;
     };
     if (!current()) throw new Error('Local node settings are locked.');
-    if (op === 'status') return settings.status(network);
-    const state = await settings.change(network, op, {
+    const state = op === 'status' ? settings.status(network) : await settings.change(network, op, {
       current,
       confirm: async (action, location) => (await appLock.duringPrompt(() => dialog.showMessageBox(window(), action === 'remove' ? {
         type: 'warning', title: 'Remove local node data', message: 'Remove generated ' + network + ' node data?',
@@ -315,8 +335,9 @@ function installFlorestaIpc({ ipcMain, settings, trusted, allowed, appLock, dial
         return answer.canceled ? null : answer.filePaths[0];
       }
     });
+    const inspected = await settings.inspectStorage(network, state);
     if (!current()) throw new Error('Local node settings are locked.');
-    return state;
+    return inspected;
   });
 }
 

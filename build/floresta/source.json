@@ -13,6 +13,7 @@
     "confirmed-reads.patch",
     "managed-tx-relay.patch",
     "managed-pending.patch",
-    "pending-transactions.patch"
+    "pending-transactions.patch",
+    "managed-wallet-offers.patch"
   ]
 }

@@ -2,6 +2,7 @@
 
 const { validateTransactionChunk } = require('./floresta-transactions.cjs');
 const { validateConfirmedPage } = require('./floresta-confirmed-reads.cjs');
+const { validatePendingPage, PENDING_LINE_BYTES } = require('./floresta-pending-reads.cjs');
 
 const PROTOCOL = 'chicory.watch/1';
 const hexHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -53,6 +54,7 @@ class WatchRequests {
     this.requests = new Map();
     this.id = 0;
     this.active = false;
+    this.lifetime = new AbortController();
   }
   async request(command) {
     if (!this.active) throw new Error('The running local node cannot accept watch requests.');
@@ -67,6 +69,15 @@ class WatchRequests {
       this.write(line);
     });
   }
+  replyLimit(message) {
+    if (this.pendingActive && message?.protocol === PROTOCOL &&
+        this.requests.get(message.id)?.command.action === 'pending') return PENDING_LINE_BYTES;
+    return 4096;
+  }
+  partialLimit() {
+    if (this.pendingActive && [...this.requests.values()].some(r => r.command.action === 'pending')) return PENDING_LINE_BYTES;
+    return 4096;
+  }
   receive(reply) {
     const req = this.requests.get(reply.id);
     if (!req || reply.protocol !== PROTOCOL || Boolean(Object.hasOwn(reply, 'error')) === Object.hasOwn(reply, 'result')) {
@@ -74,7 +85,16 @@ class WatchRequests {
     }
     const failed = Object.hasOwn(reply, 'error');
     if (failed && typeof reply.error !== 'string') throw new Error('Invalid local node watch error.');
-    const validate = { transaction: validateTransactionChunk, confirmed: validateConfirmedPage }[req.command.action];
+    const validate = req.command.action === 'broadcast'
+      ? (command, value) => {
+          if (value?.phase !== 'relayed' || value.txid !== command.txid || value.tipHash !== command.offer.tip) {
+            throw new Error('The managed wallet delivery receipt is invalid.');
+          }
+          return value.txid;
+        }
+      : req.command.action === 'pending-transaction'
+      ? require('./floresta-pending-transaction.cjs').validatePendingChunk
+      : { transaction: validateTransactionChunk, confirmed: validateConfirmedPage, pending: validatePendingPage }[req.command.action];
     const result = failed ? null : validate ? validate(req.command, reply.result) : validated(reply.result);
     clearTimeout(req.timer);
     this.requests.delete(reply.id);
@@ -83,6 +103,7 @@ class WatchRequests {
   }
   close(reason) {
     this.active = false;
+    this.lifetime.abort();
     for (const { reject, timer } of this.requests.values()) { clearTimeout(timer); reject(reason); }
     this.requests.clear();
   }

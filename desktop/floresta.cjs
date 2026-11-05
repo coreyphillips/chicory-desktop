@@ -12,6 +12,7 @@ const { WatchRequests, PROTOCOL, register, coverage } = require('./floresta-watc
 
 const { readConfirmedTransaction } = require('./floresta-transactions.cjs');
 const { openConfirmedWallet } = require('./floresta-confirmed-reads.cjs');
+const { openPendingWallet } = require('./floresta-pending-reads.cjs');
 
 const NETWORKS = {
   mainnet: ['bitcoin', '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f'],
@@ -49,7 +50,7 @@ async function checkSpace(directory) {
 
 // One owner per network on a selected volume. Publish a complete owner/format marker
 // before the daemon can create files. The daemon separately holds an OS lock until exit.
-async function prepareStorage(profileDirectory, storageDirectory, network) {
+async function prepareStorage(profileDirectory, storageDirectory, network, initialized) {
   const profile = await fsp.realpath(profileDirectory);
   const parent = storageDirectory ? await fsp.realpath(storageDirectory) : profile;
   if (storageDirectory && parent !== storageDirectory) throw new Error('Reselect the original local node volume.');
@@ -65,8 +66,13 @@ async function prepareStorage(profileDirectory, storageDirectory, network) {
   }
   await checkSpace(parent);
   const base = path.join(parent, 'chicory-floresta');
-  await fsp.mkdir(base, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-  await privateDirectory(base);
+  if (!initialized) await fsp.mkdir(base, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  try {
+    await privateDirectory(base);
+  } catch (error) {
+    if (initialized && error.code === 'ENOENT') throw new Error('Reconnect the original local node storage before restarting.');
+    throw error;
+  }
   const dir = path.join(base, network);
   const owner = JSON.stringify({ format: 'chicory-floresta/1', network, profile: sha(profile).toString('hex') });
   const marker = 'chicory-owner.json';
@@ -74,6 +80,7 @@ async function prepareStorage(profileDirectory, storageDirectory, network) {
     await fsp.lstat(dir);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
+    if (initialized) throw new Error('Reconnect the original local node storage before restarting.');
     const staging = await fsp.mkdtemp(path.join(base, '.init-'));
     try {
       await fsp.writeFile(path.join(staging, marker), owner, { mode: 0o600, flag: 'wx' });
@@ -96,7 +103,7 @@ async function prepareStorage(profileDirectory, storageDirectory, network) {
     // Upstream appends a second network-specific directory. A selected volume
     // must never redirect the actual chain store to another profile via a link.
     const store = path.join(dir, network === 'testnet' ? 'testnet3' : network);
-    await fsp.mkdir(store, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+    if (!initialized) await fsp.mkdir(store, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
     await privateDirectory(store);
   }
   return { dir, identity };
@@ -144,35 +151,48 @@ function validateStatus(state, network) {
     tipSynced: !state.ibd && state.height === state.validated };
 }
 
-async function verifyElectrum(port, network, signal) {
+const headerHash = hex => sha(sha(Buffer.from(hex, 'hex'))).reverse().toString('hex');
+
+async function chainHeaders(port, heights, signal) {
   const socket = net.createConnection({ host: '127.0.0.1', port, signal });
-  const timer = setTimeout(() => socket.destroy(new Error('The local Electrum identity check timed out.')), 5000);
+  const timer = setTimeout(() => socket.destroy(new Error('The local chain header request timed out.')), 5000);
   try {
-    socket.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'blockchain.block.header', params: [0] }) + '\n');
-    let text = '';
-    for await (const chunk of socket) {
-      text += chunk;
-      if (text.length > 2048) break;
-      const end = text.indexOf('\n');
-      if (end < 0) continue;
-      const { id, result } = JSON.parse(text.slice(0, end));
-      if (id === 1 && typeof result === 'string' && /^[a-fA-F0-9]{160}$/.test(result) &&
-          sha(sha(Buffer.from(result, 'hex'))).reverse().toString('hex') === NETWORKS[network][1]) return;
-      break;
+    const source = socket[Symbol.asyncIterator]();
+    const headers = [];
+    for (const height of heights) {
+      const id = headers.length + 1;
+      socket.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'blockchain.block.header', params: [height] }) + '\n');
+      let line = '';
+      while (!line.includes('\n')) {
+        const { value, done } = await source.next();
+        if (done || line.length + value.length > 2048) throw new Error('Invalid managed chain header reply.');
+        line += value.toString();
+      }
+      const reply = JSON.parse(line);
+      if (reply.id !== id || typeof reply.result !== 'string' || !/^[a-fA-F0-9]{160}$/.test(reply.result)) {
+        throw new Error('Invalid managed chain header.');
+      }
+      headers.push(reply.result.toLowerCase());
     }
-    throw new Error('The owned Electrum listener did not prove the selected network.');
+    return headers;
   } finally {
     clearTimeout(timer);
     socket.destroy();
   }
 }
 
+async function verifyElectrum(port, network, signal) {
+  const [genesis] = await chainHeaders(port, [0], signal);
+  if (headerHash(genesis) !== NETWORKS[network][1]) throw new Error('The owned Electrum listener did not prove the selected network.');
+}
+
 class ManagedFloresta {
   // binary and sha256 come from trusted application resources. No renderer-supplied
   // executable, arguments, network addresses, environment or config files are accepted.
-  constructor({ profileDirectory, storageDirectory, binary, sha256, network, onStatus = () => {}, spawnProcess = spawn }) {
+  constructor({ profileDirectory, storageDirectory, binary, sha256, network, initialized = false, onStatus = () => {}, spawnProcess = spawn }) {
     if (!Object.hasOwn(NETWORKS, network)) throw new Error('Unsupported local node network.');
     this.options = { profileDirectory, storageDirectory, binary, sha256, network };
+    this.initialized = initialized;
     this.onStatus = onStatus;
     this.spawnProcess = spawnProcess;
     this._state('stopped');
@@ -195,6 +215,23 @@ class ManagedFloresta {
   }
   openConfirmedWallet(owner, signal) {
     return openConfirmedWallet(this.watch, owner, signal, () => this.status());
+  }
+  async readHeader(height, tip) {
+    const watch = this.watch;
+    if (!watch?.active || !Number.isSafeInteger(height) || height < 0 || height > tip?.tipHeight ||
+        this.state.tipHash !== tip?.tipHash || this.state.height !== tip?.tipHeight || !this.state.tipSynced ||
+        this.state.historicalVerification !== 'verified') return null;
+    const [before, header, after] = await watch.headers([tip.tipHeight, height, tip.tipHeight]);
+    if (!watch.active || this.watch !== watch || this.state.tipHash !== tip.tipHash || headerHash(before) !== tip.tipHash || before !== after ||
+        (height === 0 && headerHash(header) !== NETWORKS[this.options.network][1]) ||
+        (height === tip.tipHeight && header !== before)) return null;
+    return header;
+  }
+  supportsPending() {
+    return Boolean(this.watch?.active && this.watch.pendingActive);
+  }
+  openPendingWallet(owner, signal) {
+    return openPendingWallet(this.watch, owner, signal, () => this.status());
   }
   _state(phase, fields = {}) {
     this.state = { network: this.options.network, phase, error: null, height: null, validatedHeight: null, tipHash: null,
@@ -235,7 +272,8 @@ class ManagedFloresta {
       signal.throwIfAborted();
       this._state(retry ? 'restarting' : 'starting');
       await verifyBinary(binary, sha256);
-      const storage = await prepareStorage(profileDirectory, storageDirectory, network);
+      const storage = await prepareStorage(profileDirectory, storageDirectory, network, this.initialized);
+      this.initialized = true;
       signal.throwIfAborted();
       const hadHealth = await this._child(storage, signal, ready);
       if (signal.aborted) throw cancelled();
@@ -275,6 +313,7 @@ class ManagedFloresta {
     const watch = new WatchRequests(line => child.stdin.write(line, error => {
       if (error && !stopping) fail(new Error('The private local node control pipe closed.'));
     }), fail);
+    watch.headers = heights => chainHeaders(endpoint, heights, connection.signal);
     this.watch = watch;
     const heartbeat = () => {
       clearTimeout(watchdog);
@@ -300,6 +339,9 @@ class ManagedFloresta {
         watch.active = message.watchProtocol === PROTOCOL;
         watch.transactionsActive = message.transactionProtocol === 'chicory.tx/1';
         watch.confirmedReadsActive = message.confirmedReadsProtocol === 'chicory.confirmed/1';
+        watch.pendingActive = message.pendingProtocol === 'chicory.pending/1';
+        watch.pendingTransactionActive = message.pendingTransactionProtocol === 'chicory.pending-tx/1';
+        watch.walletOffersActive = message.walletOfferProtocol === 'chicory.offer/1';
         this._state('running', { height: state.height, validatedHeight: state.validatedHeight, tipHash: state.tipHash, tipSynced: state.tipSynced,
           historicalVerification: state.historicalVerification, historicalHeight: state.historicalHeight, historicalTarget: state.historicalTarget });
         heartbeat();
@@ -317,13 +359,15 @@ class ManagedFloresta {
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
         try {
-          if (Buffer.byteLength(line) + 1 > 4096) throw new Error();
+          const bytes = Buffer.byteLength(line) + 1;
+          if (bytes > watch.partialLimit()) throw new Error();
           const message = JSON.parse(line);
+          if (bytes > watch.replyLimit(message)) throw new Error();
           if (message.protocol === PROTOCOL) watch.receive(message);
           else observe(message).catch(() => fail(new Error('Could not verify local node health, network or storage.')));
         } catch { fail(new Error('The local node returned an invalid control message.')); return; }
       }
-      if (Buffer.byteLength(pending) >= 4096) fail(new Error('The local node exceeded its status limit.'));
+      if (Buffer.byteLength(pending) >= watch.partialLimit()) fail(new Error('The local node exceeded its status limit.'));
     });
     heartbeat();
     try {

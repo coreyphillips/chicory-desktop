@@ -22,18 +22,18 @@ async function waitFor(condition) {
   throw new Error('Timed out waiting for the managed node test condition.');
 }
 
-async function fixture(t, { invalidMessage, wrongHeader, silent, watches } = {}) {
+async function fixture(t, { invalidMessage, wrongHeader, silent, watches, storageDirectory } = {}) {
   const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-supervisor-'));
   const binary = path.join(profileDirectory, 'fixture.bin');
   await writeFile(binary, 'public fixture', { mode: 0o700 });
   const children = [];
   const options = {
-    profileDirectory, network: 'regtest', binary, sha256: digest('public fixture'),
+    profileDirectory, storageDirectory, network: 'regtest', binary, sha256: digest('public fixture'),
     spawnProcess(file, args, config) {
       assert.equal(file, binary);
       assert.deepEqual(Object.keys(config.env).sort(), ['APPDATA', 'HOME', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE',
         ...(process.platform === 'win32' ? ['SystemRoot'] : [])].sort());
-      assert(config.env.HOME.startsWith(fs.realpathSync(profileDirectory) + path.sep));
+      assert(config.env.HOME.startsWith(fs.realpathSync(storageDirectory || profileDirectory) + path.sep));
       assert.deepEqual(args, ['--managed-stdio', '--data-dir', config.cwd, '--network', 'regtest', '--assume-valid', '0', '--disable-dns-seeds']);
       const js = `
         const net = require('node:net');
@@ -98,6 +98,28 @@ test('a second profile cannot reuse another profile’s selected network store',
   const different = new ManagedFloresta({ ...options, profileDirectory: other, storageDirectory: fs.realpathSync(options.profileDirectory) });
   await assert.rejects(different.start(), /another profile owner/);
   assert.equal(children.length, 1);
+});
+
+test('reopening an initialized store waits for the original volume when its mount path is reused', async t => {
+  const volume = await mkdtemp(path.join(os.tmpdir(), 'chicory-volume-'));
+  t.after(() => rm(volume, { recursive: true, force: true }));
+  // Windows restricts managed storage to the private profile. Move the owned
+  // directory inside that profile to exercise the same missing-store check.
+  const storageDirectory = process.platform === 'win32' ? undefined : await fs.promises.realpath(volume);
+  const { options, node: first, children } = await fixture(t, { storageDirectory });
+  const storage = storageDirectory || options.profileDirectory;
+  await first.start();
+  await first.stop();
+  const folder = path.join(storage, 'chicory-floresta');
+  await fs.promises.rename(folder, path.join(storage, 'temporarily-offline'));
+  const reopened = new ManagedFloresta({ ...options, initialized: true });
+  await assert.rejects(reopened.start(), /original local node storage/);
+  assert.equal(fs.existsSync(folder), false);
+  assert.equal(children.length, 1);
+  await fs.promises.rename(path.join(storage, 'temporarily-offline'), folder);
+  await reopened.start();
+  await reopened.stop();
+  assert.equal(children.length, 2);
 });
 
 test('stop during startup releases the private pipe and cannot leave a late running child', async t => {

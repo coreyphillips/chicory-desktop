@@ -26,15 +26,17 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
   useEffect(() => {
     if (!open) return;
     let live = true;
+    let polling = false;
     const poll = async () => {
-      if (active.current) return;
+      if (active.current || polling) return;
+      polling = true;
       const generation = epoch.current;
       try {
         const next = await bridge.status(network);
-        if (live && generation === epoch.current) setState(next);
+        if (live && generation === epoch.current) { setState(next); setError(''); }
       } catch {
         if (live && generation === epoch.current) setError('Unlock Chicory to view the local node settings.');
-      }
+      } finally { polling = false; }
     };
     void poll();
     const interval = setInterval(poll, 2000);
@@ -58,6 +60,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
       {state ? <>
         <Line label="Local node" value={phases[state.phase]} />
         <Line label="Node storage" value={state.storage} />
+        {state.freeBytes !== null && <Line label="Available disk space" value={`${(state.freeBytes / 2 ** 30).toLocaleString(undefined, { maximumFractionDigits: 1 })} GiB`} />}
         {!state.volumeAvailable ? <Note tone="error">Reconnect the selected volume to access its local node data.</Note> : null}
         {state.height !== null ? <>
           <Line label="Header height" value={String(state.height)} />

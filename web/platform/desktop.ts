@@ -6,6 +6,7 @@ export interface FlorestaState {
   storage: string;
   storageUsed: boolean;
   volumeAvailable: boolean;
+  freeBytes: number | null;
   removalAvailable: boolean;
   customStorage: boolean;
   phase: 'stopped' | 'starting' | 'running' | 'restarting' | 'failed';

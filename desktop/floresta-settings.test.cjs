@@ -61,6 +61,18 @@ test('persist consent per candidate and network, resume only on opt-in and stop 
   assert.equal(fs.existsSync(resumed.file), false);
 });
 
+test('new and legacy settings distinguish selected folders from initialized stores across restarts', async t => {
+  const { settings, options, profile } = fixture(t);
+  const folder = fs.realpathSync(profile);
+  settings._save('regtest', { digest, enabled: false, used: false, folder });
+  assert.equal(settings._saved('regtest').initialized, false);
+  await settings.change('regtest', 'start', yes);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(new FlorestaSettings(options)._saved('regtest').initialized, true);
+  settings._save('testnet', { digest, enabled: false, used: true, folder });
+  assert.equal(new FlorestaSettings(options)._saved('testnet').initialized, true);
+});
+
 test('a relock or quit during the native confirmation prevents a late enable', async t => {
   for (const quit of [false, true]) {
     const { settings, calls } = fixture(t);
@@ -86,6 +98,7 @@ test('IPC requires an unlocked trusted frame and only accepts native storage pic
     appLock, window: () => ({}), dialog: { showMessageBox: async () => ({ response: 1 }) } });
   await assert.rejects(handler({}, 'regtest', 'status'), /locked/);
   trusted = true;
+  assert.ok((await handler({}, 'regtest', 'status')).freeBytes > 0);
   await assert.rejects(handler({}, '../outside', 'start'), /Unsupported/);
   assert.equal((await handler({}, 'regtest', 'start')).requested, false);
   await assert.rejects(handler({}, 'regtest', '/choose/custom/path'), /unavailable/);

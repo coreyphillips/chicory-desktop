@@ -11,6 +11,12 @@ const uint = value => Number.isSafeInteger(value) && value >= 0 && value <= 0xff
 const invalid = () => new Error('Invalid confirmed transaction proof from the managed node.');
 const sha256d = bytes => createHash('sha256').update(createHash('sha256').update(bytes).digest()).digest();
 
+function matchesTransactionBytes(raw, txid, wtxid) {
+  const root = process.versions.electron && require('electron').app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
+  const { Transaction } = createRequire(path.join(root, 'server/package.json'))('bitcoinjs-lib');
+  return Transaction.fromBuffer(raw).getId() === txid && sha256d(raw).reverse().toString('hex') === wtxid;
+}
+
 function validateTransactionChunk(command, value) {
   if (value?.phase === 'unavailable' && Object.keys(value).length === 1) return null;
   if (value?.phase !== 'confirmed' || value.txid !== command.txid || !hash(value.txid) || !hash(value.wtxid) ||
@@ -44,10 +50,8 @@ async function readConfirmedTransaction(send, owner, txid) {
     offset += chunk.length / 2;
   } while (offset < anchor.size);
   const raw = Buffer.from(chunks.join(''), 'hex');
-  const root = process.versions.electron && require('electron').app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
-  const { Transaction } = createRequire(path.join(root, 'server/package.json'))('bitcoinjs-lib');
   const header = Buffer.from(anchor.header, 'hex');
-  if (Transaction.fromBuffer(raw).getId() !== txid || sha256d(raw).reverse().toString('hex') !== anchor.wtxid ||
+  if (!matchesTransactionBytes(raw, txid, anchor.wtxid) ||
       sha256d(header).reverse().toString('hex') !== anchor.blockHash ||
       (anchor.tipHeight === anchor.height && anchor.tipHash !== anchor.blockHash)) throw invalid();
   let digest = Buffer.from(txid, 'hex').reverse();
@@ -62,4 +66,4 @@ async function readConfirmedTransaction(send, owner, txid) {
   return { ...proof, confirmations: proof.tipHeight - proof.height + 1, hex: raw.toString('hex') };
 }
 
-module.exports = { readConfirmedTransaction, validateTransactionChunk };
+module.exports = { readConfirmedTransaction, validateTransactionChunk, matchesTransactionBytes };
