@@ -22,6 +22,8 @@
     "managed-verified-prefix.patch",
     "managed-checkpoint-eligibility.patch",
     "proof-only-peers.patch",
-    "managed-store-owner.patch"
+    "managed-store-owner.patch",
+    "archive-proof-routing.patch",
+    "peer-endpoint-identity.patch"
   ]
 }

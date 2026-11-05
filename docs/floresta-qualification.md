@@ -296,6 +296,10 @@ Floresta contributor Luís Schwab identifies his mainnet bridge at `195.26.240.2
 
 On November 5, 2026, a separate wallet-free check tried both published endpoints for block 939,970. The maintainer's port accepted TCP, but neither Bitcoin transport completed a version handshake. The May endpoint timed out while connecting. The check finished in 6.04 seconds with 174 application bytes sent and zero received. Both attempts ended before a proof request could be sent. Historical coverage at either endpoint remains unknown. The preview continues peer discovery and local verification without giving either endpoint special trust.
 
+A separate regtest exercised this arrangement with a reachable archive. One service supplied ordinary blocks. A second advertised only archival proofs and v2 transport. Both drew from the same independently mined chain. The first routing attempt reached header 392 but validated zero blocks because it repeatedly tried to use the ordinary peers for proofs. After correcting selection, the node validated all 392 blocks. For a spend at height 102, it fetched the block from the ordinary service and a six-hash proof with one spent output from the archive. Neither service received a request for the other service's data. Every connection in this test was confined to loopback.
+
+The macOS arm64 release build of the 21-patch series has SHA256 `b91e16f69f9721a7dc6b3d834b32825c1c1eb7a967bfd0b485d8921bfb9dc952`. The build from the pinned release archive passed 132 native tests. The fork and both peer-selection reproductions are available for review. [Floresta fork](https://github.com/coreyphillips/Floresta/pull/1), [archive proof routing and bridge ports](floresta-upstream-bugs.md#an-archive-only-peer-can-be-skipped-for-a-historical-block-proof)
+
 ## Before a wallet can switch
 
 The release keeps the selected Electrum backend until all of the following
