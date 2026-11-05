@@ -102,6 +102,9 @@ jobs:
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # electron-builder skips even identity '-' for PRs by default. This
+          # job has no signing credentials and the preview packager never publishes.
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' && github.event_name == 'pull_request' && 'true' || 'false' }}
         run: |
           $arch = node -p process.arch
           if ($LASTEXITCODE -ne 0 -or $arch -ne $env:EXPECTED_ARCH) { throw "Expected $env:EXPECTED_ARCH host; got $arch." }

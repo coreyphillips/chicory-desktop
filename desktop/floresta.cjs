@@ -22,7 +22,43 @@ const NETWORKS = {
 };
 const cancelled = () => new Error('Local node startup was stopped.');
 const sha = bytes => createHash('sha256').update(bytes).digest();
+const markerFilename = 'chicory-owner.json';
+const validDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const reserveBytes = 128 * 1024 * 1024; // Stop before exhausting the volume. Not a sync-size estimate.
+
+function buildOwner(profile, digest) {
+  if (!validDigest(digest)) throw new Error('A verified managed Floresta build is required.');
+  return sha('chicory.store-build/1\0' + profile + '\0' + digest).toString('hex');
+}
+
+function ownerMarker(network, owner) {
+  return JSON.stringify({ format: 'chicory-floresta/1', network, profile: owner });
+}
+
+function readMarker(dir) {
+  const file = path.join(dir, markerFilename);
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024) throw new Error('Invalid local node storage owner marker.');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const opened = fs.fstatSync(fd);
+    if (opened.dev !== stat.dev || opened.ino !== stat.ino || opened.nlink !== 1 || opened.size !== stat.size) {
+      throw new Error('Local node storage owner changed.');
+    }
+    const bytes = Buffer.alloc(1025);
+    return bytes.toString('utf8', 0, fs.readSync(fd, bytes, 0, bytes.length, 0));
+  } finally { fs.closeSync(fd); }
+}
+
+function storeBuildMatches({ profileDirectory, storageDirectory, network, sha256 }) {
+  if (!Object.hasOwn(NETWORKS, network) || !validDigest(sha256)) return false;
+  try {
+    const profile = fs.realpathSync.native(profileDirectory);
+    const parent = storageDirectory ? fs.realpathSync.native(storageDirectory) : profile;
+    return (!storageDirectory || parent === storageDirectory) &&
+      readMarker(path.join(parent, 'chicory-floresta', network)) === ownerMarker(network, buildOwner(profile, sha256));
+  } catch { return false; }
+}
 
 async function verifyBinary(binary, expected) {
   if (typeof binary !== 'string' || !path.isAbsolute(binary) || typeof expected !== 'string' ||
@@ -51,7 +87,7 @@ async function checkSpace(directory) {
 
 // One owner per network on a selected volume. Publish a complete owner/format marker
 // before the daemon can create files. The daemon separately holds an OS lock until exit.
-async function prepareStorage(profileDirectory, storageDirectory, network, initialized) {
+async function prepareStorage(profileDirectory, storageDirectory, network, initialized, digest) {
   const profile = await fsp.realpath(profileDirectory);
   const parent = storageDirectory ? await fsp.realpath(storageDirectory) : profile;
   if (storageDirectory && parent !== storageDirectory) throw new Error('Reselect the original local node volume.');
@@ -75,8 +111,8 @@ async function prepareStorage(profileDirectory, storageDirectory, network, initi
     throw error;
   }
   const dir = path.join(base, network);
-  const owner = JSON.stringify({ format: 'chicory-floresta/1', network, profile: sha(profile).toString('hex') });
-  const marker = 'chicory-owner.json';
+  const fingerprint = buildOwner(profile, digest);
+  const owner = ownerMarker(network, fingerprint);
   try {
     await fsp.lstat(dir);
   } catch (error) {
@@ -84,22 +120,18 @@ async function prepareStorage(profileDirectory, storageDirectory, network, initi
     if (initialized) throw new Error('Reconnect the original local node storage before restarting.');
     const staging = await fsp.mkdtemp(path.join(base, '.init-'));
     try {
-      await fsp.writeFile(path.join(staging, marker), owner, { mode: 0o600, flag: 'wx' });
+      await fsp.writeFile(path.join(staging, markerFilename), owner, { mode: 0o600, flag: 'wx', flush: true });
       await fsp.rename(staging, dir);
     } catch (publishError) {
-      await fsp.unlink(path.join(staging, marker)).catch(() => {});
+      await fsp.unlink(path.join(staging, markerFilename)).catch(() => {});
       await fsp.rmdir(staging).catch(() => {});
       if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(publishError.code)) throw publishError;
     }
   }
   const identity = await privateDirectory(dir);
-  const file = path.join(dir, marker);
-  const markerStat = await fsp.lstat(file);
-  if (!markerStat.isFile() || markerStat.size > 1024 || (await fsp.readFile(file, 'utf8')) !== owner) {
-    throw new Error('This local node directory has another profile owner or an incompatible storage format.');
+  if (readMarker(dir) !== owner) {
+    throw new Error('This local node directory has another profile owner or an unqualified build. Remove its generated data before rebuilding.');
   }
-  // App-owned profile and external volume markers must never alias other files.
-  if (markerStat.nlink !== 1) throw new Error('Invalid local node storage owner marker.');
   if (network !== 'mainnet') {
     // Upstream appends a second network-specific directory. A selected volume
     // must never redirect the actual chain store to another profile via a link.
@@ -107,10 +139,10 @@ async function prepareStorage(profileDirectory, storageDirectory, network, initi
     if (!initialized) await fsp.mkdir(store, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
     await privateDirectory(store);
   }
-  return { dir, identity };
+  return { dir, identity, fingerprint };
 }
 
-async function removeOwnedData({ profileDirectory, storageDirectory, network, binary, sha256 }) {
+async function removeOwnedData({ profileDirectory, storageDirectory, network, binary, sha256, storeDigest }) {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Automatic node data removal requires local APFS or Linux ext4.');
   if (!Object.hasOwn(NETWORKS, network)) throw new Error('Unsupported local node network.');
   const profile = await fsp.realpath(profileDirectory);
@@ -118,12 +150,17 @@ async function removeOwnedData({ profileDirectory, storageDirectory, network, bi
   if (storageDirectory && parent !== storageDirectory || parent !== profile && parent.startsWith(profile + path.sep) ||
       parent.split(path.sep).includes('chicory-floresta')) throw new Error('The selected storage location changed.');
   const dir = path.join(parent, 'chicory-floresta', network);
-  const owner = sha(profile).toString('hex');
   await verifyBinary(binary, sha256);
+  const next = buildOwner(profile, sha256);
+  const candidates = [next, sha(profile).toString('hex')];
+  if (validDigest(storeDigest)) candidates.push(buildOwner(profile, storeDigest));
+  const marker = readMarker(dir);
+  const owner = candidates.find(value => marker === ownerMarker(network, value));
+  if (!owner) throw new Error('Local node storage is unavailable or owned by another profile or unrecognized build.');
   // The verified helper validates the private owner marker and each allowed
   // database entry while holding the running daemon's kernel lock. It never
   // starts network services. A timeout leaves a durable retry marker.
-  const args = ['--managed-cleanup-for', owner, '--data-dir', dir, '--network', NETWORKS[network][0]];
+  const args = ['--managed-cleanup-for', owner, '--managed-next-owner', next, '--data-dir', dir, '--network', NETWORKS[network][0]];
   const { stdout } = await promisify(execFile)(binary, args, { cwd: dir, env: { HOME: dir, TMPDIR: dir },
     timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 }).catch(() => {
     throw new Error('Node storage is unavailable, in use, on an unsupported filesystem, or contains unexpected files. Reconnect the original local APFS or Linux ext4 volume and retry.');
@@ -295,7 +332,7 @@ class ManagedFloresta {
       signal.throwIfAborted();
       this._state(retry ? 'restarting' : 'starting');
       await verifyBinary(binary, sha256);
-      const storage = await prepareStorage(profileDirectory, storageDirectory, network, this.initialized);
+      const storage = await prepareStorage(profileDirectory, storageDirectory, network, this.initialized, sha256);
       this.initialized = true;
       signal.throwIfAborted();
       const hadHealth = await this._child(storage, signal, ready);
@@ -305,11 +342,11 @@ class ManagedFloresta {
       await delay(500 * (2 ** retry), undefined, { signal });
     }
   }
-  async _child({ dir, identity }, signal, ready) {
+  async _child({ dir, identity, fingerprint }, signal, ready) {
     const { binary, network } = this.options;
     const env = { HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir, TMPDIR: dir };
     if (process.platform === 'win32') env.SystemRoot = process.env.SystemRoot;
-    const args = ['--managed-stdio', '--data-dir', dir, '--network', NETWORKS[network][0], '--assume-valid', '0'];
+    const args = ['--managed-stdio', '--managed-store-owner', fingerprint, '--data-dir', dir, '--network', NETWORKS[network][0], '--assume-valid', '0'];
     if (network === 'regtest') args.push('--disable-dns-seeds');
     const child = this.spawnProcess(binary, args, { cwd: dir, env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     const connection = new AbortController();
@@ -455,4 +492,4 @@ class ManagedFloresta {
   }
 }
 
-module.exports = { ManagedFloresta, removeOwnedData };
+module.exports = { ManagedFloresta, removeOwnedData, storeBuildMatches };

@@ -121,23 +121,29 @@ Start in Settings and accepts the regtest confirmation, keeps the monitor
 running through the selected payments, then stops it and checks that the
 generated data stays available.
 
-On November 5, 2026, the macOS arm64 preview passed all nine checks in
-`floresta-preview,payments,direct-funding,restart` with a fresh regtest and
-disposable profiles. The external wallet sent and received Lightning payments
-while the monitor ran. Its signed 20,000 sat direct funding payment spent the
-confirmed 22,000 sat coin and reached four confirmations. A complete app
-restart recovered six history entries. The tested app contained the 18-patch
-Floresta binary with build SHA-256
-`f12d69abf4eea959ee1f7e5204f9b5f84b4d69f6e7f8c8e9eaf366fd07918dc6`
-and nested signed SHA-256
-`25553c0365555005417d4e4229b98e9882e1ebe8c20823110a7bf20724e72785`.
-The final macOS package with the storage policy and subscription fixes passed
-all nine checks again on a separate fresh chain. Its `app.asar` file SHA-256 was
-`b314525eb9ec6892907d9b0f5026c92cd245aff800f86a16ed8eb565e3fa8baa`.
-The full application tree digest was
-`ff6de31888af0995fbc5c68b1934f3ead688f161ad315dacc2c4068c5708d05a`.
-The report SHA-256 was
-`695dabac18a697df841923af0e3b7c376051057f036e69bd16dc06bd8cb359aa`.
+On November 5, 2026, the macOS arm64 19-patch preview passed all nine checks
+in `floresta-preview,payments,direct-funding,restart` with fresh regtest
+storage and disposable wallets. The external wallet sent and received
+Lightning payments while the monitor ran. Its signed 20,000 sat direct
+funding payment spent a confirmed 22,000 sat coin and reached four
+confirmations. Restart restored six history entries. The same app, freshly
+extracted from the distribution ZIP, passed the empty-profile Settings smoke.
+
+| Final Apple silicon review package | SHA-256 |
+| --- | --- |
+| Built Floresta candidate | `152b157a750352af0d2ac9bc5506122923bb5dc3e9e3b20cb3536f0891ebf19b` |
+| Ad hoc signed daemon in the app | `c707d16b8a8e7baed0fd79d8ed43d5c213f7f7d55da8d17001c3cecb47139be8` |
+| Application tree | `2a266cd4bc23ce44952b3a7c9ef89486719b380e8a8a273e7255c7be5ce8785d` |
+| `app.asar` file | `21629a9c3ca0bd443b5427944fb9bf8c483050da3f1aca84ab746b7093a59358` |
+| `Chicory-Floresta-Preview-macOS-arm64-adhoc.zip` | `6bbc34ca86e9c5498b27c05301952d80f7af97c7e43fbb8a3039704f5ddf0ef8` |
+| Funded qualification report | `190e427ef7947ce448fe754d902183d84fdeb91f1479343f56a1abe4e6842016` |
+| Sanitized package receipt | `7fcb75c929ca1c5ac4607ecc61117cd246367c0539524b14cd438efe2d060557` |
+
+A separate two-owner run used the optimized candidate for both wallets'
+authenticated private connections. Both paid through a new 300,000 sat channel
+and canceled a held HTLC. Its sanitized receipt SHA-256 was
+`66c299eacd5c76748341ae45cc0215e174c011dc6eeefffd6d8b334fddcb8994`.
+[Private channel qualification](floresta-beignet.md#private-managed-lightning-channel-and-invoices-on-regtest)
 
 ## Stages
 

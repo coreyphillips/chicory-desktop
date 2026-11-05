@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { ManagedFloresta, removeOwnedData } = require('./floresta.cjs');
+const { ManagedFloresta, removeOwnedData, storeBuildMatches } = require('./floresta.cjs');
 
 const networks = ['mainnet', 'testnet', 'regtest'];
 const validDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -11,6 +11,15 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const prefsFile = 'floresta-sync.json';
 const cleanupFile = 'floresta-cleanup.json';
 const validFolder = folder => folder === null || typeof folder === 'string' && path.isAbsolute(folder);
+const validFolderId = id => typeof id === 'string' && /^\d{1,20}:\d{1,20}$/.test(id);
+
+function folderIdentity(folder) {
+  try {
+    if (fs.realpathSync(folder) !== folder) return null;
+    const stat = fs.statSync(folder, { bigint: true });
+    return stat.isDirectory() ? stat.dev + ':' + stat.ino : null;
+  } catch { return null; }
+}
 
 function writePrivate(file, value) {
   const stage = file + '.' + randomUUID();
@@ -80,7 +89,8 @@ class FlorestaSettings {
       for (const [network, value] of Object.entries(prefs.networks)) {
         if (!networks.includes(network) || !validDigest(value.digest) || typeof value.enabled !== 'boolean' ||
             value.storeDigest != null && !validDigest(value.storeDigest) ||
-            !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean' ||
+            !validFolder(value.folder) || value.folderId != null && !validFolderId(value.folderId) ||
+            value.used !== undefined && typeof value.used !== 'boolean' ||
             value.checkpointHold !== undefined && typeof value.checkpointHold !== 'boolean' ||
             value.checkpointQuickStart !== undefined && typeof value.checkpointQuickStart !== 'boolean' ||
             value.initialized !== undefined && typeof value.initialized !== 'boolean') throw new Error();
@@ -96,7 +106,8 @@ class FlorestaSettings {
     const entry = this._read()[network];
     const locations = this._locations();
     const cleanupPending = Object.hasOwn(locations, network);
-    const folder = cleanupPending ? locations[network] : entry?.folder ?? null;
+    const folder = cleanupPending ? locations[network].folder : entry?.folder ?? null;
+    const folderId = (cleanupPending ? locations[network].folderId : entry?.folderId) ?? null;
     const recordedStore = !!entry && entry.used !== false;
     const used = cleanupPending || recordedStore || this._hasNodeData(network, folder);
     // Older previews saved the build that last requested the store in digest.
@@ -108,7 +119,7 @@ class FlorestaSettings {
     const quickStart = entry?.checkpointQuickStart ?? !alreadyEnabled;
     return { digest: this.digest, storeDigest, enabled: alreadyEnabled && !cleanupPending && storeDigest === this.digest, checkpointHold: entry?.checkpointHold === true,
       checkpointQuickStart: network === 'mainnet' && quickStart,
-      folder,
+      folder, folderId,
       // Older versions recorded the selected folder before the first start.
       // Treat a previously used custom volume as initialized to avoid creating
       // replacement data on another disk mounted at its old path.
@@ -119,9 +130,15 @@ class FlorestaSettings {
       const stat = fs.lstatSync(this.cleanupFile);
       if (!stat.isFile() || stat.size > 16384) throw new Error();
       const values = JSON.parse(fs.readFileSync(this.cleanupFile, 'utf8'));
-      if (!values || Array.isArray(values) || typeof values !== 'object' ||
-          Object.entries(values).some(([network, folder]) => !networks.includes(network) || !validFolder(folder))) throw new Error();
-      return values;
+      if (!values || Array.isArray(values) || typeof values !== 'object') throw new Error();
+      return Object.fromEntries(Object.entries(values).map(([network, value]) => {
+        // Older cleanup records contain only the chosen parent path.
+        const location = validFolder(value) ? { folder: value } : value;
+        if (!networks.includes(network) || !location || !validFolder(location.folder) ||
+            location.folderId != null && !validFolderId(location.folderId) ||
+            location.storeDigest != null && !validDigest(location.storeDigest)) throw new Error();
+        return [network, location];
+      }));
     } catch (error) {
       if (error.code === 'ENOENT') return {};
       throw new Error('The saved local node storage locations could not be read.');
@@ -135,10 +152,10 @@ class FlorestaSettings {
     writePrivate(this.file, { version: 1, networks: { ...this._read(), [network]: entry } });
   }
   _path(network, folder) { return path.join(folder || this.profile, 'chicory-floresta', network); }
-  _profileStoreMissing(network) {
+  _storeMissing(network, folder, folderId) {
     try {
-      if (!fs.statSync(this.profile).isDirectory()) return false;
-      const dir = this._path(network, null);
+      if (folder ? !folderId || folderIdentity(folder) !== folderId : !fs.statSync(this.profile).isDirectory()) return false;
+      const dir = this._path(network, folder);
       const parent = fs.lstatSync(path.dirname(dir), { throwIfNoEntry: false });
       return !parent || parent.isDirectory() && !fs.lstatSync(dir, { throwIfNoEntry: false });
     } catch { return false; }
@@ -150,15 +167,23 @@ class FlorestaSettings {
       return fs.readdirSync(store).some(name => !['chicory-managed.lock', 'chicory-owner.json', '.DS_Store', 'config.toml'].includes(name));
     } catch (error) { return error.code !== 'ENOENT'; }
   }
+  _needsRebuild(network, prefs) {
+    if (!prefs.used) return false;
+    if (prefs.storeDigest !== this.digest) return true;
+    if (prefs.folder && !folderIdentity(prefs.folder)) return false;
+    return !storeBuildMatches({ profileDirectory: this.profile, storageDirectory: prefs.folder, network, sha256: this.digest }) &&
+      this._hasNodeData(network, prefs.folder);
+  }
   status(network) {
-    const { enabled, folder, used, storeDigest, checkpointQuickStart, checkpointHold } = this._saved(network);
+    const prefs = this._saved(network);
+    const { enabled, folder, folderId, used, checkpointQuickStart, checkpointHold } = prefs;
     const node = this.nodes.get(network)?.status();
-    let volumeAvailable = true;
-    try { if (folder) volumeAvailable = fs.statSync(folder).isDirectory(); } catch { volumeAvailable = false; }
+    const currentFolderId = folder ? folderIdentity(folder) : null;
+    const volumeAvailable = !folder || !!currentFolderId && (!folderId || currentFolderId === folderId);
     return { requested: enabled, checkpointQuickStart, checkpointAccepted: node?.checkpointAccepted === true,
-      storageNeedsRebuild: used && storeDigest !== this.digest,
+      storageNeedsRebuild: this._needsRebuild(network, prefs),
       storagePath: this._path(network, folder),
-      canConfirmRemoved: used && !enabled && !folder && this._profileStoreMissing(network),
+      canConfirmRemoved: used && !enabled && this._storeMissing(network, folder, folderId),
       checkpointHold: node?.checkpointReason ?? (checkpointHold ? 'independent-replay-required' : null), storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
       customStorage: process.platform !== 'win32', removalAvailable: ['darwin', 'linux'].includes(process.platform),
       phase: this.errors.has(network) ? 'failed' : node?.phase || 'stopped', height: node?.height ?? null,
@@ -216,6 +241,14 @@ class FlorestaSettings {
   }
   _start(network, prefs) {
     this.errors.delete(network);
+    if (this._needsRebuild(network, prefs)) {
+      this.errors.set(network, 'Stop the local node and remove its previous data before rebuilding with this version.');
+      return;
+    }
+    if (prefs.folderId && folderIdentity(prefs.folder) !== prefs.folderId) {
+      this.errors.set(network, 'Reconnect the original local node storage folder.');
+      return;
+    }
     try {
       if (!this.nodes.has(network)) {
         const build = this.load(this.root, this.digest);
@@ -261,13 +294,16 @@ class FlorestaSettings {
     this.inFlight.add(network);
     try {
       if (operation === 'start') {
-        if (prefs.used && prefs.storeDigest !== this.digest) {
-          throw new Error('Remove the previous local node data before starting this build. Its storage compatibility has not been verified.');
-        }
         if (!prefs.enabled && !await confirm(prefs.checkpointQuickStart ? 'startCheckpoint' : 'start')) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
-        this._save(network, { ...prefs, storeDigest: this.digest, enabled: true, used: true });
-        this._start(network, prefs);
+        const latest = this._saved(network);
+        if (this._needsRebuild(network, latest)) {
+          throw new Error('Remove the previous local node data before starting this build. Its storage compatibility has not been verified.');
+        }
+        const folderId = latest.folder ? folderIdentity(latest.folder) : null;
+        if (latest.folder && (!folderId || latest.folderId && latest.folderId !== folderId)) throw new Error('Reconnect the original local node storage folder.');
+        this._save(network, { ...latest, folderId, storeDigest: this.digest, enabled: true, used: true });
+        this._start(network, { ...latest, folderId });
       } else if (['allowCheckpoint', 'requireHistory'].includes(operation) && network === 'mainnet') {
         const enable = operation === 'allowCheckpoint';
         if (enable && !prefs.checkpointQuickStart && !await confirm('allowCheckpoint')) return this.status(network);
@@ -284,14 +320,15 @@ class FlorestaSettings {
         if (node) { await node.stop(); this.nodes.delete(network); }
         this.errors.delete(network);
       } else if (operation === 'remove' && !prefs.enabled && prefs.used && !this.nodes.has(network)) {
-        const missing = !prefs.folder && this._profileStoreMissing(network);
+        const missing = this._storeMissing(network, prefs.folder, prefs.folderId);
         if (!await confirm(missing ? 'confirmRemoved' : 'remove', this._path(network, prefs.folder))) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
         try {
+          if (prefs.folderId && folderIdentity(prefs.folder) !== prefs.folderId) throw new Error('The storage location changed.');
           if (missing) {
-            if (!this._profileStoreMissing(network)) throw new Error('Node data reappeared.');
+            if (!this._storeMissing(network, prefs.folder, prefs.folderId)) throw new Error('The storage location changed.');
           } else {
-            await this._remove(network, prefs.folder);
+            await this._remove(network, prefs.folder, this._locations()[network]?.storeDigest ?? prefs.storeDigest);
           }
           this._save(network, { ...prefs, storeDigest: null, used: false, initialized: false });
           const locations = this._locations();
@@ -302,14 +339,19 @@ class FlorestaSettings {
       } else if (operation === 'folder' && !prefs.used && !prefs.enabled && process.platform !== 'win32') {
         const picked = await folder();
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
-        if (picked) this._save(network, { ...prefs, folder: fs.realpathSync(picked) });
+        if (picked) {
+          const chosen = fs.realpathSync(picked);
+          const folderId = folderIdentity(chosen);
+          if (!folderId) throw new Error('Choose an available storage directory.');
+          this._save(network, { ...prefs, folder: chosen, folderId });
+        }
       } else throw new Error('This local node setting is unavailable.');
       return this.status(network);
     } finally { this.inFlight.delete(network); }
   }
-  _remove(network, folder) {
+  _remove(network, folder, storeDigest) {
     const build = this.load(this.root, this.digest);
-    const task = this.remove({ ...build, network, profileDirectory: this.profile, storageDirectory: folder });
+    const task = this.remove({ ...build, network, storeDigest, profileDirectory: this.profile, storageDirectory: folder });
     this.removals.set(network, task);
     return task.finally(() => this.removals.delete(network));
   }
@@ -328,12 +370,18 @@ class FlorestaSettings {
     for (const network of networks) {
       const known = Object.hasOwn(locations, network);
       const entry = entries[network];
-      const folder = known ? locations[network] : entry?.folder ?? null;
-      if (!known && (!entry || entry.used === false) && !this._hasNodeData(network, null)) continue;
-      try { await this._remove(network, folder); }
-      catch { remaining[network] = folder; }
+      const location = known ? locations[network] : { folder: entry?.folder ?? null, folderId: entry?.folderId ?? null,
+        storeDigest: entry && entry.used !== false ? (Object.hasOwn(entry, 'storeDigest') ? entry.storeDigest : entry.digest) : null };
+      const { folder, folderId, storeDigest } = location;
+      const currentId = folder ? folderIdentity(folder) : null;
+      const originalAvailable = !folder || !!currentId && (!folderId || folderId === currentId);
+      if (!known && (!entry || entry.used === false) && originalAvailable && !this._hasNodeData(network, folder)) continue;
+      try {
+        if (!originalAvailable) throw new Error('Storage unavailable.');
+        await this._remove(network, folder, storeDigest);
+      } catch { remaining[network] = location; }
     }
-    const paths = Object.entries(remaining).map(([network, folder]) => this._path(network, folder));
+    const paths = Object.entries(remaining).map(([network, location]) => this._path(network, location.folder));
     if (unreadable) paths.push('An unreadable storage location record. Check any location previously selected in Settings.');
     const consent = !paths.length || await confirmRemaining(paths);
     if (!consent || this.epoch !== epoch) {

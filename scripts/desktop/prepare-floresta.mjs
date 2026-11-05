@@ -82,6 +82,9 @@ async function build({ archive, debug, test }) {
         '-p', 'floresta-chain', '-p', 'floresta-wire', '-p', 'floresta-electrum', '-p', 'floresta-node',
         '--features', 'floresta-node/compact-filters,floresta-chain/flat-chainstore,floresta-chain/bitcoinkernel',
         '--target-dir', target, ...(debug ? [] : ['--release'])], { cwd: source, stdio: 'inherit' });
+      execFileSync('cargo', ['test', '--locked', '-p', 'florestad', '--bin', 'florestad', '--no-default-features',
+        '--features', 'compact-filters', '--target-dir', target, ...(debug ? [] : ['--release'])],
+        { cwd: source, stdio: 'inherit' });
     }
     const built = path.join(target, profile, name);
     const digest = sha256(await fs.readFile(built));

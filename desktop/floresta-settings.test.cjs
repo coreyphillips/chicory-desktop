@@ -163,7 +163,7 @@ test('removal is explicit and serialized with enable, folder changes and quit', 
 test('an offline drive remains visible across an explicit wallet erase and is retried on reconnect', async t => {
   const { options, profile } = fixture(t);
   // Use temporary path names only. This mock physically represents a disconnected selected volume.
-  const volume = path.join(profile, 'fixture-offline-volume');
+  const volume = path.join(fs.realpathSync(profile), 'fixture-offline-volume');
   const taken = [];
   let online = false;
   const settings = new FlorestaSettings({ ...options, remove: async ({ network, storageDirectory }) => {
@@ -180,8 +180,8 @@ test('an offline drive remains visible across an explicit wallet erase and is re
   assert.equal(fs.existsSync(settings.file), true);
   assert.equal(await settings.prepareErase(async paths => { assert.deepEqual(paths, [pending]); return true; }), true);
   assert.equal(fs.existsSync(settings.file), false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(settings.cleanupFile)), { regtest: volume });
-  assert.deepEqual(taken.slice(-2), [['mainnet', null], ['regtest', volume]]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings.cleanupFile)), { regtest: { folder: volume, folderId: null, storeDigest: digest } });
+  assert.ok(taken.every(([network]) => network === 'mainnet'));
   const reopened = new FlorestaSettings({ ...options, digest: 'd0'.repeat(32), remove: settings.remove });
   assert.equal(reopened.status('regtest').requested, false);
   assert.equal(reopened.status('regtest').storage, volume);
@@ -200,7 +200,7 @@ test('a missing source candidate can still erase wallet keys after a native disc
   let asked = false;
   assert.equal(await normalBuild.prepareErase(async paths => { asked = true; assert.equal(paths.length, 1); return true; }), true);
   assert.equal(asked, true);
-  assert.deepEqual(JSON.parse(fs.readFileSync(normalBuild.cleanupFile)), { testnet: null });
+  assert.deepEqual(JSON.parse(fs.readFileSync(normalBuild.cleanupFile)), { testnet: { folder: null, folderId: null, storeDigest: digest } });
 });
 
 test('enabling mainnet defaults to a disclosed checkpoint and preserves the full-verification choice', async t => {
@@ -304,4 +304,54 @@ test('untracked node data and a directory that reappears during removal keep the
   assert.equal(state.storageNeedsRebuild, true);
   assert.equal(state.canConfirmRemoved, false);
   assert.equal(fs.existsSync(dir), true);
+});
+
+test('only the original custom folder can confirm removal of a missing node directory', { skip: process.platform === 'win32' }, async t => {
+  const { settings, profile } = fixture(t);
+  const folder = fs.mkdtempSync(path.join(fs.realpathSync(profile), 'volume-'));
+  await settings.change('regtest', 'folder', { ...yes, folder: async () => folder });
+  await settings.change('regtest', 'start', yes);
+  await settings.change('regtest', 'stop', yes);
+  assert.equal(settings.status('regtest').canConfirmRemoved, true);
+  const original = folder + '-disconnected';
+  fs.renameSync(folder, original);
+  fs.mkdirSync(folder);
+  assert.equal(settings.status('regtest').canConfirmRemoved, false);
+  assert.equal(settings.status('regtest').volumeAvailable, false);
+  await assert.rejects(settings.change('regtest', 'start', yes), /original/);
+  fs.rmdirSync(folder);
+  fs.renameSync(original, folder);
+  assert.equal((await settings.change('regtest', 'remove', {
+    ...yes, confirm: async action => { assert.equal(action, 'confirmRemoved'); return true; },
+  })).storageUsed, false);
+  assert.equal((await settings.change('regtest', 'start', yes)).requested, true);
+});
+
+test('profile erase finds watch data restored to a previously selected custom folder', async t => {
+  const { settings, profile } = fixture(t);
+  const folder = fs.mkdtempSync(path.join(fs.realpathSync(profile), 'volume-'));
+  const dir = settings._path('mainnet', folder);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'restored-watches'), 'test');
+  settings._save('mainnet', { digest, enabled: false, used: false, folder });
+  settings.remove = async options => {
+    assert.equal(options.storageDirectory, folder);
+    throw new Error('Cannot safely remove an unknown store');
+  };
+  assert.equal(await settings.prepareErase(async paths => { assert.deepEqual(paths, [dir]); return false; }), false);
+  assert.equal(await settings.prepareErase(async paths => { assert.deepEqual(paths, [dir]); return true; }), true);
+  assert.equal(JSON.parse(fs.readFileSync(settings.cleanupFile)).mainnet.folder, folder);
+  assert.equal(settings.status('mainnet').storageNeedsRebuild, true);
+});
+
+test('an unexpected database that appears during the start dialog cannot acquire a build receipt', async t => {
+  const { settings, calls } = fixture(t);
+  const dir = settings._path('mainnet', null);
+  await assert.rejects(settings.change('mainnet', 'start', { ...yes, confirm: async () => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'unknown-database'), 'test');
+    return true;
+  } }), /compatibility/);
+  assert.deepEqual(calls, []);
+  assert.equal(settings.status('mainnet').storageNeedsRebuild, true);
 });

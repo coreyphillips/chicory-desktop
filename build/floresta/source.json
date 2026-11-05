@@ -21,6 +21,7 @@
     "socks-peer-addresses.patch",
     "managed-verified-prefix.patch",
     "managed-checkpoint-eligibility.patch",
-    "proof-only-peers.patch"
+    "proof-only-peers.patch",
+    "managed-store-owner.patch"
   ]
 }

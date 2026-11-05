@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const test = require('node:test');
-const { ManagedFloresta, removeOwnedData } = require('./floresta.cjs');
+const { ManagedFloresta, removeOwnedData, storeBuildMatches } = require('./floresta.cjs');
 const { WatchRequests, PROTOCOL } = require('./floresta-watches.cjs');
 
 const regtestHeader = '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000';
@@ -41,7 +41,9 @@ async function fixture(t, { invalidMessage, wrongHeader, silent, watches, storag
       for (const key of ['APPDATA', 'HOME', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE']) {
         assert.equal(config.env[key], expectedDirectory);
       }
-      assert.deepEqual(args, ['--managed-stdio', '--data-dir', config.cwd, '--network', 'regtest', '--assume-valid', '0', '--disable-dns-seeds']);
+      const profile = fs.realpathSync.native(profileDirectory);
+      const owner = digest('chicory.store-build/1\0' + profile + '\0' + digest(fs.readFileSync(binary)));
+      assert.deepEqual(args, ['--managed-stdio', '--managed-store-owner', owner, '--data-dir', config.cwd, '--network', 'regtest', '--assume-valid', '0', '--disable-dns-seeds']);
       const js = `
         const net = require('node:net');
         const server = net.createServer(socket => socket.on('data', () => socket.end(JSON.stringify({id:1,result:${JSON.stringify(wrongHeader ? '00'.repeat(80) : regtestHeader)}})+'\\n')));
@@ -105,6 +107,32 @@ test('a second profile cannot reuse another profile’s selected network store',
   const different = new ManagedFloresta({ ...options, profileDirectory: other, storageDirectory: fs.realpathSync(options.profileDirectory) });
   await assert.rejects(different.start(), /another profile owner/);
   assert.equal(children.length, 1);
+});
+
+test('startup refuses a subtree restored after consent and one produced by a newer build', async t => {
+  const { node, options, children } = await fixture(t);
+  await node.start();
+  await node.stop();
+  assert.equal(storeBuildMatches(options), true);
+  const dir = path.join(options.profileDirectory, 'chicory-floresta', 'regtest');
+  const savedDir = dir + '-older';
+  await fs.promises.rename(dir, savedDir);
+  await writeFile(options.binary, 'new public fixture');
+  const newer = { ...options, sha256: digest('new public fixture') };
+  const next = new ManagedFloresta(newer);
+  t.after(() => next.stop());
+  // A previously initialized directory appears after Start inspected an empty location.
+  await fs.promises.rename(savedDir, dir);
+  assert.equal(storeBuildMatches(newer), false);
+  await assert.rejects(next.start(), /unqualified build/);
+  assert.equal(children.length, 1);
+  await fs.promises.rename(dir, savedDir);
+  await next.start();
+  await next.stop();
+  await writeFile(options.binary, 'public fixture');
+  assert.equal(storeBuildMatches(options), false);
+  await assert.rejects(node.start(), /unqualified build/);
+  assert.equal(children.length, 2);
 });
 
 test('reopening an initialized store waits for the original volume when its mount path is reused', async t => {
@@ -287,9 +315,13 @@ test('native managed build enforces a chain-only listener, exclusive store and o
   assert.equal(child.exitCode, 0, 'Native shutdown must complete without SIGKILL');
   const data = path.join(profileDirectory, 'chicory-floresta', 'regtest');
   const owner = await readFile(path.join(data, 'chicory-owner.json'), 'utf8');
+  for (const args of [[], ['--managed-store-owner', 'ab'.repeat(32)]]) {
+    assert.throws(() => execFileSync(nativeBinary, ['--managed-stdio', '--data-dir', data, '--network', 'regtest', '--disable-dns-seeds', ...args],
+      { input: '', stdio: 'pipe', timeout: 5000 }), error => error.status === 1 && /owner or build differs/.test(error.stderr));
+  }
   // The managed mode must ignore existing config files on this volume.
   await writeFile(path.join(data, 'regtest', 'config.toml'), '[wallet]\ndescriptors = ["invalid-descriptor"]\n', { mode: 0o600 });
-  const detachedOwner = spawn(nativeBinary, ['--managed-stdio', '--network', 'regtest', '--data-dir', data, '--disable-dns-seeds'], {
+  const detachedOwner = spawn(nativeBinary, ['--managed-stdio', '--managed-store-owner', JSON.parse(owner).profile, '--network', 'regtest', '--data-dir', data, '--disable-dns-seeds'], {
     env: { HOME: data, ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot } : {}) }, stdio: ['pipe', 'pipe', 'ignore']
   });
   t.after(() => { if (detachedOwner.exitCode === null && detachedOwner.signalCode === null) detachedOwner.kill('SIGKILL'); });
@@ -352,6 +384,14 @@ test('native cleanup requires the actual owner, stopped store, qualified volume,
     assert.ok((await fs.promises.stat(db)).size);
     await fs.promises.unlink(link);
     // An interrupted erase may be retried, but no daemon may open that data.
+    const markerFile = path.join(path.dirname(dir), 'chicory-owner.json');
+    const nextMarker = await readFile(markerFile, 'utf8');
+    const legacy = { ...JSON.parse(nextMarker), profile: digest(await fs.promises.realpath(options.profileDirectory)) };
+    await writeFile(markerFile, JSON.stringify(legacy));
+    await writeFile(path.join(dir, 'chicory-removal-pending'), nextMarker.slice(0, 9), { mode: 0o600, flag: 'wx' });
+    await assert.rejects(node.start(), /unqualified build/);
+    await removeOwnedData(options);
+    assert.equal(await readFile(markerFile, 'utf8'), nextMarker);
     await writeFile(path.join(dir, 'chicory-removal-pending'), '', { mode: 0o600, flag: 'wx' });
     await assert.rejects(node.start(), /exited/);
     await removeOwnedData(options);
@@ -361,3 +401,34 @@ test('native cleanup requires the actual owner, stopped store, qualified volume,
     await node.start();
     assert.ok((await fs.promises.stat(db)).size);
   });
+
+test('offline cleanup rotates a recorded older build under the mainnet root lock without a peer', {
+  skip: !nativeBinary || !['darwin', 'linux'].includes(process.platform),
+}, async t => {
+  const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-owner-main-layout-'));
+  t.after(() => rm(profileDirectory, { recursive: true, force: true }));
+  const profile = await fs.promises.realpath(profileDirectory);
+  const root = path.join(profile, 'chicory-floresta', 'mainnet');
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const old = digest('previous test build');
+  const current = digest(await readFile(nativeBinary));
+  const options = { profileDirectory, network: 'mainnet', binary: nativeBinary, sha256: current };
+  const marker = id => JSON.stringify({ format: 'chicory-floresta/1', network: 'mainnet', profile: digest('chicory.store-build/1\0' + profile + '\0' + id) });
+  await writeFile(path.join(root, 'chicory-owner.json'), marker(old), { mode: 0o600 });
+  await writeFile(path.join(root, 'chicory-managed.lock'), '', { mode: 0o600 });
+  await writeFile(path.join(root, 'db'), 'synthetic database', { mode: 0o600 });
+  await assert.rejects(removeOwnedData(options), /unrecognized build/);
+  assert.equal(await readFile(path.join(root, 'db'), 'utf8'), 'synthetic database');
+  if (process.platform === 'linux' && execFileSync('findmnt', ['-n', '-o', 'FSTYPE', '-T', root], { encoding: 'utf8' }).trim() !== 'ext4') {
+    await assert.rejects(removeOwnedData({ ...options, storeDigest: old }), /unsupported filesystem/);
+    return;
+  }
+  const lock = (await fs.promises.stat(path.join(root, 'chicory-managed.lock'))).ino;
+  await removeOwnedData({ ...options, storeDigest: old });
+  assert.equal(await readFile(path.join(root, 'chicory-owner.json'), 'utf8'), marker(current));
+  assert.equal(storeBuildMatches(options), true);
+  assert.equal(storeBuildMatches({ ...options, sha256: old }), false);
+  await removeOwnedData({ ...options, storeDigest: old });
+  assert.equal((await fs.promises.stat(path.join(root, 'chicory-managed.lock'))).ino, lock);
+  assert.deepEqual((await fs.promises.readdir(root)).sort(), ['chicory-managed.lock', 'chicory-owner.json']);
+});

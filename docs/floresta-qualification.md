@@ -22,7 +22,7 @@ Its comparison branch points at the pinned v0.9.1 release.
    The macOS arm64 test used Rust 1.99.1, CMake 4.2.3 and Boost 1.85.
    Run `npm run runtime:prepare:floresta -- --debug`. To reuse an existing
    archive, pass `--archive /absolute/path/to/floresta-source.tgz`. Add `--test`
-   to run unit tests in the four patched Rust crates before installing the candidate.
+   to run the daemon and four patched library test suites before installing the candidate.
    The recipe verifies the archive and pristine Cargo lock, applies the listed
    patches and records their hashes alongside the digest of the built binary.
 3. Set `CHICORY_FLORESTA_CANDIDATE_SHA256` to the digest in the output
@@ -48,10 +48,13 @@ remove it, confirm removal in Settings. A missing custom volume stays registered
 until its data can be removed safely. Independent wallet and channel backups
 belong to Beignet and must be kept separately.
 
-On macOS arm64, a disposable regtest store initialized by the 17-patch
-candidate was refused by the 18-patch candidate. After confirmed native
-cleanup, the newer build started at genesis and the older build refused to
-reopen its new store. The preview supports a fresh rebuild across these builds.
+On macOS arm64, the 19-patch preview refused a disposable regtest store
+initialized by the 18-patch preview. After confirmed native cleanup, the newer
+build started at genesis and the older build refused to reopen the new store.
+The daemon checks a marker bound to the profile and exact executable while
+holding the store lock. Offline cleanup rewrites that marker under the same
+lock after removing the generated data. Restoring a database from a different
+build requires a rebuild even if the profile preferences still match.
 In-place migration and signed release updates still need qualification.
 
 The supervisor identifies the owned loopback service by its inherited pipe
@@ -283,7 +286,7 @@ A separate cold startup used advertised peer services from Bitcoin handshakes an
 
 The same network trial sent a confirmed-block proof request for height 939,970 to the five endpoints returned by the newer upstream proof seed. Two peers completed a Bitcoin v2 handshake and advertised the Utreexo proof service. Both delivered a 2,384,708-byte proof payload naming a recent block at height 974,692. Neither delivered any proof for 939,970 on a separate 40-second request. The comparison identifies an availability limit for the sampled peers and heights. It does not establish network-wide archival coverage or prove why either peer withheld its response. The control matched the requested block hashes. It did not independently validate the recent accumulator.
 
-The public trials used fresh data. The 18-patch preview inherits a v0.9.1 shutdown bug that can save an empty list of recently connected proof peers in `anchors.json`. The independent `peers.json` address book and fresh discovery can still supply candidates at restart. Warm mainnet recovery and the availability of a proof provider for the checkpoint gap remain unmeasured. [Anchor persistence and its upstream fix](floresta-upstream-bugs.md#connected-proof-peer-anchors-can-be-lost-at-shutdown)
+The public trials used fresh data. The preview inherits a v0.9.1 shutdown bug that can save an empty list of recently connected proof peers in `anchors.json`. The independent `peers.json` address book and fresh discovery can still supply candidates at restart. Warm mainnet recovery and the availability of a proof provider for the checkpoint gap remain unmeasured. [Anchor persistence and its upstream fix](floresta-upstream-bugs.md#connected-proof-peer-anchors-can-be-lost-at-shutdown)
 
 ## Before a wallet can switch
 
