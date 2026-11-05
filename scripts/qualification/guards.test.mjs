@@ -123,7 +123,7 @@ test('dependency versions come from the lockfiles', () => {
   const root = path.resolve(import.meta.dirname, '../..');
   const versions = dependencyVersions(root);
   assert.match(versions.electron, /^\d+\.\d+\.\d+$/);
-  assert.equal(versions.beignet, '0.36.1');
+  assert.equal(versions.beignet, '0.38.0');
   assert.match(versions.tor, /^\d+\.\d+\.\d+\.\d+$/);
   assert.match(versions.walletCore, /#[0-9a-f]{40}$/);
 });
@@ -146,7 +146,7 @@ test('package evidence changes when any bundled engine file changes', t => {
   write('resources/app.asar', 'asar');
   write('resources/server/desktop-bootstrap.js', 'bootstrap');
   write('resources/runtime/node/bin/node', 'node');
-  write('resources/runtime/engine/node_modules/beignet/package.json', '{"version":"0.36.1"}');
+  write('resources/runtime/engine/node_modules/beignet/package.json', '{"version":"0.38.0"}');
   write('resources/runtime/engine/node_modules/beignet/dist/cli/cli.js', 'engine one');
   write('resources/runtime/tor/tor/tor', 'tor');
   const executable = path.join(directory, 'chicory-desktop');

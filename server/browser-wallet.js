@@ -288,7 +288,8 @@ function mountBrowserWalletApi(app, manager, { drainActivity } = {}) {
     ...await get(req.params.id).activity(),
   ]));
   const router = express.Router({ mergeParams: true });
-  // Beignet 0.36.1 documents outgoing amountSats as the rounded total debit.
+  // Beignet 0.36.1 documents outgoing amountSats as the rounded total debit,
+  // and 0.38.0 lists payments with the same code (listPayments is unchanged).
   // Name that wire meaning explicitly. A future engine must be verified
   // before opting into this projection; older recipient-amount APIs must not
   // have their fees subtracted a second time.
@@ -296,7 +297,7 @@ function mountBrowserWalletApi(app, manager, { drainActivity } = {}) {
     const record = manager.registry.get(req.params.id);
     if (!record) refuse('NOT_FOUND', 'Wallet not found.', 404);
     const rows = await manager._daemonCall(record, 'GET', '/payments');
-    if (manager.engineVersion !== '0.36.1') return rows;
+    if (manager.engineVersion !== '0.38.0') return rows;
     return rows.map(row => row.direction === 'OUTGOING' && row.status === 'COMPLETED' && !row.payAll
       ? { ...row, amountSemantics: 'total-debit-including-fee' } : row);
   }));
