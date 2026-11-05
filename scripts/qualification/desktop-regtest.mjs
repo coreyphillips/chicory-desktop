@@ -32,7 +32,8 @@ const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const { stages, recoveryStage } = qualificationStages(process.env.CHICORY_QUALIFY_STAGES);
 const fixtureDirectory = process.env.CHICORY_QUALIFY_FLORESTA_FIXTURE;
 if (fixtureDirectory) {
-  assert.ok(stages.size === 1 && (stages.has('direct-funding') || stages.has('forceclose-sweep') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
+  assert.ok(stages.size === 1 && (stages.has('direct-funding') || stages.has('forceclose-sweep') ||
+    stages.has('breach-justice') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
   assertDisposableProfile(fixtureDirectory);
   await fs.chmod(fixtureDirectory, 0o700);
 }
@@ -301,8 +302,9 @@ try {
   const subjectWallets = await subject.api('/wallets');
   assert.deepEqual(subjectWallets, [], 'A fresh profile starts with zero wallets');
   const forceClose = stages.has('forceclose-sweep');
-  peer = await startPeer(peerPort, Boolean(fixtureDirectory || recoveryStage || forceClose));
-  if (fixtureDirectory || forceClose) watchCollection.setWatchCollection(peer.child, 'regtest', true);
+  const breach = stages.has('breach-justice');
+  peer = await startPeer(peerPort, Boolean(fixtureDirectory || recoveryStage || forceClose || breach));
+  if (fixtureDirectory || forceClose || breach) watchCollection.setWatchCollection(peer.child, 'regtest', true);
   const peerWallets = await peer.api('/wallets');
   gate.verify({ chain: rpc('getblockchaininfo').chain, genesis: rpc('getblockhash', 0),
     electrumHeader: await until('Electrum ready', () => electrumCall('blockchain.block.header', [0])), electrum,
@@ -319,6 +321,11 @@ try {
   gate.mine(1);
   const primaryRecord = await until('primary funded', () => peer.api(`/wallets/${primary.id}`), value => value.healthy && value.nodeId && value.listenPort);
   const primaryUri = `${primaryRecord.nodeId}@127.0.0.1:${primaryRecord.listenPort}`;
+  if (breach) {
+    const { qualifyBreach } = await import('./floresta-breach-lab.mjs');
+    record.pass('breach-justice', await qualifyBreach({ peer, primaryId: primary.id, primaryUri, gate, rpc, electrum, runtime, fixtureDirectory }));
+    throw Object.assign(new Error('funded breach justice complete'), { done: true });
+  }
   const payerId = (await peer.api('/wallets', { name: `qualify payer ${run}`, network: 'regtest', lfbw: { enabled: true, primaryWalletId: primary.id, initialChannelSats: 300000 } })).record.id;
   await healthy(peer.api, payerId);
   const payer = peer.client(payerId);

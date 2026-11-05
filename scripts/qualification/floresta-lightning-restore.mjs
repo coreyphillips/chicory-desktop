@@ -15,6 +15,7 @@ import { registrations } from '../../desktop/floresta-wallet-sync.cjs';
 import { publicSnapshot } from '../../server/floresta-collection.js';
 import { REGTEST_GENESIS } from './guards.mjs';
 import { withProofPeer } from './floresta-pending-lab.mjs';
+import { penaltyWitness } from './floresta-breach-lab.mjs';
 
 const requireServer = createRequire(new URL('../../server/package.json', import.meta.url));
 const { Block } = requireServer('bitcoinjs-lib');
@@ -41,6 +42,18 @@ function references(input, keys) {
 }
 
 export function fixtureReferences(input) {
+  if (input.liveRole === 'justice-monitor') {
+    assert.equal(input.restored, undefined);
+    assert(input.breach?.restarted === true && input.breach.resolved === true);
+    assert.equal(input.breach.fundingSats, 400000);
+    assert.equal(input.breach.htlcSats, 30000);
+    assert(Array.isArray(input.payouts) && input.payouts.length >= 1 && input.payouts.length <= 2);
+    const named = Object.fromEntries(input.payouts.map((p, i) => ['justice' + i, p.point]));
+    const byPoint = references({ ...input, ...named }, ['currentFunding', 'revokedBalance', 'revokedHtlc', ...Object.keys(named)]);
+    assert.equal(new Set([...byPoint.values()].map(p => p.point)).size, byPoint.size);
+    assert.equal(byPoint.get('revokedBalance').txid, byPoint.get('revokedHtlc').txid);
+    return { byPoint, justice: true };
+  }
   if (input.liveRole === 'reopened-closer') {
     assert.equal(input.restored, undefined);
     assert.equal(input.close?.reason, 'HTLC_EXPIRY_FORCE_CLOSE');
@@ -88,7 +101,7 @@ async function readFixture(directory) {
   assert.equal(input.network, 'regtest');
   assert(Number.isInteger(input.tipHeight) && input.tipHeight > 100 && input.tipHeight <= 5000);
   assert.match(input.tipHash, /^[a-f0-9]{64}$/);
-  const { remote, closing, byPoint } = fixtureReferences(input);
+  const { remote, closing, justice, byPoint } = fixtureReferences(input);
   const text = await readLocal(path.join(directory, 'blocks.ndjson'), 64 * 1024 * 1024);
   const lines = text.trimEnd().split('\n');
   assert.equal(lines.length, input.tipHeight + 1);
@@ -116,7 +129,9 @@ async function readFixture(directory) {
   assert.equal(previous, input.tipHash);
   for (const item of byPoint.values()) assert(item.tx && item.height > 0, 'Expected confirmed funding input or output is absent');
   const current = byPoint.get('currentFunding');
-  if (closing) {
+  if (justice) {
+    verifyJusticeClaims(byPoint, input.breach);
+  } else if (closing) {
     verifyCloseClaims(byPoint, input.close);
   } else if (remote) {
     assert.equal(current.tx.outs[current.vout].value, input.restore.fundedSats);
@@ -130,12 +145,45 @@ async function readFixture(directory) {
   }
   const scripts = new Map();
   const neededScripts = remote ? ['currentFunding'] : ['priorFunding', 'currentFunding'];
-  for (const id of closing ? byPoint.keys() : neededScripts) {
+  for (const id of closing || justice ? byPoint.keys() : neededScripts) {
     const point = byPoint.get(id);
     const script = point.tx.outs[point.vout].script;
     scripts.set(script.toString('hex'), hashScript(script));
   }
-  return { input, blocks, byPoint, scripts, remote, closing };
+  return { input, blocks, byPoint, scripts, remote, closing, justice };
+}
+
+function verifyJusticeClaims(points, breach) {
+  const funding = points.get('currentFunding');
+  assert.equal(funding.tx.outs[funding.vout].value, breach.fundingSats);
+  const delayed = points.get('revokedBalance'), htlc = points.get('revokedHtlc');
+  assert.equal(delayed.height, breach.breachHeight);
+  assert(delayed.tx.ins.map(inputPoint).includes(funding.point));
+  assert.equal(delayed.tx.outs[delayed.vout].value, breach.delayedSats);
+  assert.equal(htlc.tx.outs[htlc.vout].value, breach.htlcSats);
+  const seen = new Set();
+  const keys = new Set();
+  let recovered = 0;
+  for (const [name, row] of points) {
+    if (!name.startsWith('justice')) continue;
+    assert(row.height === breach.justiceHeight && row.height === delayed.height + 1);
+    assert.equal(row.tx.outs.length, 1);
+    recovered += row.tx.outs[row.vout].value;
+    for (const input of row.tx.ins) {
+      const prev = inputPoint(input);
+      const source = prev === delayed.point ? delayed : htlc;
+      assert.equal(prev, source.point);
+      const output = source.tx.outs[source.vout];
+      const { type: branch, pubkey } = penaltyWitness({ txinwitness: input.witness.map(w => w.toString('hex')) }, { scriptPubKey: { hex: output.script.toString('hex') } });
+      assert.equal(branch, source === delayed ? 'delayed' : 'htlc');
+      assert(!seen.has(branch));
+      seen.add(branch);
+      keys.add(pubkey);
+    }
+  }
+  assert.equal(seen.size, 2);
+  assert.equal(keys.size, 1);
+  assert.equal(recovered, breach.recoveredSats);
 }
 
 export function verifyCloseClaims(points, close) {
@@ -192,13 +240,13 @@ async function waitFor(label, node, read, accept) {
 }
 
 async function checkWallet(node, source, fixture) {
-  const { input, byPoint, scripts, blocks, remote, closing } = fixture;
+  const { input, byPoint, scripts, blocks, remote, closing, justice } = fixture;
   const { owner, snapshot } = source;
   assert.match(owner, /^[0-9a-f]{64}$/);
   const view = publicSnapshot(snapshot, 'regtest', { remaining: 8 * 1024 * 1024 });
   assert.equal(view.status, 'observed', 'A wallet supplied no observed public watch snapshot');
   assert.deepEqual(view, snapshot, 'Unexpected fields in the public watch snapshot');
-  const watched = closing ? [...byPoint.values()] : remote ? [byPoint.get('currentFunding')] : [];
+  const watched = closing || justice ? [...byPoint.values()] : remote ? [byPoint.get('currentFunding')] : [];
   for (const item of watched) {
     const hex = item.tx.outs[item.vout].script.toString('hex');
     assert(view.scripts.includes(hex));
@@ -238,9 +286,10 @@ async function checkWallet(node, source, fixture) {
       histories.push({ scriptHash, history: history.rows, unspent: unspent.rows, confirmed: balance.confirmed });
     }
     const remaining = new Set(histories.flatMap(h => h.unspent.map(row => row.txid + ':' + row.vout)));
-    if (closing) {
+    if (closing || justice) {
       for (const [name, item] of byPoint) {
-        assert.equal(remaining.has(item.point), ['balanceSweep', 'timeoutSweep'].includes(name), 'Wrong close disposition at ' + name);
+        const unspent = justice ? name.startsWith('justice') : ['balanceSweep', 'timeoutSweep'].includes(name);
+        assert.equal(remaining.has(item.point), unspent, 'Wrong close disposition at ' + name);
       }
     } else {
       assert.equal(remaining.has(byPoint.get('currentFunding').point), !byPoint.has('confirmedSpend'), 'Wrong current funding disposition');

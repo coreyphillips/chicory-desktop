@@ -17,7 +17,7 @@ export function qualificationStages(selection) {
   // A stale backup may make its counterparty close, so backup runs last.
   const defaults = ['preflight', 'payments', 'direct-funding', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
   const remoteRecovery = ['guardian-recovery', 'peer-storage-recovery'];
-  const standalone = [...remoteRecovery, 'forceclose-sweep'];
+  const standalone = [...remoteRecovery, 'forceclose-sweep', 'breach-justice'];
   const stages = new Set(selection ? selection.split(',').map(stage => stage.trim()).filter(Boolean) : defaults);
   for (const stage of stages) {
     if (!defaults.includes(stage) && !standalone.includes(stage) && stage !== 'floresta-preview')

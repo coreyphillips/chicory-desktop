@@ -54,6 +54,13 @@ automatic force close, wallet process restart and final sweeps. It also accepts
 a public fixture directory for a separate cold managed-node replay.
 [Funded close and sweep results](floresta-beignet.md#funded-htlc-timeout-and-final-sweeps)
 
+Select `breach-justice` on its own to test a confirmed revoked commitment
+while the honest wallet is offline. The old transaction comes from a new
+in-memory regtest counterparty, and only the guarded local Core node receives
+it. This stage also accepts `CHICORY_QUALIFY_FLORESTA_FIXTURE` for a cold
+replay of the penalty witnesses and honest wallet payout.
+[Funded breach and justice results](floresta-beignet.md#funded-breach-and-justice)
+
 `CHICORY_ELECTRON_ARGS` passes extra switches to the app. On a Mac that already
 holds a `Chicory Safe Storage` keychain item from another build, macOS asks
 whether the new build may read it, and that prompt stalls an unattended run.
