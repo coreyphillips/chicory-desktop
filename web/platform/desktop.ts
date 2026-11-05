@@ -8,6 +8,9 @@ export interface FlorestaState {
   checkpointHold: 'previous-accumulator-mismatch' | 'independent-replay-required' | null;
   storage: string;
   storageUsed: boolean;
+  storagePath: string;
+  storageNeedsRebuild: boolean;
+  canConfirmRemoved: boolean;
   volumeAvailable: boolean;
   freeBytes: number | null;
   removalAvailable: boolean;

@@ -140,6 +140,7 @@ test('removal is explicit and serialized with enable, folder changes and quit', 
   const settings = new FlorestaSettings({ ...options, remove: async input => { attempts.push(input); await pending; } });
   t.after(() => settings.stopAll());
   await settings.change('regtest', 'start', yes);
+  fs.mkdirSync(settings._path('regtest', null), { recursive: true });
   await assert.rejects(settings.change('regtest', 'remove', yes), /unavailable/);
   await settings.change('regtest', 'stop', yes);
   assert.equal((await settings.change('regtest', 'remove', { ...yes, confirm: async () => false })).storageUsed, true);
@@ -242,4 +243,65 @@ test('a known historical failure follows the profile across restarts until full 
   assert.equal(reopened.status('mainnet').checkpointHold, 'independent-replay-required');
   update({ historicalVerification: 'verified', checkpointHold: false });
   assert.equal(reopened.status('mainnet').checkpointHold, null);
+});
+
+test('confirming quick start preserves a verification failure reported during the prompt', async t => {
+  const { settings, options } = fixture(t);
+  let report;
+  settings.create = opts => {
+    report = opts.onStatus;
+    return { start: async () => {}, stop: async () => {}, status: () => ({ phase: 'running' }), setCheckpointQuickStart() {} };
+  };
+  await settings.change('mainnet', 'requireHistory', yes);
+  await settings.change('mainnet', 'start', yes);
+  await settings.change('mainnet', 'allowCheckpoint', {
+    current: () => true,
+    confirm: async () => {
+      report({ historicalVerification: 'error', checkpointHold: true });
+      return true;
+    },
+  });
+  const reopened = new FlorestaSettings(options).status('mainnet');
+  assert.equal(reopened.checkpointQuickStart, true);
+  assert.equal(reopened.checkpointHold, 'independent-replay-required');
+});
+
+test('upgrades and downgrades require a rebuild and cannot claim an unrecognized store by changing policy', async t => {
+  const { settings, options, calls } = fixture(t);
+  const upgraded = new FlorestaSettings({ ...options, digest: 'b2'.repeat(32) });
+  t.after(() => upgraded.stopAll());
+  // Legacy format, before the store build and desired mode were separated.
+  settings._save('mainnet', { digest, enabled: true, folder: null, used: true });
+  await upgraded.change('mainnet', 'requireHistory', yes);
+  assert.equal(upgraded.status('mainnet').storageNeedsRebuild, true);
+  await assert.rejects(upgraded.change('mainnet', 'start', yes), /compatibility/);
+  assert.deepEqual(calls, []);
+  assert.equal(settings.status('mainnet').storageNeedsRebuild, false);
+
+  const confirm = async action => { assert.equal(action, 'confirmRemoved'); return true; };
+  await upgraded.change('mainnet', 'remove', { ...yes, confirm });
+  assert.equal(upgraded.status('mainnet').storageUsed, false);
+  await upgraded.change('mainnet', 'start', yes);
+  assert.equal(settings.status('mainnet').storageNeedsRebuild, true);
+  await assert.rejects(settings.change('mainnet', 'start', yes), /compatibility/);
+});
+
+test('untracked node data and a directory that reappears during removal keep their rebuild requirement', async t => {
+  const { settings } = fixture(t);
+  const dir = settings._path('mainnet', null);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'old-chain-state'), 'previous build');
+  assert.equal(settings.status('mainnet').storageNeedsRebuild, true);
+  await settings.change('mainnet', 'requireHistory', yes);
+  await assert.rejects(settings.change('mainnet', 'start', yes), /compatibility/);
+  fs.rmSync(dir, { recursive: true });
+  assert.equal(settings.status('mainnet').canConfirmRemoved, true);
+  const state = await settings.change('mainnet', 'remove', { ...yes, confirm: async action => {
+    assert.equal(action, 'confirmRemoved');
+    fs.mkdirSync(dir);
+    return true;
+  } });
+  assert.equal(state.storageNeedsRebuild, true);
+  assert.equal(state.canConfirmRemoved, false);
+  assert.equal(fs.existsSync(dir), true);
 });

@@ -79,6 +79,7 @@ class FlorestaSettings {
       if (prefs.version !== 1 || !prefs.networks || typeof prefs.networks !== 'object') throw new Error();
       for (const [network, value] of Object.entries(prefs.networks)) {
         if (!networks.includes(network) || !validDigest(value.digest) || typeof value.enabled !== 'boolean' ||
+            value.storeDigest != null && !validDigest(value.storeDigest) ||
             !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean' ||
             value.checkpointHold !== undefined && typeof value.checkpointHold !== 'boolean' ||
             value.checkpointQuickStart !== undefined && typeof value.checkpointQuickStart !== 'boolean' ||
@@ -94,18 +95,24 @@ class FlorestaSettings {
     if (!networks.includes(network)) throw new Error('Unsupported Floresta network.');
     const entry = this._read()[network];
     const locations = this._locations();
+    const cleanupPending = Object.hasOwn(locations, network);
+    const folder = cleanupPending ? locations[network] : entry?.folder ?? null;
+    const recordedStore = !!entry && entry.used !== false;
+    const used = cleanupPending || recordedStore || this._hasNodeData(network, folder);
+    // Older previews saved the build that last requested the store in digest.
+    const storeDigest = recordedStore && !cleanupPending
+      ? (Object.hasOwn(entry, 'storeDigest') ? entry.storeDigest : entry.digest) : null;
     const alreadyEnabled = Boolean(entry?.enabled && entry.digest === this.digest);
     // Older previews approved full verification only. Keep that policy when
     // resuming them. A fresh enable has a native checkpoint disclosure.
     const quickStart = entry?.checkpointQuickStart ?? !alreadyEnabled;
-    return { digest: this.digest, enabled: alreadyEnabled, checkpointHold: entry?.checkpointHold === true,
+    return { digest: this.digest, storeDigest, enabled: alreadyEnabled && !cleanupPending && storeDigest === this.digest, checkpointHold: entry?.checkpointHold === true,
       checkpointQuickStart: network === 'mainnet' && quickStart,
-      folder: Object.hasOwn(locations, network) ? locations[network] : entry?.folder ?? null,
+      folder,
       // Older versions recorded the selected folder before the first start.
       // Treat a previously used custom volume as initialized to avoid creating
       // replacement data on another disk mounted at its old path.
-      initialized: Object.hasOwn(locations, network) || (entry?.initialized ?? Boolean(entry?.folder && entry.used !== false)),
-      used: Object.hasOwn(locations, network) || !!entry && entry.used !== false };
+      initialized: cleanupPending || (entry?.initialized ?? Boolean(entry?.folder && entry.used !== false)), used };
   }
   _locations() {
     try {
@@ -128,19 +135,30 @@ class FlorestaSettings {
     writePrivate(this.file, { version: 1, networks: { ...this._read(), [network]: entry } });
   }
   _path(network, folder) { return path.join(folder || this.profile, 'chicory-floresta', network); }
-  _hasProfileData(network) {
-    const dir = this._path(network, null);
+  _profileStoreMissing(network) {
+    try {
+      if (!fs.statSync(this.profile).isDirectory()) return false;
+      const dir = this._path(network, null);
+      const parent = fs.lstatSync(path.dirname(dir), { throwIfNoEntry: false });
+      return !parent || parent.isDirectory() && !fs.lstatSync(dir, { throwIfNoEntry: false });
+    } catch { return false; }
+  }
+  _hasNodeData(network, folder) {
+    const dir = this._path(network, folder);
     const store = network === 'mainnet' ? dir : path.join(dir, network === 'testnet' ? 'testnet3' : network);
     try {
       return fs.readdirSync(store).some(name => !['chicory-managed.lock', 'chicory-owner.json', '.DS_Store', 'config.toml'].includes(name));
     } catch (error) { return error.code !== 'ENOENT'; }
   }
   status(network) {
-    const { enabled, folder, used, checkpointQuickStart, checkpointHold } = this._saved(network);
+    const { enabled, folder, used, storeDigest, checkpointQuickStart, checkpointHold } = this._saved(network);
     const node = this.nodes.get(network)?.status();
     let volumeAvailable = true;
     try { if (folder) volumeAvailable = fs.statSync(folder).isDirectory(); } catch { volumeAvailable = false; }
     return { requested: enabled, checkpointQuickStart, checkpointAccepted: node?.checkpointAccepted === true,
+      storageNeedsRebuild: used && storeDigest !== this.digest,
+      storagePath: this._path(network, folder),
+      canConfirmRemoved: used && !enabled && !folder && this._profileStoreMissing(network),
       checkpointHold: node?.checkpointReason ?? (checkpointHold ? 'independent-replay-required' : null), storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
       customStorage: process.platform !== 'win32', removalAvailable: ['darwin', 'linux'].includes(process.platform),
       phase: this.errors.has(network) ? 'failed' : node?.phase || 'stopped', height: node?.height ?? null,
@@ -243,15 +261,20 @@ class FlorestaSettings {
     this.inFlight.add(network);
     try {
       if (operation === 'start') {
+        if (prefs.used && prefs.storeDigest !== this.digest) {
+          throw new Error('Remove the previous local node data before starting this build. Its storage compatibility has not been verified.');
+        }
         if (!prefs.enabled && !await confirm(prefs.checkpointQuickStart ? 'startCheckpoint' : 'start')) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
-        this._save(network, { ...prefs, enabled: true, used: true });
+        this._save(network, { ...prefs, storeDigest: this.digest, enabled: true, used: true });
         this._start(network, prefs);
       } else if (['allowCheckpoint', 'requireHistory'].includes(operation) && network === 'mainnet') {
         const enable = operation === 'allowCheckpoint';
         if (enable && !prefs.checkpointQuickStart && !await confirm('allowCheckpoint')) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
-        this._save(network, { ...prefs, checkpointQuickStart: enable });
+        // Verification can fail while the native confirmation is open. Only
+        // change the user's preference in the latest persisted state.
+        this._save(network, { ...this._saved(network), checkpointQuickStart: enable });
         this.nodes.get(network)?.setCheckpointQuickStart(enable);
       } else if (operation === 'stop') {
         this._save(network, { ...prefs, enabled: false });
@@ -261,11 +284,16 @@ class FlorestaSettings {
         if (node) { await node.stop(); this.nodes.delete(network); }
         this.errors.delete(network);
       } else if (operation === 'remove' && !prefs.enabled && prefs.used && !this.nodes.has(network)) {
-        if (!await confirm('remove', this._path(network, prefs.folder))) return this.status(network);
+        const missing = !prefs.folder && this._profileStoreMissing(network);
+        if (!await confirm(missing ? 'confirmRemoved' : 'remove', this._path(network, prefs.folder))) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
         try {
-          await this._remove(network, prefs.folder);
-          this._save(network, { ...prefs, used: false, initialized: false });
+          if (missing) {
+            if (!this._profileStoreMissing(network)) throw new Error('Node data reappeared.');
+          } else {
+            await this._remove(network, prefs.folder);
+          }
+          this._save(network, { ...prefs, storeDigest: null, used: false, initialized: false });
           const locations = this._locations();
           delete locations[network];
           this._saveLocations(locations);
@@ -301,7 +329,7 @@ class FlorestaSettings {
       const known = Object.hasOwn(locations, network);
       const entry = entries[network];
       const folder = known ? locations[network] : entry?.folder ?? null;
-      if (!known && (!entry || entry.used === false) && !this._hasProfileData(network)) continue;
+      if (!known && (!entry || entry.used === false) && !this._hasNodeData(network, null)) continue;
       try { await this._remove(network, folder); }
       catch { remaining[network] = folder; }
     }
@@ -352,6 +380,10 @@ function installFlorestaIpc({ ipcMain, settings, trusted, allowed, appLock, dial
         type: 'warning', title: 'Remove local node data', message: 'Remove generated ' + network + ' node data?',
         detail: 'This removes the chain database, public wallet and channel watches, and verification records in ' + location + '. A future sync starts over.',
         buttons: ['Remove node data', 'Cancel'], defaultId: 1, cancelId: 1
+      } : action === 'confirmRemoved' ? {
+        type: 'question', title: 'Confirm node data removal', message: 'Start the next sync with fresh storage?',
+        detail: 'The node directory at ' + location + ' is absent. Confirm to clear its saved storage record.',
+        buttons: ['Confirm removal', 'Cancel'], defaultId: 1, cancelId: 1
       } : action === 'allowCheckpoint' ? {
         type: 'question', title: 'Checkpoint quick start', message: 'Trust Floresta’s mainnet checkpoint during verification?',
         detail: 'Floresta will temporarily trust the state at block 939,969 while independently checking older blocks. Local wallet reads still require the current tip and completed wallet scans. Lightning also requires its channel safety checks. A verification failure withdraws access. This preference applies to this build and mainnet profile.',

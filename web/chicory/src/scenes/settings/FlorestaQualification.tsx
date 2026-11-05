@@ -60,6 +60,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
       {state ? <>
         <Line label="Local node" value={phases[state.phase]} />
         <Line label="Node storage" value={state.storage} />
+        {state.storageNeedsRebuild ? <Note>Existing node data needs a fresh sync with this build. Remove the generated node data to start again.</Note> : null}
         {state.freeBytes !== null && <Line label="Available disk space" value={`${(state.freeBytes / 2 ** 30).toLocaleString(undefined, { maximumFractionDigits: 1 })} GiB`} />}
         {!state.volumeAvailable ? <Note tone="error">Reconnect the selected volume to access its local node data.</Note> : null}
         {state.height !== null ? <>
@@ -83,11 +84,13 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
         <Line label="Historical verification" value={historyStatus(state)} />
         {state.error ? <Note tone="error">{state.error}</Note> : null}
         {!state.requested && !state.storageUsed && state.customStorage ? <Link label="Choose storage folder" onPress={() => change('folder')} disabled={busy} /> : null}
-        {!state.requested && state.storageUsed ? state.removalAvailable
+        {!state.requested && state.storageUsed ? state.canConfirmRemoved
+          ? <Link label="Confirm local node data was removed" onPress={() => change('remove')} disabled={busy} />
+          : state.removalAvailable
           ? <Link label="Remove local node data" onPress={() => change('remove')} disabled={busy} />
-          : <Note>Automatic node data removal requires local macOS APFS or Linux ext4 storage. On this platform, close every node before manually removing its generated data from the selected location.</Note> : null}
+          : <Note>{`Close every node, remove the generated directory at ${state.storagePath}, then confirm removal here.`}</Note> : null}
         {!state.requested || state.phase === 'failed' ? <Action label={state.requested ? 'Retry local node' : 'Start local node'}
-          onPress={() => change('start')} disabled={busy} /> : null}
+          onPress={() => change('start')} disabled={busy || state.storageNeedsRebuild} /> : null}
         {state.requested ? <Action label="Stop and disable local node" tone="quiet" onPress={() => change('stop')} disabled={busy} /> : null}
       </> : null}
       {error ? <Note tone="error">{error}</Note> : null}
