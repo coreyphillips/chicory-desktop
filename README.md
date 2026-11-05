@@ -156,11 +156,11 @@ performed and remaining platform qualification. The inherited
 [regtest report](docs/regtest.md) documents the upstream browser and manager
 baseline, not new funded testing of this desktop package.
 
-A source build can run a managed Floresta qualification candidate and scan
-public wallet and channel history. Wallet payments continue through the selected
-Electrum server while the local backend is being qualified. The
-[setup guide and funded test results](docs/floresta-qualification.md) include
-a [report of Floresta issues](docs/floresta-upstream-bugs.md).
+A source build and a separate macOS developer preview can run Floresta and
+scan public wallet and channel history. Payments in both use the selected
+Electrum server. The funded regtest covers replacement notifications, reorgs
+and cold recovery of a spliced channel. See the [setup and qualification
+guide](docs/floresta-qualification.md) and the [bug filing register](docs/issue-33-bug-review.md).
 
 ## Source and license
 

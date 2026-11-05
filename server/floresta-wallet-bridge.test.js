@@ -191,3 +191,36 @@ test('the prepared Beignet Electrum transport negotiates the lease and queries a
   assert.deepEqual(await ask({ type: 'read', id: 2, method: 'blockchain.scripthash.get_balance', params: [scriptHash] }),
     { id: 2, value: { confirmed: 50000, unconfirmed: 0 } });
 });
+
+test('the real Beignet wallet checks an owner-scoped socket without reading a synthetic balance', async t => {
+  const path = require('node:path');
+  const fs = require('node:fs');
+  const { fork } = require('node:child_process');
+  const pinned = path.resolve(__dirname, '../.runtime/node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
+  if (!fs.existsSync(pinned) || !fs.existsSync(path.resolve(__dirname, '../.runtime/engine/node_modules/beignet/package.json'))) return t.skip('Prepare pinned engine first.');
+  const f = fixtures();
+  let reads = 0;
+  f.backend.pending.observations = async () => { reads++; return null; };
+  const bridge = await openWalletBridge(f.backend); t.after(bridge.close);
+  const child = fork(path.resolve(__dirname, '../scripts/qualification/floresta-sending-wallet.cjs'), [], {
+    execPath: pinned, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: {
+      CHICORY_FLORESTA_WALLET_LAB: '1', BEIGNET_NETWORK: 'regtest', CHICORY_ELECTRUM_POLICY: 'selected-only',
+      BEIGNET_ELECTRUM_HOST: '127.0.0.1', BEIGNET_ELECTRUM_TLS: 'true', BEIGNET_ELECTRUM_PORT: String(bridge.endpoint.port),
+      ...(process.platform === 'win32' && { SystemRoot: process.env.SystemRoot }) } });
+  t.after(() => { if (child.connected) child.disconnect(); child.kill(); });
+  let id = 0;
+  async function ask(type, fields = {}) {
+    const response = once(child, 'message', { signal: AbortSignal.timeout(5000) });
+    child.send({ id: ++id, type, ...fields });
+    const [reply] = await response;
+    assert.equal(reply.id, id);
+    assert.equal(reply.error, undefined);
+    return reply.value;
+  }
+  await ask('prepare', { psk: bridge.endpoint.psk });
+  assert.equal(await ask('connect'), true);
+  assert.equal(await ask('liveness'), true);
+  assert.equal(reads, 0);
+  bridge.close();
+  assert.equal(await ask('liveness'), false);
+});

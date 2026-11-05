@@ -1,8 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const asar = require('@electron/asar');
+const verifyPackage = require('../build/verify-package.cjs');
 const { previewCandidate } = require('./floresta-preview.cjs');
 
 test('only the matching packaged preview metadata selects its fixed signed binary', () => {
@@ -15,4 +19,16 @@ test('only the matching packaged preview metadata selects its fixed signed binar
     assert.equal(read({ ...metadata, chicoryFlorestaPreview: { ...pin, ...invalid } }), null);
   }
   assert.equal(read({ ...metadata, chicoryFlorestaPreview: null }), null);
+});
+
+test('package verification refuses a monitor in the normal release resources', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'chicory-preview-package-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'metadata');
+  const resources = path.join(directory, 'resources');
+  await fs.mkdir(source);
+  await fs.mkdir(path.join(resources, 'runtime', 'floresta'), { recursive: true });
+  await fs.writeFile(path.join(source, 'package.json'), JSON.stringify({ chicoryChannel: 'stable' }));
+  await asar.createPackage(source, path.join(resources, 'app.asar'));
+  await assert.rejects(verifyPackage({ appOutDir: directory, electronPlatformName: 'linux' }), /dedicated development package/);
 });

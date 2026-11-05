@@ -19,6 +19,11 @@ const engineFiles = {
       `const tls = ${policyImport}.tlsForEndpoint((0, node_builtins_1.nodeTls)());`],
   ],
   'dist/electrum/index.js': [
+    ['async peerResponds(electrumNetwork) {\n        try {',
+      `async peerResponds(electrumNetwork) {
+        const policy = ${policyImport};
+        if (policy.walletSession) return policy.pingWalletPeer(electrumNetwork);
+        try {`],
     ['getServerCandidates(customPeers, electrumNetwork) {\n        const fallback =',
       `getServerCandidates(customPeers, electrumNetwork) {
         const policy = ${policyImport};
@@ -37,6 +42,9 @@ const engineFiles = {
 };
 const transportFiles = {
   'helpers/index.js': [
+    ['getAddressScriptHashBalances({ network, scriptHashes: [scriptHash] }),',
+      `...(require('./${policyName}').walletSession ? [] : [getAddressScriptHashBalances({ network, scriptHashes: [scriptHash] })]),`],
+    ['if (testResponses[0].error || testResponses[1].error)', 'if (testResponses.some(response => response.error))'],
     ['clients.network = network;\n\t\t\tlet needToConnect', `if (!require('./${policyName}').allows(network, host, port, protocol)) {
                 return resolve({ error: true, data: 'Electrum endpoint is outside the selected policy' });
             }

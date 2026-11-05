@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const { extractFile } = require('@electron/asar');
 const { verifyTor } = require('./verify-runtime.cjs');
 
 module.exports = async function verifyPackage(context) {
@@ -11,6 +12,13 @@ module.exports = async function verifyPackage(context) {
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents/Resources')
     : path.join(context.appOutDir, 'resources');
   const node = path.join(resources, 'runtime/node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
+  const metadata = JSON.parse(extractFile(path.join(resources, 'app.asar'), 'package.json'));
+  const preview = metadata.chicoryChannel === 'floresta-preview';
+  const hasNode = fs.existsSync(path.join(resources, 'runtime', 'floresta'));
+  if (preview !== hasNode || preview !== Object.hasOwn(metadata, 'chicoryFlorestaPreview') ||
+      preview && (context.packager.appInfo.id !== 'com.chicory.desktop.floresta-preview' || context.electronPlatformName !== 'darwin')) {
+    throw new Error('The local node preview can only be included in its dedicated development package.');
+  }
   for (const relative of ['dist/index.html', 'server/index.js', 'server/engine-bootstrap.js', 'server/engine-storage.cjs',
     'runtime/node/LICENSE', 'runtime/engine/node_modules/beignet/dist/cli/cli.js',
     'runtime/engine/node_modules/beignet/dist/lightning/storage/engine-storage.cjs',

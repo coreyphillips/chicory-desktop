@@ -21,7 +21,8 @@ Its comparison branch points at the pinned v0.9.1 release.
    CMake, a C++ compiler, libclang and Boost headers with CMake package metadata.
    The macOS arm64 test used Rust 1.99.1, CMake 4.2.3 and Boost 1.85.
    Run `npm run runtime:prepare:floresta -- --debug`. To reuse an existing
-   archive, pass `--archive /absolute/path/to/floresta-source.tgz`.
+   archive, pass `--archive /absolute/path/to/floresta-source.tgz`. Add `--test`
+   to run unit tests in the four patched Rust crates before installing the candidate.
    The recipe verifies the archive and pristine Cargo lock, applies the listed
    patches and records their hashes alongside the digest of the built binary.
 3. Set `CHICORY_FLORESTA_CANDIDATE_SHA256` to the digest in the output
@@ -144,7 +145,7 @@ two binaries in the lab command above to exercise both builds.
 | Node data removal | An explicit Settings action on macOS APFS removed recognized managed data only while the cleanup helper held the node's exclusive lock. The funded wallet backup and node data have separate lifecycles. The native test also covered refusal of unrecognized files and links. |
 | Cold channel funding after full-backup restore | An empty node verified all 126 blocks mined by the independent Bitcoin Core fixture. Both the live channel counterparty and the restored recipient found the old 386,634 sat channel output at height 117 and the new 406,634 sat output at height 123. The restored recipient also recovered the 22,000 sat payer input at height 121 through its parent transaction. Both owners reported exactly two history rows and one current funding UTXO. Beignet kept the stale channel held or closed. |
 | Pending wallet reads on a controlled proof peer | The pinned Beignet client used an owner-bound TLS session to read the 29,000 sat pending receipt and its 25,000 sat replacement. It decoded and verified both transactions, received the script notification, recovered the same replacement on cold restart and checked its confirmation at height 105, position 1. |
-| Existing external Lightning backend | The full desktop suite exercised crash during submission, offline receipt, send max, drain, restart, on-chain recovery and full-backup restore. A separate funded test exercised direct funding. Transport-path inspection lacked evidence and seed-only live channel recovery is unsupported. |
+| Existing external Lightning backend | Eighteen checks passed in the complete suite, including direct funding, crash during submission, offline receipt, send max, drain, restart, on-chain recovery and full-backup restore. Iroh path inspection was skipped and seed-only live channel recovery is unsupported. |
 
 One 102-block run on an Apple M5 Pro with 64 GiB RAM took 32.1 seconds to
 reach the tip and 2.0 seconds to catch up two wallet scans on loopback. The
@@ -179,7 +180,29 @@ proof peer, add `--extended-inputs` to the full funded lab with
 `--managed-florestad`. At tip 105 the wallet observed a two-input spend of
 confirmed outputs 1 and 0, a 51,000 sat receipt and a 2,500 sat fee. It
 recovered the same inputs and change on reopening, then verified inclusion at
-height 106. The scope of these results is controlled regtest.
+height 106. When verified chain status is more than 15 seconds old, the supervisor
+withdraws all wallet read and broadcast grants. The child has a further
+90 seconds to report fresh chain state and reverify its endpoint and storage;
+otherwise the supervisor stops it. Recovery requires fresh owner grants. The
+scope of these results is controlled regtest.
+
+## Reproduce an authenticated wallet send
+
+Use the same dedicated local proof peer and add `--wallet-send` to the
+pending lab command above. This fixture activates SegWit on regtest before
+funding a real pinned Beignet wallet. It checks a one-time approval for
+the reviewed transaction ID and witness ID. Only the connected local proof
+peer can request those bytes. The returned relay result is verified
+independently against peer admission and the mined block.
+
+The funded wallet found 150,000 sats, sent 42,000 sats with a 426 sat fee
+for 142 virtual bytes, and verified confirmation at height 434. The fixture
+rejected a modified witness, a foreign owner, a stale tip, an observed
+pending conflict, reuse of the approval and a confirmed spent input. A second funded send through Beignet's Lightning
+chain backend broadcast method confirmed at height 436. Both broadcasts were
+on-chain payments. Neither test moved a Lightning channel onto this backend.
+The wallet used its regtest fee settings. An insufficient-data result from
+the service still requires a production fee policy.
 
 ## Reproduce cold channel recovery
 
@@ -212,7 +235,7 @@ separate live fixtures.
 
 The candidate's confirmed index passes the funded checks above. The remaining
 wallet-serving gates include peer coverage beyond the controlled regtest,
-fee and broadcast qualification, complete recovery of older channel ancestry, qualification of
+production fee and broadcast policy, recovery across closes and breaches, qualification of
 mainnet checkpoint replay, a safe live Lightning transition and cold
 channel/guardian recovery. Production signing,
 platform qualification and sustained mainnet measurements also remain open.

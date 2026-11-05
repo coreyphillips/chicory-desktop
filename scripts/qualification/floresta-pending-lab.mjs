@@ -518,7 +518,10 @@ export async function withProofPeer(utreexod, run) {
 
 async function standalone({ utreexod, digest, walletSend }) {
   return withProofPeer(utreexod, async ({ root, proof, peerPort, peerEndpoint }) => {
-    assert.equal((await proof('generate', [104])).length, 104);
+    // The pinned full peer activates SegWit after three 144-block windows.
+    const initialHeight = walletSend ? 432 : 104;
+    assert.equal((await proof('generate', [initialHeight])).length, initialHeight);
+    if (walletSend) assert.equal((await proof('getblockchaininfo')).bip9_softforks.segwit.status, 'active');
     const watchScript = '0014' + '33'.repeat(20);
     if (digest) {
       const { default: { candidate } } = await import('../../desktop/floresta-settings.cjs');
@@ -529,8 +532,14 @@ async function standalone({ utreexod, digest, walletSend }) {
       try {
         await node.start();
         const tip = await proof('getbestblockhash');
-        await until('the candidate to validate the frozen tip', () => node.status(), state => state.tipHash === tip && state.tipSynced);
-        if (walletSend) return await (await import('./floresta-wallet-send-lab.mjs')).qualifyWalletSend({ node, proof });
+        await until('the candidate to validate the frozen tip', () => node.status(), state => state.tipHash === tip && state.tipSynced,
+          walletSend ? 240000 : 90000);
+        if (walletSend) {
+          const { qualifyWalletSend } = await import('./floresta-wallet-send-lab.mjs');
+          const wallet = await qualifyWalletSend({ node, proof });
+          const lightningBackend = await qualifyWalletSend({ node, proof, sender: 'lightning' });
+          return { ...wallet, lightningBackend };
+        }
         return await qualifyManagedPending({ node, proof, peerPort, watchScript });
       } finally { await node.stop(); }
     }

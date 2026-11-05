@@ -93,6 +93,29 @@ Use the two branches in `crates/floresta-chain/testdata/test_reorg.json` with a 
 
 The downstream heartbeat previously stopped polling after any index error, and its background scanner could stop the daemon. The downstream fix reads the header tip, validated header, indexed hashes and IBD flag under one read lock, withholds inconsistent observations, and retries. An earlier funded run lost its watch connection during a reorg. Its report did not capture the native exit reason, so the deterministic test establishes the reader hazard separately. The development snapshot also updates the individual header records before publishing the new best chain and still returns `BadValidationIndex` for an `InFork` validated header. [Development reorg][dev-reorg] · [Development index][dev-index]
 
+Run the regression on the Floresta review branch:
+
+```sh
+cargo test --locked -p floresta-chain --features flat-chainstore --lib active_chain_status_retries_a_reorg_between_disk_and_tip_updates
+```
+
+## Chain-store flushes can delay chain observations
+
+On macOS arm64 with the v0.9.1 debug build, a local regtest peer supplied blocks
+to a caught-up managed node. The native chain-status timer normally fired every
+two seconds. During individual post-sync block updates at heights 102 and 103,
+observed intervals reached 6.9 and 7.8 seconds. Independent process stack
+samples during these intervals showed `do_flush` computing the XXH3 checksum
+over the header, index and fork-header memory maps while other workers waited
+for the chain read lock. The generated store used sparse preallocated files.
+
+For a maintainer reproduction, run the funded fork fixture, timestamp native
+status output before the desktop processes it and take a process stack sample
+during a gap. Compare a debug build and an optimized build on the same volume.
+The timings above describe the debug build. The filing question is whether a
+durable post-sync block commit can keep chain readers responsive while retaining
+the on-disk integrity checks. [Release checksum computation](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-chain/src/pruned_utreexo/flat_chain_store.rs#L789-L806)
+
 ## Related upstream work
 
 * The backfill script policy already has an open report. The v0.9.1 partial chain also matches only the `BlockchainError::BlockValidation` variant when handling a failed block check. The script verifier can return `BlockchainError::TransactionError`, which that condition drops. This is supplementary evidence for the existing report. [Upstream issue 1335](https://github.com/getfloresta/Floresta/issues/1335) · [Partial replay error propagation][partial-errors] · [Script failure type][script-errors]
@@ -124,34 +147,6 @@ Source inspection of `be2574fc5e39a442ed3737de6b7deb825907c677` found the follow
 [roadmap]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/doc/roadmap-2026.md#L50-L55
 [release]: https://github.com/getfloresta/Floresta/releases/tag/v0.9.1
 [peer]: https://github.com/utreexo/utreexod/releases/tag/v0.6.0
-## A reorg can expose a transient invalid validation index to chain readers
-
-On v0.9.1, a reader can call `get_best_block` and see height 10 while
-`get_validation_index` returns `BadValidationIndex` for the former active
-header. The reorg path marks old headers inactive before it replaces the
-published validation tip. Our deterministic flat-chainstore test uses the
-release's ten-block competing-branch fixture and reads between those two
-mutations. The first integrated funding run also lost its observation
-session during a reorg. That run did not capture evidence sufficient to
-attribute its failure to this precise interleaving.
-
-A downstream observer needs either a coherent header and validation snapshot,
-or a retryable transition, so it cannot treat a valid reorg as fatal or
-publish disconnected wallet history. The candidate checks indexed headers
-and the validation anchor together, waits through the transition and
-continues to surface persistent storage errors. Its regression checks the
-original height-10 tip, the unavailable intermediate observation and the
-winning tip with validated height 5. Use the fork branch and run:
-
-```sh
-cargo test --locked -p floresta-chain --features flat-chainstore --lib active_chain_status_retries_a_reorg_between_disk_and_tip_updates
-```
-
-Suggested filing target is the chain-state reader contract. Separate this
-from the stock Electrum wallet retaining detached rows. [Reproducing test and
-candidate correction](../build/floresta/managed-reorg-reads.patch)
-
-
 [lab]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/scripts/qualification/floresta-lab.mjs
 [probe]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/scripts/qualification/floresta-electrum.mjs
 [beignet]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/docs/floresta-beignet.md

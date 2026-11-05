@@ -27,11 +27,18 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
   // Keep bounded lifecycle evidence even when a fork interrupts a wallet read.
   // Never retain control requests, wallet replies or the listener address.
   const lifecycle = [];
+  const elapsed = () => Math.round(performance.now());
   const node = new supervisor.ManagedFloresta({
     network: 'regtest', profileDirectory: parent, binary, sha256: manifest.sha256,
-    onStatus({ phase, error }) {
+    onStatus({ phase, error, height, validatedHeight }) {
       const current = lifecycle.at(-1);
-      if (current) current.supervisor = { phase, error };
+      if (current && phase !== 'starting') current.supervisor = { phase, error };
+      if (current && phase === 'waiting-for-tip') (current.withdrawals ??= []).push({ atMs: elapsed() });
+      if (current && phase === 'running') {
+        current.lastAccepted = { atMs: elapsed(), height, validatedHeight };
+        const withdrawal = current.withdrawals?.at(-1);
+        if (withdrawal && !withdrawal.recoveredAtMs) withdrawal.recoveredAtMs = current.lastAccepted.atMs;
+      }
     },
     spawnProcess(file, args, options) {
       const child = spawn(file, [...args, '--connect', '127.0.0.1:' + peerPort],
@@ -42,13 +49,17 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
         if (line.length > 2048) return;
         try {
           const { protocol, height, validated, tip, ibd, historical } = JSON.parse(line);
-          if (protocol === 'chicory.floresta/1') current.lastHeartbeat = { height, validated, tip, ibd, historical };
+          if (protocol === 'chicory.floresta/1') {
+            const atMs = elapsed();
+            if (current.lastHeartbeat) current.maxHeartbeatGapMs = Math.max(current.maxHeartbeatGapMs || 0, atMs - current.lastHeartbeat.atMs);
+            current.lastHeartbeat = { atMs, height, validated, tip, ibd, historical };
+          }
         } catch { /* The supervisor diagnoses malformed control messages. */ }
       });
       child.stderr.setEncoding('utf8').on('data', data => {
         current.stderrTail = ((current.stderrTail ?? '') + data).slice(-2048).split(parent).join('<profile>');
       });
-      child.once('exit', (code, signal) => { current.exit = { code, signal }; });
+      child.once('exit', (code, signal) => { current.exit = { code, signal, atMs: elapsed() }; });
       return child;
     }
   });
@@ -153,23 +164,29 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
         pendingCheck.status = 'passed';
       } finally { await bridge?.close(); }
     }, async atTip({ tipHeight, tipHash, outpoint, expectedMatches, stage }) {
+      forkRun.stage = stage + ' chain';
       const reached = state => state.phase === 'caught-up' && state.height === tipHeight && state.hash === tipHash;
       // The stock node and this managed child synchronize independently. Wait
       // for this child's verified view before asking its scanner about a fork.
       const history = await verifyHistory(height, tipHeight, tipHash);
       assert.equal(lifecycle.at(-1).run, forkRun.run, 'Managed process restarted during a chain transition');
+      forkRun.stage = stage + ' registration';
       await node.registerWatches({ owner: forkOwner, scripts: [], outpoints: [outpoint] });
+      forkRun.stage = stage + ' coverage';
       const [funded, detached] = await Promise.all([owner, forkOwner].map(id =>
         waitFor('Fork-specific watch coverage', () => node.watchCoverage(id), reached)));
       assert.equal(funded.matchedTransactions, expectedMatches);
       assert.equal(detached.matchedTransactions, stage === 'beforeFork' ? 1 : 0);
+      forkRun.stage = stage + ' parent proofs';
       const proofs = await verifyManagedParents({ node, owner, proof, matchedHeight: 103, parentHeight: 2,
         ...(stage === 'beforeFork' ? { matchedTxid: outpoint.split(':')[0] } : { detachedTxid: outpoint.split(':')[0] }) });
       if (stage === 'afterFork') {
         assert.equal(await node.confirmedTransaction(forkOwner, proofs.parent.txid), null);
       }
+      forkRun.stage = stage + ' confirmed reads';
       evidence.forks.push({ stage, funded, detached, proofs, historical: history,
         confirmed: verifyConfirmed ? await verifyConfirmed(tipHeight, tipHash) : null });
+      forkRun.stage = stage + ' complete';
     } };
   } finally {
     if (!handingOff) await node.stop();
