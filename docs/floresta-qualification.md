@@ -39,6 +39,21 @@ Its comparison branch points at the pinned v0.9.1 release.
    A running node, a synced tip and a complete confirmed scan are separate
    states. Each wallet still needs mempool and recovery coverage before handoff.
 
+A preview can reopen the store it initialized. When the daemon digest changes,
+the preview requires an explicit rebuild before it will reuse that location.
+You can return to the matching build while its data is intact. To start fresh,
+stop the node and use **Remove local node data** on a supported filesystem.
+On Windows, Settings shows the exact generated directory. After you manually
+remove it, confirm removal in Settings. A missing custom volume stays registered
+until its data can be removed safely. Independent wallet and channel backups
+belong to Beignet and must be kept separately.
+
+On macOS arm64, a disposable regtest store initialized by the 17-patch
+candidate was refused by the 18-patch candidate. After confirmed native
+cleanup, the newer build started at genesis and the older build refused to
+reopen its new store. The preview supports a fresh rebuild across these builds.
+In-place migration and signed release updates still need qualification.
+
 The supervisor identifies the owned loopback service by its inherited pipe
 and genesis header. The managed service has no HTTP control listener. Its
 Electrum TCP listener allows chain-health queries only. The private owner pipe
@@ -279,7 +294,7 @@ wallet-serving gates have evidence.
 | --- | --- |
 | Peer transactions and fees | A way to identify compatible public proof peers, receive funding and conflicts through disconnects, qualify delivery on those peers, and provide usable fee estimates or an explicit unavailable result. The private regtest bridge can prove only the transactions it observes. |
 | Automatic handoff and fallback consent | A durable engine admission check that covers payments, peer-initiated channel changes, splices, closes and recovery. Switch only at a safe lifecycle point, verify refresh and subscriptions, and honor external-server permission across failure and restart. |
-| Channel recovery | Qualify incoming HTLC preimage recovery and a live local wallet handoff through recovery. Independent Core and cold native checks now cover guardian and peer-storage restore, stale backups, unilateral close, the outgoing HTLC timeout, final CSV sweeps and the two-input breach remedy. |
+| Channel recovery | Qualify a live local wallet handoff through recovery. The funded recovery wallets used external Electrs. Independent Core checks and cold native replay covered guardian and peer-storage restore, stale backups, unilateral close, the outgoing HTLC timeout, incoming HTLC preimage recovery, final CSV sweeps and the two-input breach remedy. [Incoming preimage recovery](floresta-beignet.md#funded-incoming-htlc-preimage-recovery) |
 | Distribution | Per-platform signed artifacts, installation checks, upgrade and rollback rules, and storage behavior on every supported filesystem. The macOS developer preview uses an ad hoc signature. |
 | Mainnet operation | Qualify historical checkpoint replay on mainnet and measure sustained sync, bandwidth, disk growth and recovery there. The public trial above reached the released checkpoint. Sustained post-checkpoint progress and fresh-wallet serving time still need evidence. |
 

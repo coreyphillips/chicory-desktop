@@ -4,11 +4,23 @@ Use this register to decide what to file, where to file it and which existing is
 
 ## Chicory Desktop
 
+### Git Bash can select an incompatible tar on Windows
+
+**Observed on Windows x64.** At commit `e5a0fd0`, the Windows 2025 preview workflow ran `npm run runtime:prepare` from Git Bash. Encrypted SQLite setup invoked the first `tar.exe` on PATH with the absolute name of its verified Node headers archive. GNU tar treated the drive letter `D:` as a remote host and exited before extraction. The build stopped before packaging. [Failing Windows job](https://github.com/coreyphillips/chicory-desktop/actions/runs/42092888953/job/127475283393)
+
+**Correction.** The preparation scripts use the Windows system tar by absolute path for the Node headers, Tor bundle and Floresta source. The Windows matrix repeats the original Git Bash invocation and requires the packaged wallet and monitor to start. [Tar selection](../scripts/desktop/system-tar.mjs) · [Hosted check](../.github/workflows/floresta.yml)
+
 ### Honor the selected Electrum server's TLS policy over Tor
 
 **Already filed.** On the original desktop revision, configuring a v3 onion Electrum server with TLS and certificate verification opened a SOCKS tunnel but sent plaintext Electrum into it. The selected certificate identity and pins never reached the TLS client. The resolver's original unit test expected TLS to be disabled. A TLS-only endpoint could fail to serve the wallet. [Issue 45 and original source](https://github.com/coreyphillips/chicory-desktop/issues/45)
 
 **Fix and verification.** The client now negotiates TLS over the tunnel using the configured onion hostname. The prepared-engine regression verifies hostname and pin handling and denies wallet writes when certificate verification fails. The explicit plaintext case is also covered. The test uses a controlled local TLS destination and bridge. [Fix](https://github.com/coreyphillips/chicory-desktop/commit/a926253) · [Prepared-engine tests](../server/engine-endpoint-policy.test.js) · [Resolver tests](../server/desktop-network.test.js)
+
+### A new channel watch closed a healthy private wallet connection
+
+**Introduced during issue 33 qualification.** Two fresh Beignet wallets held their own authenticated regtest connections. Both agreed on a signed channel funding transaction. Adding its output to each owner started a historical scan. The next Electrum subscription poll saw temporarily unavailable wallet data and destroyed the socket. After both scans reached the verified tip, the one-use grant correctly refused broadcast because the wallet session had already closed. The funding witness was still held and the peer mempool was empty. [Funded reproduction](../scripts/qualification/floresta-channel-lab.mjs)
+
+**Correction.** Explicit queries fail until the owner has a current verified view. A subscription poll defers notification through a scan, tip change or pending revision race, retaining the prior delivered status for comparison. A revoked or expired lease closes the socket. Malformed backend data also fails the poll. A genuine TLS-PSK socket regression checks unavailable reads, fresh notification after coverage returns, and revocation of the consumed connection. [Subscription logic](../server/floresta-wallet-electrum.js) · [Regression](../server/floresta-wallet-bridge.test.js)
 
 ## Beignet wallet engine
 
@@ -26,6 +38,10 @@ hardcoded wallet script that lay outside the registered owner scope. The
 qualification path uses `server.ping` on the authenticated local connection.
 The ordinary external health check keeps its existing behavior. [Pinned calls
 and scoped correction](floresta-beignet.md)
+
+### A v2 opener delivering the last external witness can wait for the other wallet to publish
+
+**Compatibility observation for Beignet 0.38.0.** With one input owned by the opener, the acceptor releases its empty witness set first. The final external witness completes the opener's signed record. That transition persists, sends the witnesses and registers the funding watch. The matching receiver transition can enqueue a broadcast. On two owner-scoped wallets, the receiver lacks the opener's spend consent. The isolated regtest peer received no funding during a 90-second wait at a fixed tip. Each wallet's persisted record then provided the same full transaction. The qualification coordinator explicitly used the opener's normal wallet funding provider on that signed record, under its original single-use approval. The independent peer accepted it and confirmed the shared output. An embedder using external inputs needs to account for this publication step. [Pinned send transition](https://github.com/coreyphillips/beignet/blob/954d034b13f57b38297406dd0d30dddc1208b192/src/lightning/channel/channel.ts#L20122-L20192) · [Pinned receive transition](https://github.com/coreyphillips/beignet/blob/954d034b13f57b38297406dd0d30dddc1208b192/src/lightning/channel/channel.ts#L20937-L20972) · [Funded exercise](floresta-beignet.md#private-managed-lightning-channel-and-invoices-on-regtest)
 
 ### A recovered wallet could release its watch snapshot before the required restart
 
@@ -64,6 +80,8 @@ These entries describe integration or test defects found before release. They sh
 
 | Reproduction | Correction and regression coverage |
 | --- | --- |
+| In full-verification mode, open the quick-start confirmation. Have the running node report a historical verification failure, accept the prompt and reopen the profile. | The confirmation previously overwrote the newly saved requirement for independent replay. Saving only the new preference against the current settings preserves the hold across restart. The Settings regression reproduces the original failure. |
+| Open an existing preview profile with a different daemon digest and approve starting the node. | Startup consent used to authorize the new executable to open the previous build's store. The preview now keeps the store's build separately and requires explicit removal and a fresh sync across unqualified build changes. Tests cover both directions with real daemons, legacy settings, lost receipts, and storage that reappears during manual removal confirmation. |
 | Put an old receipt or an extra library alongside a previously prepared candidate whose executable still has the expected digest, then prepare it again. | Verify the entire staged payload before reusing the directory. The regression covers an identical installation, a changed receipt and an extra DLL. |
 | Reopen an independently verified genesis-anchor store after the chain advances. | The old target-specific receipt caused a full replay of the verified prefix. Reuse an authenticated active prefix under the same validation policy. A funded week-backlog test, competing fork, corruption and policy-mismatch regressions verify the change. |
 | Launch the new Settings preload in a VM context without process arguments. | The preload reads the development flag defensively. Run the preload tests and the Electron Settings smoke. |

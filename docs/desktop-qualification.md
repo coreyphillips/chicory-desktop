@@ -54,6 +54,14 @@ automatic force close, wallet process restart and final sweeps. It also accepts
 a public fixture directory for a separate cold managed-node replay.
 [Funded close and sweep results](floresta-beignet.md#funded-htlc-timeout-and-final-sweeps)
 
+Select `incoming-preimage` on its own to exercise settlement while the sender
+is offline, the sender's current unilateral close and the restarted receiver's
+preimage spend. Both live wallets use the selected external regtest Electrs
+server. Core checks the witness and payout. Set
+`CHICORY_QUALIFY_FLORESTA_FIXTURE` to an empty suite-owned temporary directory
+to replay the public blocks and receiver watches from genesis.
+[Incoming HTLC recovery](floresta-beignet.md#funded-incoming-htlc-preimage-recovery)
+
 Select `breach-justice` on its own to test a confirmed revoked commitment
 while the honest wallet is offline. The old transaction comes from a new
 in-memory regtest counterparty, and only the guarded local Core node receives
@@ -114,6 +122,13 @@ Floresta binary with build SHA-256
 `f12d69abf4eea959ee1f7e5204f9b5f84b4d69f6e7f8c8e9eaf366fd07918dc6`
 and nested signed SHA-256
 `25553c0365555005417d4e4229b98e9882e1ebe8c20823110a7bf20724e72785`.
+The final macOS package with the storage policy and subscription fixes passed
+all nine checks again on a separate fresh chain. Its `app.asar` file SHA-256 was
+`b314525eb9ec6892907d9b0f5026c92cd245aff800f86a16ed8eb565e3fa8baa`.
+The full application tree digest was
+`ff6de31888af0995fbc5c68b1934f3ead688f161ad315dacc2c4068c5708d05a`.
+The report SHA-256 was
+`695dabac18a697df841923af0e3b7c376051057f036e69bd16dc06bd8cb359aa`.
 
 ## Stages
 
