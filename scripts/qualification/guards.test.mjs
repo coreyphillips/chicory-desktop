@@ -4,13 +4,28 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { GuardError, PROFILE_PREFIX, REGTEST_GENESIS, RegtestGate, assertDisposableProfile, assertLoopback,
-  assertRegtestAddress, assertRegtestChain, assertRegtestWallets, headerHash, productionProfiles } from './guards.mjs';
+  assertRegtestAddress, assertRegtestChain, assertRegtestWallets, headerHash, productionProfiles, qualificationStages } from './guards.mjs';
 import { Recorder, dependencyVersions, packageEvidence, packageFiles, redact } from './evidence.mjs';
 
 // Regtest genesis header, and mainnet's, as Electrum returns them.
 const REGTEST_HEADER = '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000';
 const MAINNET_HEADER = '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c';
 const regtest = { chain: 'regtest', genesis: REGTEST_GENESIS, electrumHeader: REGTEST_HEADER, electrum: { host: '127.0.0.1' } };
+
+test('funded remote recovery needs an explicit stage and a separate fixture', () => {
+  const { stages, recoveryStage } = qualificationStages();
+  assert.ok(stages.has('recovery'));
+  assert.equal(recoveryStage, undefined);
+  for (const name of ['guardian-recovery', 'peer-storage-recovery']) {
+    assert.equal(stages.has(name), false);
+    assert.equal(qualificationStages(name).recoveryStage, name);
+    assert.throws(() => qualificationStages('payments,' + name), /fresh isolated fixture/);
+  }
+  assert.equal(stages.has('forceclose-sweep'), false);
+  assert.equal(qualificationStages('forceclose-sweep').stages.has('forceclose-sweep'), true);
+  assert.throws(() => qualificationStages('forceclose-sweep,payments'), /fresh isolated fixture/);
+  assert.throws(() => qualificationStages('unknown'), /Unknown stage/);
+});
 
 test('Electrum header hashes to the regtest genesis', () => {
   assert.equal(headerHash(REGTEST_HEADER), REGTEST_GENESIS);

@@ -164,7 +164,7 @@ function availability() {
 }
 
 function recoveryPending(node) {
-  return node.restorePending || node._resuming || node._restoreInFlight ||
+  return node.restorePending || node.restartRequired || node._resuming || node._restoreInFlight ||
     node.node?.startupRepairPending || node.node?.getRecoveryOwnershipHold() != null;
 }
 

@@ -79,6 +79,12 @@ test('private snapshot reflects persisted wallet ranges and respects recovery ow
   for (const secret of [mnemonic, key]) assert.equal(JSON.stringify(result).includes(secret), false);
   assert.equal(fs.readFileSync(database).includes(Buffer.from('SQLite format 3')), false);
   assert.equal(control.acknowledge(result.generation).accepted, true);
+  // A manual peer-storage restore swaps SQLite, then leaves the old node
+  // objects in the daemon until the required restart.
+  daemon._restartRequired = true;
+  assert.deepEqual(control.snapshot(), { status: 'recovery-pending', coverageComplete: false });
+  assert.equal(control.acknowledge(result.generation).accepted, false);
+  daemon._restartRequired = false;
   daemon.node._barrierFenced = true;
   assert.deepEqual(control.snapshot(), { status: 'recovery-pending', coverageComplete: false });
   assert.equal(control.acknowledge(result.generation).accepted, false);

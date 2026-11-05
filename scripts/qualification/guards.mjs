@@ -12,6 +12,22 @@ export class GuardError extends Error {
   constructor(message) { super(`Regtest guard: ${message}`); this.name = 'GuardError'; }
 }
 
+/** Destructive recovery exercises get a fresh fixture of their own. */
+export function qualificationStages(selection) {
+  // A stale backup may make its counterparty close, so backup runs last.
+  const defaults = ['preflight', 'payments', 'direct-funding', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
+  const remoteRecovery = ['guardian-recovery', 'peer-storage-recovery'];
+  const standalone = [...remoteRecovery, 'forceclose-sweep'];
+  const stages = new Set(selection ? selection.split(',').map(stage => stage.trim()).filter(Boolean) : defaults);
+  for (const stage of stages) {
+    if (!defaults.includes(stage) && !standalone.includes(stage) && stage !== 'floresta-preview')
+      throw new GuardError('Unknown stage ' + stage);
+  }
+  const recoveryStage = remoteRecovery.find(stage => stages.has(stage));
+  if (stages.size !== 1 && standalone.some(stage => stages.has(stage))) throw new GuardError('Run this funded scenario in a fresh isolated fixture.');
+  return { stages, recoveryStage };
+}
+
 /** Electrum returns a raw 80-byte header. Its block hash is the reversed double SHA-256. */
 export function headerHash(headerHex) {
   if (typeof headerHex !== 'string' || !/^[0-9a-f]{160}$/i.test(headerHex)) throw new GuardError('Electrum returned a malformed header.');

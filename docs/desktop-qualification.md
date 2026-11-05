@@ -40,6 +40,20 @@ versions, and a digest of the whole application plus each part that carries
 code under test (`app.asar`, `dist`, `server` and every `runtime/*` component,
 including the engine, Node and Tor).
 
+Select `guardian-recovery` or `peer-storage-recovery` on its own to fund a
+fresh channel, stop its original writer and restore from hosted replicas in
+another encrypted manager. Each stage uses its own temporary wallets. The
+second manager uses `REGTEST_PEER_PORT + 100` for its port base.
+To replay the public watch data on an empty managed node, supply an empty
+temporary `CHICORY_QUALIFY_FLORESTA_FIXTURE` to the selected recovery stage,
+then run the cold verifier on that fixture.
+[Funded recovery outcomes](floresta-beignet.md#funded-remote-lightning-recovery)
+
+Select `forceclose-sweep` on its own to exercise an unpaid Lightning HTLC,
+automatic force close, wallet process restart and final sweeps. It also accepts
+a public fixture directory for a separate cold managed-node replay.
+[Funded close and sweep results](floresta-beignet.md#funded-htlc-timeout-and-final-sweeps)
+
 `CHICORY_ELECTRON_ARGS` passes extra switches to the app. On a Mac that already
 holds a `Chicory Safe Storage` keychain item from another build, macOS asks
 whether the new build may read it, and that prompt stalls an unattended run.

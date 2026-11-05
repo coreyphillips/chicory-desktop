@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
 import electronPath from 'electron';
 import { createHostWalletClient } from '../../web/platform/walletClient.ts';
-import { PROFILE_PREFIX, RegtestGate, assertDisposableProfile, assertLoopback, assertRegtestWallets } from './guards.mjs';
+import { PROFILE_PREFIX, RegtestGate, assertDisposableProfile, assertLoopback, assertRegtestWallets, qualificationStages } from './guards.mjs';
 import { Recorder, dependencyVersions, hostEvidence, packageEvidence, resourcesDirectory } from './evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -28,15 +28,11 @@ const bitcoin = process.env.REGTEST_BITCOIN_CONTAINER ?? 'chicory-browser-regtes
 const electrum = { host: '127.0.0.1', port: Number(process.env.REGTEST_ELECTRUM_PORT ?? '62401'), tls: false };
 const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
-// backup runs last: restoring a stale copy of the node may lead its peer to
-// close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'direct-funding', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
-const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
-for (const stage of stages) assert.ok(ALL.includes(stage) || stage === 'floresta-preview', `Unknown stage ${stage}`);
+const { stages, recoveryStage } = qualificationStages(process.env.CHICORY_QUALIFY_STAGES);
 const fixtureDirectory = process.env.CHICORY_QUALIFY_FLORESTA_FIXTURE;
 if (fixtureDirectory) {
-  assert.ok(stages.size === 1 && stages.has('direct-funding'), 'A cold funding export needs its own direct-funding run');
+  assert.ok(stages.size === 1 && (stages.has('direct-funding') || stages.has('forceclose-sweep') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
   assertDisposableProfile(fixtureDirectory);
   await fs.chmod(fixtureDirectory, 0o700);
 }
@@ -304,8 +300,9 @@ try {
   const config = await subject.api('/config');
   const subjectWallets = await subject.api('/wallets');
   assert.deepEqual(subjectWallets, [], 'A fresh profile starts with zero wallets');
-  peer = await startPeer(peerPort, Boolean(fixtureDirectory));
-  if (fixtureDirectory) watchCollection.setWatchCollection(peer.child, 'regtest', true);
+  const forceClose = stages.has('forceclose-sweep');
+  peer = await startPeer(peerPort, Boolean(fixtureDirectory || recoveryStage || forceClose));
+  if (fixtureDirectory || forceClose) watchCollection.setWatchCollection(peer.child, 'regtest', true);
   const peerWallets = await peer.api('/wallets');
   gate.verify({ chain: rpc('getblockchaininfo').chain, genesis: rpc('getblockhash', 0),
     electrumHeader: await until('Electrum ready', () => electrumCall('blockchain.block.header', [0])), electrum,
@@ -329,6 +326,18 @@ try {
   // The primary opens the payer's channel with nothing on the payer's side.
   await fundWallet(payer, 200000);
   await until('payer spendable', mining(() => payer.snapshot()), snap => snap.balance.availableSats >= 150000);
+  if (forceClose) {
+    const { qualifyForceClose } = await import('./floresta-forceclose-lab.mjs');
+    record.pass('forceclose-sweep', await qualifyForceClose({ peer, primaryId: primary.id, payerId, gate, rpc, fixtureDirectory }));
+    throw Object.assign(new Error('funded force close complete'), { done: true });
+  }
+  if (recoveryStage) {
+    const { qualifyRemoteRecovery } = await import('./floresta-guardian-lab.mjs');
+    const evidence = await qualifyRemoteRecovery({ mode: recoveryStage === 'guardian-recovery' ? 'quorum' : 'peer-storage',
+      peer, primary, primaryUri, payer, gate, rpc, fixtureDirectory, startReplacement: () => startPeer(peerPort + 100, true) });
+    record.pass(recoveryStage, evidence);
+    throw Object.assign(new Error('remote recovery complete'), { done: true });
+  }
 
   // Subject: created through the app's own wallet client, as onboarding does.
   const created = await subject.client().createWallet({ name: `Qualify ${run}`, network: 'regtest', primaryUri, electrum });

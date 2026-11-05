@@ -28,28 +28,67 @@ async function readLocal(file, limit) {
   return fs.readFile(file, 'utf8');
 }
 
+function references(input, keys) {
+  const points = new Map();
+  for (const key of keys) {
+    const point = input[key];
+    assert.match(point, /^[a-f0-9]{64}:(?:0|[1-9][0-9]{0,9})$/);
+    const [txid, vout] = point.split(':');
+    assert(Number(vout) <= 0xffffffff);
+    points.set(key, { point, txid, vout: Number(vout) });
+  }
+  return points;
+}
+
+export function fixtureReferences(input) {
+  if (input.liveRole === 'reopened-closer') {
+    assert.equal(input.restored, undefined);
+    assert.equal(input.close?.reason, 'HTLC_EXPIRY_FORCE_CLOSE');
+    assert.equal(input.close.heldSats, 30000);
+    assert(Number.isSafeInteger(input.close.expiry) && input.close.expiry > 0);
+    assert(Number.isSafeInteger(input.close.csvBlocks) && input.close.csvBlocks > 0 && input.close.csvBlocks <= 0xffff);
+    const byPoint = references(input, ['currentFunding', 'commitmentHtlc', 'commitmentBalance', 'secondLevel', 'balanceSweep', 'timeoutSweep']);
+    assert.equal(new Set([...byPoint.values()].map(p => p.point)).size, byPoint.size);
+    assert.equal(byPoint.get('commitmentHtlc').txid, byPoint.get('commitmentBalance').txid);
+    return { byPoint, closing: true };
+  }
+  assert.equal(input.liveRole, 'channel-counterparty');
+  const remote = ['quorum', 'peer-storage'].includes(input.restore?.kind);
+  if (input.restored) {
+    assert.equal(input.restoredRole, 'recipient');
+    assert.notEqual(input.restored.owner, input.live.owner);
+    if (!remote) {
+      assert.equal(input.restore?.kind, 'full-backup');
+      assert.equal(input.restore.heldOrClosed, true, 'Stale channel custody must stay held or be closed by its peer');
+    }
+  }
+  const byPoint = references(input, remote ? ['currentFunding'] : ['priorFunding', 'currentFunding', 'payerCoin']);
+  if (remote) {
+    assert.equal(input.restored?.snapshot.status, 'observed');
+    assert.equal(input.restore.fundedSats, 200000);
+    assert.equal(typeof input.restore.restoredPayment, 'boolean');
+    if (input.restore.kind === 'quorum') {
+      assert.equal(input.restore.chainOutcome, 'funding-unspent');
+      assert.equal(input.restore.restoredPayment, true);
+    }
+    if (input.restore.chainOutcome === 'funding-unspent') assert.equal(input.confirmedSpend, null);
+    else {
+      assert.equal(input.restore.chainOutcome, 'confirmed-spend-channel-unusable');
+      assert.match(input.confirmedSpend, /^[a-f0-9]{64}$/);
+      byPoint.set('confirmedSpend', { txid: input.confirmedSpend });
+    }
+  }
+  assert.equal(new Set([...byPoint.values()].map(p => p.txid)).size, byPoint.size);
+  return { remote, byPoint };
+}
+
 async function readFixture(directory) {
   const input = JSON.parse(await readLocal(path.join(directory, 'fixture.json'), 16 * 1024 * 1024));
   assert.equal(input.version, 1);
   assert.equal(input.network, 'regtest');
   assert(Number.isInteger(input.tipHeight) && input.tipHeight > 100 && input.tipHeight <= 5000);
   assert.match(input.tipHash, /^[a-f0-9]{64}$/);
-  assert.equal(input.liveRole, 'channel-counterparty');
-  if (input.restored) {
-    assert.equal(input.restoredRole, 'recipient');
-    assert.notEqual(input.restored.owner, input.live.owner);
-    assert.equal(input.restore?.kind, 'full-backup');
-    assert.equal(input.restore.heldOrClosed, true, 'Stale channel custody must stay held or be closed by its peer');
-  }
-  const byPoint = new Map();
-  for (const key of ['priorFunding', 'currentFunding', 'payerCoin']) {
-    const point = input[key];
-    assert.match(point, /^[a-f0-9]{64}:(?:0|[1-9][0-9]{0,9})$/);
-    const [txid, vout] = point.split(':');
-    assert(Number(vout) <= 0xffffffff);
-    byPoint.set(key, { point, txid, vout: Number(vout) });
-  }
-  assert.equal(new Set([...byPoint.values()].map(p => p.txid)).size, 3);
+  const { remote, closing, byPoint } = fixtureReferences(input);
   const text = await readLocal(path.join(directory, 'blocks.ndjson'), 64 * 1024 * 1024);
   const lines = text.trimEnd().split('\n');
   assert.equal(lines.length, input.tipHeight + 1);
@@ -68,7 +107,7 @@ async function readFixture(directory) {
       const txid = tx.getId();
       for (const item of byPoint.values()) {
         if (txid !== item.txid) continue;
-        assert(!item.tx && tx.outs[item.vout]);
+        assert(!item.tx && (item.vout === undefined || tx.outs[item.vout]));
         Object.assign(item, { tx, blockHash: previous, header: block.toHex(true), height, position });
       }
     }
@@ -77,17 +116,47 @@ async function readFixture(directory) {
   assert.equal(previous, input.tipHash);
   for (const item of byPoint.values()) assert(item.tx && item.height > 0, 'Expected confirmed funding input or output is absent');
   const current = byPoint.get('currentFunding');
-  const referenced = new Set(current.tx.ins.map(inputPoint));
-  for (const key of ['priorFunding', 'payerCoin']) {
-    assert(referenced.has(byPoint.get(key).point), 'The direct funding transaction did not spend ' + key);
+  if (closing) {
+    verifyCloseClaims(byPoint, input.close);
+  } else if (remote) {
+    assert.equal(current.tx.outs[current.vout].value, input.restore.fundedSats);
+    const spend = byPoint.get('confirmedSpend');
+    if (spend) assert(spend.tx.ins.map(inputPoint).includes(current.point), 'Close must spend the captured funding outpoint');
+  } else {
+    const referenced = new Set(current.tx.ins.map(inputPoint));
+    for (const key of ['priorFunding', 'payerCoin']) {
+      assert(referenced.has(byPoint.get(key).point), 'The direct funding transaction did not spend ' + key);
+    }
   }
   const scripts = new Map();
-  for (const id of ['priorFunding', 'currentFunding']) {
+  const neededScripts = remote ? ['currentFunding'] : ['priorFunding', 'currentFunding'];
+  for (const id of closing ? byPoint.keys() : neededScripts) {
     const point = byPoint.get(id);
     const script = point.tx.outs[point.vout].script;
     scripts.set(script.toString('hex'), hashScript(script));
   }
-  return { input, blocks, byPoint, scripts };
+  return { input, blocks, byPoint, scripts, remote, closing };
+}
+
+export function verifyCloseClaims(points, close) {
+  const parentInput = (child, parent) => {
+    const parentPoint = points.get(parent);
+    const childPoint = points.get(child);
+    const spend = childPoint.tx.ins.find(input => inputPoint(input) === parentPoint.point);
+    assert(spend && childPoint.height >= parentPoint.height, 'Wrong claim ancestry at ' + child);
+    return spend;
+  };
+  parentInput('commitmentHtlc', 'currentFunding');
+  const htlc = points.get('commitmentHtlc');
+  assert.equal(htlc.tx.outs[htlc.vout].value, close.heldSats);
+  assert(htlc.height > close.expiry);
+  parentInput('secondLevel', 'commitmentHtlc');
+  const timeout = points.get('secondLevel');
+  assert.equal(timeout.tx.locktime, close.expiry);
+  for (const [child, parent] of [['balanceSweep', 'commitmentBalance'], ['timeoutSweep', 'secondLevel']]) {
+    assert.equal(parentInput(child, parent).sequence, close.csvBlocks);
+    assert(points.get(child).height >= points.get(parent).height + close.csvBlocks, 'Sweep precedes CSV maturity');
+  }
 }
 
 // Derive complete script history and the current UTXO set from the captured
@@ -123,12 +192,18 @@ async function waitFor(label, node, read, accept) {
 }
 
 async function checkWallet(node, source, fixture) {
-  const { input, byPoint, scripts, blocks } = fixture;
+  const { input, byPoint, scripts, blocks, remote, closing } = fixture;
   const { owner, snapshot } = source;
   assert.match(owner, /^[0-9a-f]{64}$/);
   const view = publicSnapshot(snapshot, 'regtest', { remaining: 8 * 1024 * 1024 });
   assert.equal(view.status, 'observed', 'A wallet supplied no observed public watch snapshot');
   assert.deepEqual(view, snapshot, 'Unexpected fields in the public watch snapshot');
+  const watched = closing ? [...byPoint.values()] : remote ? [byPoint.get('currentFunding')] : [];
+  for (const item of watched) {
+    const hex = item.tx.outs[item.vout].script.toString('hex');
+    assert(view.scripts.includes(hex));
+    assert(view.outpoints.some(point => point.outpoint === item.point && point.scriptHash === scripts.get(hex)));
+  }
   for (const batch of registrations(owner, view)) await node.registerWatches(batch);
   const coverage = await waitFor('Owner scan', node, () => node.watchCoverage(owner),
     state => state.phase === 'caught-up' && state.height === input.tipHeight && state.hash === input.tipHash);
@@ -146,9 +221,10 @@ async function checkWallet(node, source, fixture) {
       assert.equal(tx.confirmations, input.tipHeight - ref.height + 1);
       assert.equal(tx.tipHash, input.tipHash);
       assert.equal(tx.tipHeight, input.tipHeight);
-      proofs[key] = { outpoint: ref.point, height: tx.height, blockHash: tx.blockHash,
-        position: tx.position, confirmations: tx.confirmations, value: ref.tx.outs[ref.vout].value,
-        explicitlyWatched: view.outpoints.some(p => p.outpoint === ref.point) };
+      proofs[key] = { txid: ref.txid, height: tx.height, blockHash: tx.blockHash,
+        position: tx.position, confirmations: tx.confirmations };
+      if (ref.point) Object.assign(proofs[key], { outpoint: ref.point, value: ref.tx.outs[ref.vout].value,
+        explicitlyWatched: view.outpoints.some(p => p.outpoint === ref.point) });
     }
     for (const [hex, scriptHash] of scripts) {
       const expected = scriptReference(blocks, hex);
@@ -162,8 +238,14 @@ async function checkWallet(node, source, fixture) {
       histories.push({ scriptHash, history: history.rows, unspent: unspent.rows, confirmed: balance.confirmed });
     }
     const remaining = new Set(histories.flatMap(h => h.unspent.map(row => row.txid + ':' + row.vout)));
-    assert(remaining.has(byPoint.get('currentFunding').point), 'The new funding output must be unspent');
-    assert(!remaining.has(byPoint.get('priorFunding').point), 'The superseded funding output must be spent');
+    if (closing) {
+      for (const [name, item] of byPoint) {
+        assert.equal(remaining.has(item.point), ['balanceSweep', 'timeoutSweep'].includes(name), 'Wrong close disposition at ' + name);
+      }
+    } else {
+      assert.equal(remaining.has(byPoint.get('currentFunding').point), !byPoint.has('confirmedSpend'), 'Wrong current funding disposition');
+      if (!remote) assert(!remaining.has(byPoint.get('priorFunding').point), 'The superseded funding output must be spent');
+    }
     return { status: view.status, counts: { descriptors: view.descriptors.length, scripts: view.scripts.length,
       outpoints: view.outpoints.length, unresolvedHashes: view.unresolvedHashes.length }, coverage, proofs, histories };
   } finally { session.close(); }
@@ -191,7 +273,7 @@ async function qualify({ fixture: directory, utreexod, digest: sha256 }) {
       const sync = await waitFor('Full chain validation', node, () => node.status(),
         s => s.tipSynced && s.historicalVerification === 'verified' && s.height === input.tipHeight &&
           s.validatedHeight === input.tipHeight && s.tipHash === input.tipHash);
-      console.error('Scanning the counterparty watch snapshot');
+      console.error('Scanning the wallet watch snapshot');
       const live = await checkWallet(node, input.live, fixture);
       let restored;
       if (input.restored?.snapshot.status === 'recovery-pending') {
@@ -205,7 +287,9 @@ async function qualify({ fixture: directory, utreexod, digest: sha256 }) {
         proofPeerSha256: digest(await fs.readFile(utreexod)), emptyStorage: true,
         historical: { state: sync.historicalVerification, height: sync.historicalHeight, target: sync.historicalTarget },
         liveRole: input.liveRole, live, restoredRole: input.restoredRole, restored,
-        restore: input.restored && { kind: input.restore.kind, heldOrClosed: input.restore.heldOrClosed } };
+        restore: input.restored && (fixture.remote ? { kind: input.restore.kind, chainOutcome: input.restore.chainOutcome,
+          restoredPayment: input.restore.restoredPayment, fundedSats: input.restore.fundedSats } :
+          { kind: input.restore.kind, heldOrClosed: input.restore.heldOrClosed }) };
     } finally { await node.stop(); }
   });
 }

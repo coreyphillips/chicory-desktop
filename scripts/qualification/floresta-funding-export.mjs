@@ -42,7 +42,7 @@ export async function writeFundingFixture(directory, rpc, manifest) {
   await fs.writeFile(path.join(directory, 'fixture.json'), JSON.stringify({
     version: 1, network: 'regtest', tipHeight, tipHash, ...manifest
   }, null, 2) + '\n', options);
-  return { tipHeight, tipHash, blockBytes: bytes, restoredWatches: manifest.restored.snapshot.status };
+  return { tipHeight, tipHash, blockBytes: bytes, ...(manifest.restored && { restoredWatches: manifest.restored.snapshot.status }) };
 }
 
 export async function captureRestoredFunding({ directory, rpc, until, primaryId, peer, subject, recipientId, funding, payer, wallet, passphrase, stopSubject, startRestored }) {
