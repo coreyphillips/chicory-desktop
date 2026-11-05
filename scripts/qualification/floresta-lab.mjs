@@ -109,7 +109,7 @@ function fundingSpend(parent, miner, watched, amount, fee) {
   return tx;
 }
 
-async function lab(root, florestad, utreexod, managedFlorestad) {
+async function lab(root, florestad, utreexod, managedFlorestad, extendedInputs) {
   const env = { HOME: root, APPDATA: root, LOCALAPPDATA: root, TMPDIR: root, TEMP: root, TMP: root };
   if (process.platform === 'win32') env.SystemRoot = process.env.SystemRoot;
   const version = bin => execFileSync(bin, ['--version'], { env, cwd: root, encoding: 'utf8', timeout: 5000 }).trim();
@@ -195,7 +195,7 @@ async function lab(root, florestad, utreexod, managedFlorestad) {
   let observer;
   if (managedFlorestad) {
     const { qualifyManagedWatches } = await import('./floresta-watch-lab.mjs');
-    observer = await qualifyManagedWatches({ binary: path.resolve(managedFlorestad), root, peerPort, proof,
+    observer = await qualifyManagedWatches({ binary: path.resolve(managedFlorestad), root, peerPort, proof, extendedInputs,
       script: watched.output.toString('hex'), outpoint: funding.getId() + ':2', height: 102, blockHash });
   }
   const transitions = [];
@@ -257,6 +257,7 @@ async function lab(root, florestad, utreexod, managedFlorestad) {
       expectedMatches: 2, stage: 'afterFork' });
     await snapshot('Conflicting spend on the longer branch', winning, active,
       { txid: replacement.getId(), height: stale.height, blockHash: stale.blockHash });
+    await observer?.pending();
   } catch (error) {
     transitions.push({ stage: 'Replacement and reorg fixture', rows: [
       { check: 'Complete controlled chain transitions', status: 'failed', detail: error.message }
@@ -271,11 +272,12 @@ async function lab(root, florestad, utreexod, managedFlorestad) {
   return rows.some(row => row.status === 'failed') ? 1 : 2;
 }
 
-const { values } = parseArgs({ options: { florestad: { type: 'string' }, utreexod: { type: 'string' }, 'managed-florestad': { type: 'string' } } });
+const { values } = parseArgs({ options: { florestad: { type: 'string' }, utreexod: { type: 'string' }, 'managed-florestad': { type: 'string' }, 'extended-inputs': { type: 'boolean', default: false } } });
+if (values['extended-inputs'] && !values['managed-florestad']) throw new Error('--extended-inputs requires --managed-florestad');
 if (!values.florestad || !values.utreexod) throw new Error('Supply --florestad <binary> --utreexod <binary>');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-lab-'));
 try {
-  process.exitCode = await lab(root, path.resolve(values.florestad), path.resolve(values.utreexod), values['managed-florestad']);
+  process.exitCode = await lab(root, path.resolve(values.florestad), path.resolve(values.utreexod), values['managed-florestad'], values['extended-inputs']);
 } catch (error) {
   console.error(cancel.signal.aborted ? cancel.signal.reason.message : error.message);
   process.exitCode = 1;

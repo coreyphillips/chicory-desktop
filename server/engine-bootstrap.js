@@ -77,6 +77,11 @@ process.on('message', message => {
       message.apiToken = undefined;
     }
     message.filesKey = undefined; message.databaseKey = undefined;
+    if (message.electrumLease !== undefined) {
+      const fromEngine = Module.createRequire(entry);
+      fromEngine('rn-electrum-client/helpers/chicory-endpoint-policy.cjs').bindLocalSession(message.electrumLease);
+      message.electrumLease = undefined;
+    }
     if (message.requireWatchAck === true && message.chainWatch !== true) throw new Error();
     if (message.chainWatch === true) {
       chainWatch = require(path.join(engineRoot, 'chicory-watch-control.cjs'));

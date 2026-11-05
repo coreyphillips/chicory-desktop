@@ -125,4 +125,4 @@ async function reconcileQualificationWatches({ node, network, manager, signal })
   return { observedWallets: wallets.length, confirmedScansCaughtUp: caughtUp };
 }
 
-module.exports = { setWatchCollection, reconcileQualificationWatches };
+module.exports = { setWatchCollection, snapshots, registrations, reconcileQualificationWatches };

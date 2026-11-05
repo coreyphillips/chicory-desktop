@@ -33,7 +33,7 @@ CHICORY_ELECTRON_EXECUTABLE="release/mac-arm64/Chicory.app/Contents/MacOS/Chicor
 
 Without `CHICORY_ELECTRON_EXECUTABLE` the source checkout runs instead, which
 does not qualify a package. `CHICORY_QUALIFY_STAGES` selects stages:
-`preflight`, `payments`, `restart`, `crash`, `persistence`, `offline`, `max`,
+`preflight`, `payments`, `direct-funding`, `restart`, `crash`, `persistence`, `offline`, `max`,
 `drain`, `recovery`, `transport`, `backup`. Results go to
 `artifacts/qualification/report.json` with host details, lockfile dependency
 versions, and a digest of the whole application plus each part that carries
@@ -56,11 +56,22 @@ stops with `PORT_IN_USE`, but a headless peer keeps the run to one app window.
 The `Regtest qualification` workflow runs `preflight,payments,restart,crash`
 against the Linux x64 package on manual dispatch and uploads the report.
 
+On macOS, `npm run package:floresta-preview -- --sha256 <prepared-binary-sha256>`
+produces a separate ad hoc signed application under `release/floresta-preview`.
+It uses its own profile, starts with manual wallet setup, and serves as a local
+developer build. To exercise the packaged monitor during payments, point
+`CHICORY_ELECTRON_EXECUTABLE` at that application executable and select
+`CHICORY_QUALIFY_STAGES=floresta-preview,payments`. The optional stage clicks
+Start in Settings and accepts the regtest confirmation, keeps the monitor
+running through the selected payments, then stops it and checks that the
+generated data stays available.
+
 ## Stages
 
 | Stage | Checks |
 | --- | --- |
 | payments | Pending and confirmed on-chain receive channelized into the home channel, Lightning receive (over a just-in-time channel from the primary, mined until it settles, when the wallet has no inbound capacity), Lightning send through the UI review and hold (a short press must not submit, the deliberate hold must commit), on-chain send at two fee rates with the broadcast fee within review, one Activity row per payment |
+| direct-funding | Also runs with payments. A separate Lightning-first payer holds one confirmed 22,000 sat coin below the channelize floor. It reviews and pays a signed 20,000 sat funding offer. Bitcoin Core must see that outpoint spent in the mempool, and the desktop recipient must report the same confirmed funding transaction and amount in its channel. |
 | restart | Full app quit with every child process exited, reopen, same wallet and completed rows |
 | crash | Freeze the peer so the payment cannot settle, then kill the whole process tree while the engine holds it as pending and the send has not returned. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the same invoice resubmitted through the manager refused or coming to nothing with the payee credited exactly once, the held receive request still saved and paid by the peer. Skipped on Windows, which has no SIGSTOP to freeze the peer |
 | persistence | Five small payments are sent to the wallet while the whole app is killed, so the engine's encrypted database and the manager's vault files are being written when it dies. On reopen the wallet opens intact, every payment settles one way or the other, and each payment the payer saw complete is credited exactly once |
@@ -88,9 +99,6 @@ passed:
   The manager can enable Iroh on an engine that advertises it, but the engine
   does not report its active path, so the harness cannot record transport
   evidence.
-- Direct funding. No payer in the harness holds a confirmed coin outside its
-  channel, so no send uses a request's funding envelope. The payments stage
-  records it as skipped.
 - Suspend and resume. The main process now records suspend and resume in
   diagnostics and relocks the app lock on suspend, but the harness cannot put
   the host to sleep, and a simulated event would not test the engine or Tor.

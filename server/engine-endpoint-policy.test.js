@@ -181,3 +181,43 @@ test('onion TLS checks the onion identity over loopback before releasing any wal
   assert.deepEqual(data, ['accepted']);
   assert.ok(names.includes(name));
 });
+
+test('prepared wallet mutually authenticates its private Electrum lease before sending queries', { skip: !available }, async t => {
+  const key = require('node:crypto').randomBytes(32);
+  const cipher = 'PSK-AES128-GCM-SHA256';
+  const transcript = [];
+  const server = tls.createServer({ minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2', ciphers: cipher,
+    pskCallback: (_socket, identity) => identity === 'chicory-wallet-1' ? key : null }, socket => {
+    socket.on('error', () => {});
+    socket.on('data', bytes => transcript.push(bytes.toString()));
+    socket.on('end', () => socket.end());
+  });
+  server.on('tlsClientError', () => {});
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const port = server.address().port;
+  for (const network of ['mainnet', 'testnet']) {
+    const policy = configure(t, requireEngine.resolve(policyName), {
+      ...selected(network, port, true), BEIGNET_ELECTRUM_HOST: '127.0.0.1' });
+    assert.throws(() => policy.bindLocalSession(key.toString('hex')), /Invalid private Electrum session/);
+  }
+  async function dial(secret) {
+    const policy = configure(t, requireEngine.resolve(policyName), {
+      ...selected('regtest', port, true), BEIGNET_ELECTRUM_HOST: '127.0.0.1' });
+    policy.bindLocalSession(secret);
+    assert.throws(() => policy.bindLocalSession(secret), /Invalid private Electrum session/);
+    const host = await policy.resolveHost('regtest', '127.0.0.1', port, true, () => assert.fail('Private DNS lookup'));
+    const { electrumTlsModule } = require(path.join(engine, 'dist/cli/electrum-tls-config.js'));
+    const transport = electrumTlsModule({}, host, host);
+    assert.throws(() => transport.connect({ host: 'localhost', port }), /Unrecognized private Electrum/);
+    await new Promise((resolve, reject) => {
+      const socket = transport.connect({ host, port }, () => socket.end('server.version'));
+      socket.once('error', reject);
+      socket.once('close', resolve);
+    });
+  }
+  await assert.rejects(dial('00'.repeat(32)));
+  assert.deepEqual(transcript, []);
+  await dial(key.toString('hex'));
+  assert.deepEqual(transcript, ['server.version']);
+});

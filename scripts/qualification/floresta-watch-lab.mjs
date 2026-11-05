@@ -6,13 +6,14 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import supervisor from '../../desktop/floresta.cjs';
 import { REGTEST_GENESIS } from './guards.mjs';
 import { checkpointSize, verifyManagedParents } from './floresta-parent-lab.mjs';
 import { confirmedFixture } from './floresta-confirmed-lab.mjs';
 
-export async function qualifyManagedWatches({ binary, root, peerPort, proof, script, outpoint, height, blockHash }) {
+export async function qualifyManagedWatches({ binary, root, peerPort, proof, script, outpoint, height, blockHash, extendedInputs = false }) {
   assert.equal(await proof('getblockhash', [0]), REGTEST_GENESIS);
   assert.equal(await proof('getblockhash', [height]), blockHash);
   const manifest = JSON.parse(await fs.readFile(path.join(path.dirname(binary), 'bundle.json'), 'utf8'));
@@ -23,10 +24,32 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
   const descriptor = 'wpkh(tpubD6NzVbkrYhZ4XYwobhBbSnzN9UvAtr6KH2sbToYWosu8V4UCXVL4koZjTeE2exHq5C22UW5yogQnjvvxMnFcEyfpNrh7yq9XNwHPQRMsEaz/0/*)';
   const other = hash('independent regtest wallet');
   const parent = await fs.mkdtemp(path.join(root, 'managed-'));
+  // Keep bounded lifecycle evidence even when a fork interrupts a wallet read.
+  // Never retain control requests, wallet replies or the listener address.
+  const lifecycle = [];
   const node = new supervisor.ManagedFloresta({
     network: 'regtest', profileDirectory: parent, binary, sha256: manifest.sha256,
+    onStatus({ phase, error }) {
+      const current = lifecycle.at(-1);
+      if (current) current.supervisor = { phase, error };
+    },
     spawnProcess(file, args, options) {
-      return spawn(file, [...args, '--connect', '127.0.0.1:' + peerPort], options);
+      const child = spawn(file, [...args, '--connect', '127.0.0.1:' + peerPort],
+        { ...options, stdio: ['pipe', 'pipe', 'pipe'] });
+      const current = { run: lifecycle.length + 1 };
+      lifecycle.push(current);
+      createInterface({ input: child.stdout }).on('line', line => {
+        if (line.length > 2048) return;
+        try {
+          const { protocol, height, validated, tip, ibd, historical } = JSON.parse(line);
+          if (protocol === 'chicory.floresta/1') current.lastHeartbeat = { height, validated, tip, ibd, historical };
+        } catch { /* The supervisor diagnoses malformed control messages. */ }
+      });
+      child.stderr.setEncoding('utf8').on('data', data => {
+        current.stderrTail = ((current.stderrTail ?? '') + data).slice(-2048).split(parent).join('<profile>');
+      });
+      child.once('exit', (code, signal) => { current.exit = { code, signal }; });
+      return child;
     }
   });
   async function waitFor(label, read, accept) {
@@ -61,6 +84,8 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
   let handingOff = false;
   try {
     await node.start();
+    const pendingExpected = Object.hasOwn(manifest.patches ?? {}, 'managed-pending.patch');
+    if (pendingExpected) assert.ok(node.supportsPending(), 'Expected the managed pending observation protocol.');
     await waitFor('Fresh managed chain sync', () => node.status(),
       state => state.height === height && state.tipHash === blockHash && state.tipSynced);
     const syncMs = Math.round(performance.now() - start);
@@ -106,14 +131,33 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
     const afterExpansion = await derive(105);
     assert.equal(afterExpansion.matchedTransactions, 1);
     assert.equal(afterExpansion.requiredScripts, 106);
+    const pendingCheck = { check: 'Managed pending observations through replacement and confirmation', status: 'failed' };
     const evidence = { funded, negative, recovered, expanded, beforeExpansion, afterExpansion, parents, checkpoint, historical, confirmed,
-      walletReady: node.status().walletReady, forks: [],
+      rows: pendingExpected || node.supportsPending() ? [pendingCheck] : [],
+      walletReady: node.status().walletReady, forks: [], lifecycle,
       environment: { platform: process.platform, arch: process.arch, cpu: os.cpus()[0].model,
         memoryBytes: os.totalmem(), proofPeer: 'loopback', network: 'regtest', binarySha256: manifest.sha256,
         binaryBytes: (await fs.stat(binary)).size, syncMs, twoOwnerScanMs: scanMs, chainHeight: height } };
     handingOff = true;
-    return { evidence, stop: () => node.stop(), async atTip({ tipHeight, tipHash, outpoint, expectedMatches, stage }) {
+    const forkRun = lifecycle.at(-1);
+    return { evidence, stop: () => node.stop(), async pending() {
+      if (extendedInputs) assert.ok(node.supportsPending(), 'Extended input qualification requires managed pending reads.');
+      if (!evidence.rows.length) return;
+      assert.ok(node.supportsPending(), 'The reopened managed node lost its pending observation protocol.');
+      const { qualifyManagedPending } = await import('./floresta-pending-lab.mjs');
+      const bridge = manifest.patches?.['pending-transactions.patch'] &&
+        (await import('./floresta-wallet-bridge-lab.mjs')).walletBridgeFixture();
+      try {
+        evidence.pending = await qualifyManagedPending({ node, proof, peerPort, watchScript: script,
+          extendedInputs, atPending: bridge?.atPending, atConfirmed: bridge?.atConfirmed });
+        pendingCheck.status = 'passed';
+      } finally { await bridge?.close(); }
+    }, async atTip({ tipHeight, tipHash, outpoint, expectedMatches, stage }) {
       const reached = state => state.phase === 'caught-up' && state.height === tipHeight && state.hash === tipHash;
+      // The stock node and this managed child synchronize independently. Wait
+      // for this child's verified view before asking its scanner about a fork.
+      const history = await verifyHistory(height, tipHeight, tipHash);
+      assert.equal(lifecycle.at(-1).run, forkRun.run, 'Managed process restarted during a chain transition');
       await node.registerWatches({ owner: forkOwner, scripts: [], outpoints: [outpoint] });
       const [funded, detached] = await Promise.all([owner, forkOwner].map(id =>
         waitFor('Fork-specific watch coverage', () => node.watchCoverage(id), reached)));
@@ -124,7 +168,6 @@ export async function qualifyManagedWatches({ binary, root, peerPort, proof, scr
       if (stage === 'afterFork') {
         assert.equal(await node.confirmedTransaction(forkOwner, proofs.parent.txid), null);
       }
-      const history = await verifyHistory(height, tipHeight, tipHash);
       evidence.forks.push({ stage, funded, detached, proofs, historical: history,
         confirmed: verifyConfirmed ? await verifyConfirmed(tipHeight, tipHash) : null });
     } };

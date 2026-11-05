@@ -702,8 +702,14 @@ async function main() {
 	let service;
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	// Only the disposable funded fixture enables the wallet bridge. The
+	// renderer, wallet HTTP and normal manager startup cannot mint a lease.
+	const stopWalletBridges = process.connected && process.env.CHICORY_FLORESTA_WALLET_LAB === '1' &&
+		process.env.CHICORY_ENCRYPTED_STORAGE === '1' && process.env.DESKTOP_SESSION_TOKEN
+		? require('./floresta-bridge-control').installBridgeControl(process, { qualification: true }) : () => {};
 	const shutdown = async () => {
 		shutdownRequested = true;
+		stopWalletBridges();
 		if (!service) return;
 		if (shuttingDown) return;
 		shuttingDown = true;
