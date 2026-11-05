@@ -19,6 +19,10 @@ test('Tor demand includes onion primaries, onion Electrum, Tor-only mode and rec
   assert.equal(requiresTor({ networkMode: 'tor' }), true);
   assert.equal(requiresTor({ recovery: { guardians: [{ uri: nodeUri }] } }), true);
   assert.equal(requiresTor({ lfbw: { primaryUri: '02' + 'a'.repeat(64) + '@node.example:9735' } }), false);
+  // An Iroh primary needs Tor only for the onion it falls back to.
+  const irohUri = '02' + 'a'.repeat(64) + '@iroh:' + '8e'.repeat(32);
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri } }), false);
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }), true);
   assert.equal(isOnionHost('bad.onion'), true);
 });
 

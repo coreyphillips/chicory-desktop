@@ -205,6 +205,47 @@ test('an external primary is trusted by the wallet alone, gets no return trust, 
 	});
 });
 
+test('an external Iroh primary is dialed by endpoint and relay, and is a relay for payers only through its onion', async () => {
+	const endpoint = '8e'.repeat(32);
+	const relay = 'https://use1-1.relay.n0.iroh.link./';
+	const uri = `${PK_X}@iroh:${endpoint}?relay=${encodeURIComponent(relay)}`;
+	const onion = 'b'.repeat(56) + '.onion';
+	const irohWallet = (extra = {}) =>
+		walletRec({ mode: 'external', primaryWalletId: null, primaryUri: uri, primaryPubkey: PK_X, trusted: true, ...extra });
+
+	const { m } = harness({ wallet: irohWallet(), running: ['w1'] });
+	const out = await m.setupLfbw('w1');
+	assert.equal(out.lfbw.setup, 'ready', out.lfbw.setupError);
+	const seq = m.calls.map((c) => `${c.wallet} ${c.method} ${c.path}`);
+	assert.deepEqual(seq, ['w1 GET /info', 'w1 POST /trusted-peer/add', 'w1 POST /direct-funding/configure', 'w1 POST /peer/connect']);
+	assert.deepEqual(m.calls.find((c) => c.path === '/peer/connect').body, {
+		pubkey: PK_X,
+		transport: 'iroh',
+		endpointId: endpoint,
+		relayUrl: relay
+	});
+	assert.deepEqual(m.calls.find((c) => c.path === '/direct-funding/configure').body, {
+		lspPubkey: PK_X,
+		targetInboundSat: 100000,
+		trusted: true,
+		allowSplice: true,
+		allowUnpairedSplice: true
+	});
+
+	const fallback = harness({ wallet: irohWallet({ primaryFallbackUri: `${PK_X}@${onion}:9735` }), running: ['w1'] });
+	assert.equal((await fallback.m.setupLfbw('w1')).lfbw.setup, 'ready');
+	assert.deepEqual(fallback.m.calls.find((c) => c.path === '/peer/connect').body, {
+		pubkey: PK_X,
+		transport: 'iroh',
+		endpointId: endpoint,
+		relayUrl: relay,
+		fallbackOnion: { host: onion, port: 9735 }
+	});
+	const cfg = fallback.m.calls.find((c) => c.path === '/direct-funding/configure').body;
+	assert.equal(cfg.lspHost, onion);
+	assert.equal(cfg.lspPort, 9735);
+});
+
 test('a connect refusal is not a failure when the peer list shows the primary connected', async () => {
 	const { m } = harness({
 		wallet: walletRec(),

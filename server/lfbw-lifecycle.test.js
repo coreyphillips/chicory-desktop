@@ -145,6 +145,35 @@ test('an edit can make an ordinary wallet lightning-first, and an on-chain only 
 	assert.equal(store.w2.lfbw, null);
 });
 
+test('the app can point a wallet at an Iroh primary, as the phone can, unless the engine lacks Iroh', async () => {
+	const pk = '02' + '33'.repeat(32);
+	const uri = `${pk}@iroh:${'8e'.repeat(32)}?relay=${encodeURIComponent('https://use1-1.relay.n0.iroh.link./')}`;
+	const onion = `${pk}@${'c'.repeat(56)}.onion:9735`;
+	// The body @beignet/wallet-core's updatePrimary sends.
+	const body = (fallback) => ({
+		lfbw: { enabled: true, primaryUri: uri, primaryFallbackUri: fallback, trusted: true, initialChannelSats: 0 },
+		...(fallback ? { tor: true } : {})
+	});
+
+	const { m, store } = managerWith({ p1: primary(), w1: dependent() });
+	m.irohSupported = true;
+	const out = await m.updateWallet('w1', body(null));
+	assert.equal(out.lfbw.mode, 'external');
+	assert.equal(out.lfbw.primaryUri, uri);
+	assert.equal(out.lfbw.primaryPubkey, pk);
+	assert.equal(out.lfbw.primaryFallbackUri, null);
+	assert.equal(out.lfbw.setup, 'pending');
+	assert.equal(m._daemonEnv(store.w1, { home: '/h', data: '/d' }, 's', 't').BEIGNET_IROH, 'true');
+	await m.updateWallet('w1', body(onion));
+	assert.equal(store.w1.lfbw.primaryFallbackUri, onion);
+	assert.equal(store.w1.networkMode, 'tor', 'the onion fallback rides Tor');
+
+	const old = managerWith({ p1: primary(), w1: dependent() });
+	old.m.irohSupported = false;
+	await assert.rejects(old.m.updateWallet('w1', body(null)), (err) => err.code === 'IROH_UNSUPPORTED');
+	assert.equal(old.store.w1.lfbw.mode, 'internal', 'the record is untouched');
+});
+
 test('an edit that keeps the primary keeps the setup state; a bad primary leaves the record untouched', async () => {
 	const { m, store } = managerWith({ p1: primary(), w1: dependent() });
 	store.w1.lfbw.initialChannelOpened = true;
