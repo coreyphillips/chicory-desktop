@@ -1,5 +1,7 @@
 'use strict';
 
+const { chainTrustAccepted } = require('./floresta-checkpoint.cjs');
+
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const uint = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 const money = value => Number.isSafeInteger(value) && value >= 0 && value <= 21e6 * 1e8;
@@ -48,7 +50,7 @@ function openPendingWallet(watch, owner, signal, status) {
   }
   function current(page) {
     const state = status();
-    return state.historicalVerification === 'verified' && state.tipSynced && state.tipHash === page.tipHash &&
+    return chainTrustAccepted(state) && state.tipSynced && state.tipHash === page.tipHash &&
       state.height === page.tipHeight && state.validatedHeight === page.tipHeight;
   }
   active();

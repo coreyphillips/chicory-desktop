@@ -254,6 +254,20 @@ node scripts/qualification/floresta-offline-lab.mjs \
   --digest "$CHICORY_FLORESTA_CANDIDATE_SHA256" --desktop
 ```
 
+## Mainnet quick start
+
+Enabling the managed mainnet node defaults to checkpoint quick start. The start dialog describes the trust placed in the release's accumulator at Bitcoin block 939,969. Select **Require full verification before use** to wait for independent validation through that block. Historical verification runs in the background in both modes. A profile already running an earlier preview keeps its previous full-verification policy until its owner changes it. Selecting either mode leaves the existing external wallet in use until local wallet and Lightning checks qualify a handoff.
+
+The checkpoint shortens initial validation once the node has downloaded a valid header chain containing that block. Current blocks after it still need to be downloaded and validated using proofs. A wallet with old channel funding may also need historical transactions to establish its watch coverage. The node can report progress on all three activities independently.
+
+### Bounded public peer trial
+
+A wallet-free macOS arm64 run on November 5, 2026 used an Apple M5 Pro with 64 GiB of RAM and an internal SSD, a fresh APFS disk image capped at 2.25 GiB, direct public Bitcoin peers through a byte-counting local relay, and the optimized `4b20cc88` candidate. The first startup reported its genesis status in 0.35 seconds. With release discovery and the trial relay it reached three TCP peers but received no headers in four minutes.
+
+A separate cold startup used advertised peer services from Bitcoin handshakes and the public proof seed in newer Floresta. From launch it reported status in 0.34 seconds, connected to its first peer in 10.39 seconds and reported its first headers in 36.34 seconds. At 4 minutes 36 seconds it had installed the pinned checkpoint at 939,969. By the next sample its headers reached 974,692. The foreground validation index stayed at the checkpoint until shutdown after 14 minutes 22 seconds. The relay received 157,643,652 bytes and sent 535,838 bytes. The stopped node occupied 192,798,720 allocated bytes. The wallet was never opened. This run establishes a time to the checkpoint under those peer conditions. A time to the validated tip or a wallet handoff is still outstanding.
+
+The same network trial sent a confirmed-block proof request for height 939,970 to the five endpoints returned by the newer upstream proof seed. Two peers completed a Bitcoin v2 handshake and advertised the Utreexo proof service. Both delivered a 2,384,708-byte proof payload naming a recent block at height 974,692. Neither delivered any proof for 939,970 on a separate 40-second request. The comparison identifies an availability limit for the sampled peers and heights. It does not establish network-wide archival coverage or prove why either peer withheld its response. The control matched the requested block hashes. It did not independently validate the recent accumulator.
+
 ## Before a wallet can switch
 
 The release keeps the selected Electrum backend until all of the following
@@ -263,8 +277,8 @@ wallet-serving gates have evidence.
 | --- | --- |
 | Peer transactions and fees | A way to identify compatible public proof peers, receive funding and conflicts through disconnects, qualify delivery on those peers, and provide usable fee estimates or an explicit unavailable result. The private regtest bridge can prove only the transactions it observes. |
 | Automatic handoff and fallback consent | A durable engine admission check that covers payments, peer-initiated channel changes, splices, closes and recovery. Switch only at a safe lifecycle point, verify refresh and subscriptions, and honor external-server permission across failure and restart. |
-| Channel recovery | Qualify breach remedies and safe local wallet handoff through recovery. Cold native scans of guardian, peer-storage and stale full-backup wallets have been compared against Core. Close, HTLC and sweeper evidence is recorded separately. |
+| Channel recovery | Qualify incoming HTLC preimage recovery and a live local wallet handoff through recovery. Independent Core and cold native checks now cover guardian and peer-storage restore, stale backups, unilateral close, the outgoing HTLC timeout, final CSV sweeps and the two-input breach remedy. |
 | Distribution | Per-platform signed artifacts, installation checks, upgrade and rollback rules, and storage behavior on every supported filesystem. The macOS developer preview uses an ad hoc signature. |
-| Mainnet operation | Qualify historical checkpoint replay on mainnet and measure sustained sync, bandwidth, disk growth and recovery there. The local measurements above use controlled regtest chains. |
+| Mainnet operation | Qualify historical checkpoint replay on mainnet and measure sustained sync, bandwidth, disk growth and recovery there. The public trial above reached the released checkpoint. Sustained post-checkpoint progress and fresh-wallet serving time still need evidence. |
 
 [Floresta source contract](floresta-upstream.md) · [Beignet calls and Lightning dependencies](floresta-beignet.md)

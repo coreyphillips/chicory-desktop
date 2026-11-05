@@ -201,3 +201,45 @@ test('a missing source candidate can still erase wallet keys after a native disc
   assert.equal(asked, true);
   assert.deepEqual(JSON.parse(fs.readFileSync(normalBuild.cleanupFile)), { testnet: null });
 });
+
+test('enabling mainnet defaults to a disclosed checkpoint and preserves the full-verification choice', async t => {
+  const { settings, options } = fixture(t);
+  const choices = [];
+  settings.create = () => ({
+    start: async () => {}, stop: async () => {}, status: () => ({ phase: 'running' }),
+    setCheckpointQuickStart: allow => choices.push(allow),
+  });
+  assert.equal(settings.status('mainnet').checkpointQuickStart, true);
+  assert.equal(settings.status('testnet').checkpointQuickStart, false);
+  const decline = { current: () => true, confirm: async action => { assert.equal(action, 'startCheckpoint'); return false; } };
+  assert.equal((await settings.change('mainnet', 'start', decline)).requested, false);
+  await settings.change('mainnet', 'start', yes);
+  await settings.change('mainnet', 'requireHistory', yes);
+  assert.equal(new FlorestaSettings(options).status('mainnet').checkpointQuickStart, false);
+  const strict = new FlorestaSettings({ ...options, digest: 'ef'.repeat(32) });
+  assert.equal(strict.status('mainnet').checkpointQuickStart, false);
+  assert.equal((await settings.change('mainnet', 'allowCheckpoint', { ...yes, confirm: async () => false })).checkpointQuickStart, false);
+  await settings.change('mainnet', 'allowCheckpoint', yes);
+  assert.deepEqual(choices, [false, true]);
+  await assert.rejects(settings.change('regtest', 'allowCheckpoint', yes), /unavailable/);
+  settings._save('mainnet', { digest, enabled:true, folder:null });
+  assert.equal(settings.status('mainnet').checkpointQuickStart, false);
+});
+
+test('a known historical failure follows the profile across restarts until full verification succeeds', async t => {
+  const { settings, options } = fixture(t);
+  let update;
+  settings.create = opts => {
+    assert.equal(opts.checkpointHold, false);
+    update = opts.onStatus;
+    return { start: async () => {}, stop: async () => {}, status: () => ({ phase: 'running' }) };
+  };
+  await settings.change('mainnet', 'start', yes);
+  update({ historicalVerification: 'error', checkpointHold: true });
+  const reopened = new FlorestaSettings(options);
+  assert.equal(reopened._saved('mainnet').checkpointHold, true);
+  update({ historicalVerification: 'verifying', checkpointHold: true });
+  assert.equal(reopened.status('mainnet').checkpointHold, 'independent-replay-required');
+  update({ historicalVerification: 'verified', checkpointHold: false });
+  assert.equal(reopened.status('mainnet').checkpointHold, null);
+});

@@ -19,6 +19,8 @@
     "linux-ext4-removal.patch",
     "mainnet-discovery.patch",
     "socks-peer-addresses.patch",
-    "managed-verified-prefix.patch"
+    "managed-verified-prefix.patch",
+    "managed-checkpoint-eligibility.patch",
+    "proof-only-peers.patch"
   ]
 }

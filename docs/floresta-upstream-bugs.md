@@ -128,6 +128,12 @@ The downstream patch removes the exact duplicates from mainnet and includes the 
 
 Upstream issue 971 covered the reachability and advertised services of the seven Utreexo seed entries. Its closing comment records that a bridge was running again. PR 1287 added a signet DNS seed. The 215 identical static records persisted after both changes. [Issue 971](https://github.com/getfloresta/Floresta/issues/971) · [Signet seed PR 1287](https://github.com/getfloresta/Floresta/pull/1287)
 
+## Proof-only peers and raw block providers have different capabilities
+
+Floresta v0.9.1 requires both witness and limited block service before it keeps a gossiped or restored address. It repeats this check after the peer reports its actual services. Castor advertises witness, P2PV2 and Utreexo, serves indexed BIP183 block proofs, and replies `notfound` to raw block requests. A proof-seed lookup temporarily assigns the limited block flag, so the DNS and gossip paths can behave differently for the same peer. [Release address manager](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/src/p2p_wire/address_man.rs) · [Castor's serving contract](https://github.com/getfloresta/castor/blob/20a5eed172c53d13e6f8999d1b5a377fc462052a/src/node.rs#L1562-L1634)
+
+The foreground block downloader already asks block-serving peers for bodies and Utreexo peers for proofs. The node interface used by the historical scanner sends both requests without a service requirement in the release and on development commit `be2574fc`. The downstream regression gives the node a separate channel for each role. It verifies dispatch to the correct channel with both roles available, and refusal to send a request when only the opposite role is present. Address tests cover discovery, persisted data and changed service flags. A proof provider must also retain the requested height. [Release block downloader](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/src/p2p_wire/node/blocks.rs) · [Development node interface](https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-wire/src/p2p_wire/node/user_req.rs) · [Development address manager](https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-wire/src/p2p_wire/address_man.rs)
+
 ## SOCKS5 peer addresses in the pinned release
 
 A local duplex test captured the SOCKS5 greeting and CONNECT frame from v0.9.1.

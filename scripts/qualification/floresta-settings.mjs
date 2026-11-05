@@ -37,6 +37,37 @@ try {
   await page.locator('.browser-sidebar button[data-scene="settings"]').click();
   await page.getByText('Network & servers', { exact: true }).click();
   await page.getByText('Experimental Floresta node', { exact: true }).click();
+  // Exercise mainnet consent without starting a public node from the smoke test.
+  const prefs = () => page.evaluate(() => window.chicoryDesktop.floresta.status('mainnet'));
+  assert.equal((await prefs()).requested, false);
+  assert.equal((await prefs()).checkpointQuickStart, true);
+  await page.evaluate(() => window.chicoryDesktop.floresta.requireHistory('mainnet'));
+  assert.equal((await prefs()).checkpointQuickStart, false);
+  await electron.evaluate(({ dialog }) => {
+    let accepted = false;
+    dialog.showMessageBox = async (_window, options) => {
+      if (options.title !== 'Checkpoint quick start' || !options.detail.includes('939,969') || options.defaultId !== 1) {
+        throw new Error('Missing checkpoint consent');
+      }
+      const response = accepted ? 0 : 1;
+      accepted = true;
+      return { response };
+    };
+  });
+  await page.evaluate(() => window.chicoryDesktop.floresta.allowCheckpoint('mainnet'));
+  assert.equal((await prefs()).checkpointQuickStart, false);
+  await page.evaluate(() => window.chicoryDesktop.floresta.allowCheckpoint('mainnet'));
+  assert.equal((await prefs()).checkpointQuickStart, true);
+  await electron.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async (_window, options) => {
+      if (options.buttons[0] !== 'Start with checkpoint' || !options.detail.includes('939,969') || options.defaultId !== 1) {
+        throw new Error('Missing default mainnet startup disclosure');
+      }
+      return { response: 1 };
+    };
+  });
+  await page.evaluate(() => window.chicoryDesktop.floresta.start('mainnet'));
+  assert.equal((await prefs()).requested, false);
   const start = page.getByRole('button', { name: 'Start local node', exact: true });
   await expect(start).toBeVisible();
   await electron.evaluate(({ dialog }) => {

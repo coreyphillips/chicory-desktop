@@ -42,7 +42,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
     const interval = setInterval(poll, 2000);
     return () => { live = false; clearInterval(interval); };
   }, [open, bridge, network]);
-  async function change(op: 'start' | 'stop' | 'folder' | 'remove') {
+  async function change(op: 'start' | 'stop' | 'folder' | 'remove' | 'allowCheckpoint' | 'requireHistory') {
     if (active.current) return;
     active.current = true;
     epoch.current++;
@@ -66,6 +66,18 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
           <Line label="Header height" value={String(state.height)} />
           <Line label="Validated height" value={String(state.validatedHeight ?? 'Unavailable')} />
           <Line label="Current tip" value={state.tipSynced ? 'Caught up to known tip' : 'Syncing'} />
+          {network === 'mainnet' && !state.tipSynced && state.historicalTarget === 939969 &&
+            state.validatedHeight !== null && state.validatedHeight >= state.historicalTarget && state.height > state.validatedHeight ?
+            <Line label="Known blocks still to validate" value={(state.height - state.validatedHeight).toLocaleString()} /> : null}
+        </> : null}
+        {network === 'mainnet' ? <>
+          <Line label="Checkpoint quick start" value={state.checkpointQuickStart ? 'Use checkpoint while verifying history' : 'Wait for full verification'} />
+          {state.checkpointHold ? <Note tone="error">{state.checkpointHold === 'previous-accumulator-mismatch'
+            ? 'Earlier verification disagreed with the checkpoint. Local reads require successful independent verification.'
+            : 'The previous verification was interrupted or unavailable. Local reads require independent verification.'}</Note> : null}
+          {state.checkpointAccepted ? <Note>The node is following current blocks using the checkpoint at 939,969. Earlier history is still being verified.</Note> : null}
+          <Link label={state.checkpointQuickStart ? 'Require full verification before use' : 'Use checkpoint quick start'}
+            onPress={() => change(state.checkpointQuickStart ? 'requireHistory' : 'allowCheckpoint')} disabled={busy} />
         </> : null}
         <Line label="Confirmed watch scans" value={scanStatus(state.watches)} />
         <Line label="Historical verification" value={historyStatus(state)} />

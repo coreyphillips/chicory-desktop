@@ -3,6 +3,9 @@ import type { Network } from '@beignet/wallet-core';
 
 export interface FlorestaState {
   requested: boolean;
+  checkpointQuickStart: boolean;
+  checkpointAccepted: boolean;
+  checkpointHold: 'previous-accumulator-mismatch' | 'independent-replay-required' | null;
   storage: string;
   storageUsed: boolean;
   volumeAvailable: boolean;
@@ -20,7 +23,7 @@ export interface FlorestaState {
   error: string | null;
 }
 
-export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder' | 'remove', (network: Network) => Promise<FlorestaState>>;
+export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder' | 'remove' | 'allowCheckpoint' | 'requireHistory', (network: Network) => Promise<FlorestaState>>;
 
 export type DesktopScene = 'home' | 'send' | 'receive' | 'activity' | 'settings';
 export type DesktopCommand = DesktopScene | 'payment-link';

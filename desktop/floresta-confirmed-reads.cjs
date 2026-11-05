@@ -1,5 +1,7 @@
 'use strict';
 
+const { chainTrustAccepted } = require('./floresta-checkpoint.cjs');
+
 const { readConfirmedTransaction } = require('./floresta-transactions.cjs');
 
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -48,7 +50,7 @@ function openConfirmedWallet(watch, owner, signal, status) {
   }
   function current(tip) {
     const state = status();
-    return state.historicalVerification === 'verified' && state.tipSynced && state.tipHash === tip.tipHash &&
+    return chainTrustAccepted(state) && state.tipSynced && state.tipHash === tip.tipHash &&
       state.height === tip.tipHeight && state.validatedHeight === tip.tipHeight;
   }
   async function scriptRows(kind, scriptHash) {

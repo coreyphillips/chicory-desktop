@@ -12,6 +12,7 @@ const { WatchRequests, PROTOCOL, register, coverage } = require('./floresta-watc
 
 const { readConfirmedTransaction } = require('./floresta-transactions.cjs');
 const { openConfirmedWallet } = require('./floresta-confirmed-reads.cjs');
+const { headerHash, checkActiveCheckpoint, chainTrustAccepted } = require('./floresta-checkpoint.cjs');
 const { openPendingWallet } = require('./floresta-pending-reads.cjs');
 
 const NETWORKS = {
@@ -141,17 +142,19 @@ function validateStatus(state, network) {
   const historical = state.historical;
   const height = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
   if (historical !== undefined && (!['pending', 'verifying', 'verified', 'error'].includes(historical?.state) ||
+      (historical.checkpointEligible !== undefined && typeof historical.checkpointEligible !== 'boolean') ||
+      (historical.checkpointHold !== undefined && !['previous-accumulator-mismatch', 'independent-replay-required'].includes(historical.checkpointHold)) ||
+      (historical.checkpointEligible && historical.checkpointHold !== undefined) ||
       !height(historical.height) || !height(historical.target) || historical.height > historical.target ||
       (historical.state === 'verified' && (historical.height !== historical.target || historical.target > state.height ||
         state.ibd || state.validated !== state.height)))) {
     throw new Error('The local node returned an invalid historical validation status.');
   }
-  return { historicalVerification: historical?.state ?? 'unknown', historicalHeight: historical?.height ?? null,
+  return { checkpointReason: historical?.checkpointHold ?? null, checkpointEligible: historical?.checkpointEligible === true, historicalVerification: historical?.state ?? 'unknown', historicalHeight: historical?.height ?? null,
     historicalTarget: historical?.target ?? null, port: Number(match[1]), height: state.height, validatedHeight: state.validated, tipHash: state.tip,
     tipSynced: !state.ibd && state.height === state.validated };
 }
 
-const headerHash = hex => sha(sha(Buffer.from(hex, 'hex'))).reverse().toString('hex');
 
 async function chainHeaders(port, heights, signal) {
   const socket = net.createConnection({ host: '127.0.0.1', port, signal });
@@ -189,15 +192,28 @@ async function verifyElectrum(port, network, signal) {
 class ManagedFloresta {
   // binary and sha256 come from trusted application resources. No renderer-supplied
   // executable, arguments, network addresses, environment or config files are accepted.
-  constructor({ profileDirectory, storageDirectory, binary, sha256, network, initialized = false, onStatus = () => {}, spawnProcess = spawn }) {
+  constructor({ profileDirectory, storageDirectory, binary, sha256, network, initialized = false, checkpointQuickStart = false, checkpointHold = false, onStatus = () => {}, spawnProcess = spawn }) {
     if (!Object.hasOwn(NETWORKS, network)) throw new Error('Unsupported local node network.');
     this.options = { profileDirectory, storageDirectory, binary, sha256, network };
     this.initialized = initialized;
+    this.checkpointHold = checkpointHold === true;
+    this.policyGeneration = 0;
+    this.checkpointQuickStart = network === 'mainnet' && checkpointQuickStart === true;
     this.onStatus = onStatus;
     this.spawnProcess = spawnProcess;
     this._state('stopped');
   }
   status() { return { ...this.state }; }
+  setCheckpointQuickStart(enabled) {
+    const allow = this.options.network === 'mainnet' && enabled === true;
+    if (this.checkpointQuickStart === allow) return;
+    this.policyGeneration++;
+    this.checkpointQuickStart = allow;
+    if (!allow && this.state.checkpointAccepted) {
+      this.watch.suspend(new Error('Full historical verification is now required.'), 90000);
+      this._state('waiting-for-tip');
+    }
+  }
   async registerWatches(input) {
     const command = register(input);
     if (!this.watch) throw new Error('Start the local node before registering watches.');
@@ -226,7 +242,7 @@ class ManagedFloresta {
     const watch = this.watch;
     if (!watch?.active || !Number.isSafeInteger(height) || height < 0 || height > tip?.tipHeight ||
         this.state.tipHash !== tip?.tipHash || this.state.height !== tip?.tipHeight || !this.state.tipSynced ||
-        this.state.historicalVerification !== 'verified') return null;
+        !chainTrustAccepted(this.state)) return null;
     const lifetime = watch.lifetime.signal;
     const [before, header, after] = await watch.headers([tip.tipHeight, height, tip.tipHeight]);
     if (lifetime.aborted || !watch.active || this.watch !== watch || this.state.tipHash !== tip.tipHash || headerHash(before) !== tip.tipHash || before !== after ||
@@ -242,7 +258,7 @@ class ManagedFloresta {
   }
   _state(phase, fields = {}) {
     this.state = { network: this.options.network, phase, error: null, height: null, validatedHeight: null, tipHash: null,
-      tipSynced: null, walletScan: 'unqualified', historicalVerification: 'unknown', historicalHeight: null, historicalTarget: null, walletReady: false, ...fields };
+      tipSynced: null, checkpointAccepted: false, checkpointHold: this.checkpointHold, checkpointReason: null, walletScan: 'unqualified', historicalVerification: 'unknown', historicalHeight: null, historicalTarget: null, walletReady: false, ...fields };
     this.onStatus(this.status());
   }
   start() {
@@ -305,6 +321,7 @@ class ManagedFloresta {
     let stopping = false;
     let pending = '';
     let checking = false;
+    let queuedStatus;
     let sequence = 0;
     const stop = () => {
       if (stopping) return;
@@ -347,7 +364,13 @@ class ManagedFloresta {
       const state = validateStatus(message, network);
       if (endpoint && endpoint !== state.port) throw new Error('The owned Electrum listener changed unexpectedly.');
       endpoint = state.port;
-      if (checking) return;
+      if (state.historicalVerification === 'error' || state.checkpointReason === 'previous-accumulator-mismatch') this.checkpointHold = true;
+      if (this.state.checkpointAccepted && (state.tipHash !== this.state.tipHash || !state.tipSynced ||
+          (!state.checkpointEligible && state.historicalVerification !== 'verified'))) {
+        watch.suspend(new Error('The local checkpoint is being rechecked.'), 90000);
+        this._state('waiting-for-tip');
+      }
+      if (checking) { queuedStatus = message; return; }
       checking = true;
       const recovering = watch.lifetime.signal.aborted;
       try {
@@ -357,7 +380,16 @@ class ManagedFloresta {
           if (current.dev !== identity.dev || current.ino !== identity.ino) throw new Error('The local node storage volume changed.');
           await checkSpace(dir);
         }
-        if (stopping || signal.aborted || (!recovering && watch.lifetime.signal.aborted)) return;
+        // Recheck the checkpoint against the active tip before exposing any
+        // assumed-state observations, including across restarts and reorgs.
+        const generation = this.policyGeneration;
+        const checkpointAccepted = this.checkpointQuickStart && !this.checkpointHold && await checkActiveCheckpoint(network, state, watch.headers);
+        if (stopping || queuedStatus || generation !== this.policyGeneration || signal.aborted || (!recovering && watch.lifetime.signal.aborted)) return;
+        if (state.historicalVerification === 'verified') this.checkpointHold = false;
+        if (chainTrustAccepted(this.state) && !chainTrustAccepted({ ...state, network, checkpointAccepted })) {
+          watch.suspend(new Error('The local node lost its accepted validation state.'), 90000);
+          watch.lifetime = new AbortController();
+        }
         if (recovering) watch.lifetime = new AbortController();
         first = false;
         watch.active = message.watchProtocol === PROTOCOL;
@@ -366,11 +398,16 @@ class ManagedFloresta {
         watch.pendingActive = message.pendingProtocol === 'chicory.pending/1';
         watch.pendingTransactionActive = message.pendingTransactionProtocol === 'chicory.pending-tx/1';
         watch.walletOffersActive = message.walletOfferProtocol === 'chicory.offer/1';
-        this._state('running', { height: state.height, validatedHeight: state.validatedHeight, tipHash: state.tipHash, tipSynced: state.tipSynced,
+        this._state('running', { checkpointAccepted, checkpointReason: state.checkpointReason, height: state.height, validatedHeight: state.validatedHeight, tipHash: state.tipHash, tipSynced: state.tipSynced,
           historicalVerification: state.historicalVerification, historicalHeight: state.historicalHeight, historicalTarget: state.historicalTarget });
         heartbeat();
         ready.resolve(this.status());
-      } finally { checking = false; }
+      } finally {
+        checking = false;
+        const next = queuedStatus;
+        queuedStatus = undefined;
+        if (next && !stopping) await observe(next);
+      }
     };
     signal.addEventListener('abort', stop, { once: true });
     child.stdin.on('error', () => {});

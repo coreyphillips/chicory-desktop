@@ -79,6 +79,8 @@ class FlorestaSettings {
       for (const [network, value] of Object.entries(prefs.networks)) {
         if (!networks.includes(network) || !validDigest(value.digest) || typeof value.enabled !== 'boolean' ||
             !validFolder(value.folder) || value.used !== undefined && typeof value.used !== 'boolean' ||
+            value.checkpointHold !== undefined && typeof value.checkpointHold !== 'boolean' ||
+            value.checkpointQuickStart !== undefined && typeof value.checkpointQuickStart !== 'boolean' ||
             value.initialized !== undefined && typeof value.initialized !== 'boolean') throw new Error();
       }
       return prefs.networks;
@@ -91,7 +93,12 @@ class FlorestaSettings {
     if (!networks.includes(network)) throw new Error('Unsupported Floresta network.');
     const entry = this._read()[network];
     const locations = this._locations();
-    return { digest: this.digest, enabled: entry?.digest === this.digest && entry.enabled || false,
+    const alreadyEnabled = Boolean(entry?.enabled && entry.digest === this.digest);
+    // Older previews approved full verification only. Keep that policy when
+    // resuming them. A fresh enable has a native checkpoint disclosure.
+    const quickStart = entry?.checkpointQuickStart ?? !alreadyEnabled;
+    return { digest: this.digest, enabled: alreadyEnabled, checkpointHold: entry?.checkpointHold === true,
+      checkpointQuickStart: network === 'mainnet' && quickStart,
       folder: Object.hasOwn(locations, network) ? locations[network] : entry?.folder ?? null,
       // Older versions recorded the selected folder before the first start.
       // Treat a previously used custom volume as initialized to avoid creating
@@ -128,11 +135,12 @@ class FlorestaSettings {
     } catch (error) { return error.code !== 'ENOENT'; }
   }
   status(network) {
-    const { enabled, folder, used } = this._saved(network);
+    const { enabled, folder, used, checkpointQuickStart, checkpointHold } = this._saved(network);
     const node = this.nodes.get(network)?.status();
     let volumeAvailable = true;
     try { if (folder) volumeAvailable = fs.statSync(folder).isDirectory(); } catch { volumeAvailable = false; }
-    return { requested: enabled, storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
+    return { requested: enabled, checkpointQuickStart, checkpointAccepted: node?.checkpointAccepted === true,
+      checkpointHold: node?.checkpointReason ?? (checkpointHold ? 'independent-replay-required' : null), storage: folder || 'Profile folder', storageUsed: used, volumeAvailable,
       customStorage: process.platform !== 'win32', removalAvailable: ['darwin', 'linux'].includes(process.platform),
       phase: this.errors.has(network) ? 'failed' : node?.phase || 'stopped', height: node?.height ?? null,
       validatedHeight: node?.validatedHeight ?? null, tipSynced: node?.tipSynced ?? null, error: this.errors.get(network) || node?.error || null,
@@ -192,7 +200,13 @@ class FlorestaSettings {
     try {
       if (!this.nodes.has(network)) {
         const build = this.load(this.root, this.digest);
-        this.nodes.set(network, this.create({ ...build, network, profileDirectory: this.profile, storageDirectory: prefs.folder, initialized: prefs.initialized }));
+        let savedHold = prefs.checkpointHold;
+        this.nodes.set(network, this.create({ ...build, network, profileDirectory: this.profile, storageDirectory: prefs.folder, initialized: prefs.initialized, checkpointQuickStart: prefs.checkpointQuickStart,
+          checkpointHold: prefs.checkpointHold, onStatus: state => {
+            if (network !== 'mainnet' || state.checkpointHold === savedHold) return;
+            this._save(network, { ...this._saved(network), checkpointHold: state.checkpointHold });
+            savedHold = state.checkpointHold;
+          } }));
       }
       const node = this.nodes.get(network);
       void node.start().then(() => {
@@ -228,10 +242,16 @@ class FlorestaSettings {
     this.inFlight.add(network);
     try {
       if (operation === 'start') {
-        if (!prefs.enabled && !await confirm()) return this.status(network);
+        if (!prefs.enabled && !await confirm(prefs.checkpointQuickStart ? 'startCheckpoint' : 'start')) return this.status(network);
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
         this._save(network, { ...prefs, enabled: true, used: true });
         this._start(network, prefs);
+      } else if (['allowCheckpoint', 'requireHistory'].includes(operation) && network === 'mainnet') {
+        const enable = operation === 'allowCheckpoint';
+        if (enable && !prefs.checkpointQuickStart && !await confirm('allowCheckpoint')) return this.status(network);
+        if (!admitted()) throw new Error('Unlock Chicory and try again.');
+        this._save(network, { ...prefs, checkpointQuickStart: enable });
+        this.nodes.get(network)?.setCheckpointQuickStart(enable);
       } else if (operation === 'stop') {
         this._save(network, { ...prefs, enabled: false });
         this.pauseCollection(network);
@@ -249,7 +269,7 @@ class FlorestaSettings {
           delete locations[network];
           this._saveLocations(locations);
           this.errors.delete(network);
-        } catch { this.errors.set(network, 'Removal is pending. Reconnect the original local APFS volume, stop any other node using it, and retry with the prepared build. Unrecognized files prevent removal.'); }
+        } catch { this.errors.set(network, 'Removal is pending. Reconnect the original local APFS or Linux ext4 volume, stop any other node using it, and retry with the prepared build. Unrecognized files prevent removal.'); }
       } else if (operation === 'folder' && !prefs.used && !prefs.enabled && process.platform !== 'win32') {
         const picked = await folder();
         if (!admitted()) throw new Error('Unlock Chicory and try again.');
@@ -331,10 +351,14 @@ function installFlorestaIpc({ ipcMain, settings, trusted, allowed, appLock, dial
         type: 'warning', title: 'Remove local node data', message: 'Remove generated ' + network + ' node data?',
         detail: 'This removes the chain database, public wallet and channel watches, and verification records in ' + location + '. A future sync starts over.',
         buttons: ['Remove node data', 'Cancel'], defaultId: 1, cancelId: 1
+      } : action === 'allowCheckpoint' ? {
+        type: 'question', title: 'Checkpoint quick start', message: 'Trust Floresta’s mainnet checkpoint during verification?',
+        detail: 'Floresta will temporarily trust the state at block 939,969 while independently checking older blocks. Local wallet reads still require the current tip and completed wallet scans. Lightning also requires its channel safety checks. A verification failure withdraws access. This preference applies to this build and mainnet profile.',
+        buttons: ['Allow checkpoint quick start', 'Cancel'], defaultId: 1, cancelId: 1
       } : {
         type: 'question', title: 'Floresta qualification', message: 'Start a ' + network + ' node?',
-        detail: 'Floresta downloads blocks over its own peer connections and stores public wallet and channel watches in the selected node folder. Initial sync and historical backfill can use substantial storage and bandwidth. Your wallet and Lightning channels keep using your selected Electrum server. Sync resumes when you reopen this development build with the same candidate.',
-        buttons: ['Start node', 'Cancel'], defaultId: 1, cancelId: 1
+        detail: (action === 'startCheckpoint' ? 'Quick start trusts Floresta’s mainnet checkpoint at block 939,969 while earlier history is verified in the background. ' : network === 'mainnet' ? 'Local wallet reads will wait for full historical verification. ' : '') + 'Floresta downloads blocks over its own peer connections and stores public wallet and channel watches in the selected node folder. Initial sync and historical backfill can use substantial storage and bandwidth. Your wallet and Lightning channels keep using your selected Electrum server. Sync resumes when you reopen this development build with the same candidate.',
+        buttons: [action === 'startCheckpoint' ? 'Start with checkpoint' : 'Start node', 'Cancel'], defaultId: 1, cancelId: 1
       }))).response === 0,
       folder: async () => {
         const answer = await appLock.duringPrompt(() => dialog.showOpenDialog(window(), {
