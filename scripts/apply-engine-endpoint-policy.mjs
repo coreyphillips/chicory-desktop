@@ -14,6 +14,10 @@ const engineFiles = {
     ['if (opts.electrumServers && opts.electrumServers.length > 1) {',
       `if (!${policyImport}.strict && opts.electrumServers && opts.electrumServers.length > 1) {`],
   ],
+  'dist/cli/electrum-tls-config.js': [
+    ['const tls = (0, node_builtins_1.nodeTls)();',
+      `const tls = ${policyImport}.tlsForEndpoint((0, node_builtins_1.nodeTls)());`],
+  ],
   'dist/electrum/index.js': [
     ['getServerCandidates(customPeers, electrumNetwork) {\n        const fallback =',
       `getServerCandidates(customPeers, electrumNetwork) {

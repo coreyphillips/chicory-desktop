@@ -85,7 +85,11 @@ test('prepared engine restricts Electrum reconnects and fee sources on each wall
         sockets.add(socket);
         socket.on('error', () => {});
         socket.on('close', () => sockets.delete(socket));
-        createInterface({ input: socket }).on('line', line => {
+        const lines = createInterface({ input: socket });
+        // A deliberate client disconnect can reset the test socket while the
+        // reader is still waiting for its next line.
+        lines.on('error', err => { if (err.code !== 'ECONNRESET') throw err; });
+        lines.on('line', line => {
           const requests = JSON.parse(line);
           const respond = ({ id, method }) => {
             methods.push(method);
@@ -147,4 +151,33 @@ test('prepared engine restricts Electrum reconnects and fee sources on each wall
       assert.equal(methods.filter(method => method === 'blockchain.estimatefee').length, network === 'regtest' ? 0 : 8);
     });
   }
+});
+
+test('onion TLS checks the onion identity over loopback before releasing any wallet bytes', { skip: !available }, async t => {
+  const name = 'a'.repeat(56) + '.onion';
+  const names = [];
+  const data = [];
+  const server = tls.createServer({ key: KEY, cert: CERT }, socket => {
+    names.push(socket.servername);
+    socket.on('error', () => {});
+    socket.on('data', bytes => data.push(bytes.toString()));
+    socket.on('end', () => socket.end());
+  });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const port = server.address().port;
+  const policy = configure(t, requireEngine.resolve(policyName), { ...selected('regtest', port, true),
+    BEIGNET_ELECTRUM_HOST: '127.0.0.1', CHICORY_ELECTRUM_ONION_NAME: name });
+  const ip = await policy.resolveHost('regtest', '127.0.0.1', port, true, () => assert.fail('Unexpected DNS'));
+  const { electrumTlsModule } = require(path.join(engine, 'dist/cli/electrum-tls-config.js'));
+  const dial = pins => new Promise((resolve, reject) => {
+    const transport = electrumTlsModule({ electrumTlsVerify: true, electrumTlsFingerprints: pins }, ip, ip);
+    const socket = transport.connect({ host: ip, port }, () => socket.end('accepted'));
+    socket.once('error', reject);
+    socket.once('close', resolve);
+  });
+  await assert.rejects(dial(['00'.repeat(32)]), /certificate rejected/);
+  await dial([PIN]);
+  assert.deepEqual(data, ['accepted']);
+  assert.ok(names.includes(name));
 });

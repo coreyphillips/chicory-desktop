@@ -1561,6 +1561,10 @@ class WalletManager {
 			BEIGNET_DAEMON_HOST: '127.0.0.1',
 			BEIGNET_DAEMON_PORT: String(rec.port),
 			BEIGNET_ELECTRUM_HOST: rec.electrum.host,
+			...(rec.electrum.onionHost ? {
+				CHICORY_ELECTRUM_POLICY: 'selected-only',
+				CHICORY_ELECTRUM_ONION_NAME: rec.electrum.onionHost
+			} : {}),
 			BEIGNET_ELECTRUM_PORT: String(rec.electrum.port),
 			BEIGNET_ELECTRUM_TLS: rec.electrum.tls ? 'true' : 'false',
 			// Certificate verification for a TLS server, when the record asks.

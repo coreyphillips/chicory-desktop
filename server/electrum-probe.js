@@ -141,7 +141,7 @@ async function electrumRequests(electrum, requests, { timeoutMs = PROBE_TIMEOUT_
 		};
 		try {
 			socket = useTls
-				? transport.tls.connect({ host: endpoint.host, port: endpoint.port, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false })
+				? transport.tls.connect({ host: endpoint.host, port: endpoint.port, servername: endpoint.onionHost || (net.isIP(host) ? undefined : host), rejectUnauthorized: false })
 				: transport.net.connect({ host: endpoint.host, port: endpoint.port });
 		} catch (err) {
 			return reject(err);

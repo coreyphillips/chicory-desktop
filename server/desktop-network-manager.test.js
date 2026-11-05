@@ -100,7 +100,7 @@ test('an onion Electrum daemon uses only its private runtime bridge and preserve
   assert.equal(manager.probes[0].host, '127.0.0.1');
   assert.equal(spawns()[0].options.env.BEIGNET_ELECTRUM_HOST, '127.0.0.1');
   assert.equal(spawns()[0].options.env.BEIGNET_ELECTRUM_PORT, '19432');
-  assert.equal(spawns()[0].options.env.BEIGNET_ELECTRUM_TLS, 'false');
+  assert.equal(spawns()[0].options.env.BEIGNET_ELECTRUM_TLS, 'true');
   assert.equal(rec.electrum.host, onion); assert.equal(rec.electrum.tls, true);
 });
 
