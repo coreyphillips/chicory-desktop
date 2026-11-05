@@ -7,7 +7,7 @@
  * and an amount over it was only refused after review.
  *
  * The daemon decides an offline request's channel itself (OfflineReceive's
- * suitableChannel in beignet 0.36.1): a channel with the primary, NORMAL and
+ * suitableChannel, unchanged from beignet 0.36.1 to 0.38.0): a channel with the primary, NORMAL and
  * able to take HTLCs, empty on this side unless the primary settles offline
  * receives concurrently, not reserved by another request, with no open
  * receiving epoch, and holding the amount plus a 50000 sat margin of inbound.

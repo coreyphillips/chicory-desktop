@@ -7,7 +7,7 @@ const os = require('node:os');
 const vm = require('node:vm');
 const { payments, networks } = require('bitcoinjs-lib');
 
-async function fixture(t, version = '0.36.1') {
+async function fixture(t, version = '0.38.0') {
   const patch = await import('../scripts/apply-engine-patches.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chicory-engine-patch-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -24,7 +24,7 @@ test('the engine patch is version-checked, shape-checked and idempotent', async 
   const first = fs.readFileSync(path.join(dir, 'dist/cli/beignet-node.js'), 'utf8');
   assert.equal(patch.patchEngine(dir).changed, false);
   assert.equal(fs.readFileSync(path.join(dir, 'dist/cli/beignet-node.js'), 'utf8'), first);
-  const other = await fixture(t, '0.36.2');
+  const other = await fixture(t, '0.36.1');
   assert.throws(() => patch.patchEngine(other.dir), /exactly Beignet/);
   const changed = await fixture(t);
   fs.writeFileSync(path.join(changed.dir, 'dist/cli/daemon.js'), 'changed source');

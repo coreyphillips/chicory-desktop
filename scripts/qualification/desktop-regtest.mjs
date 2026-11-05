@@ -613,6 +613,10 @@ try {
       await healthy(subject.api.bind(subject), id);
     }
     const exportedAt = await wallet().snapshot();
+    // A full backup carries every wallet in the app, and the max and drain
+    // stages each add one to it.
+    const inApp = (await subject.api('/wallets')).map(item => item.id).sort();
+    assert.ok(inApp.includes(id), 'The funded wallet is in the app being backed up');
     const archive = await subject.bytes('/api/backup/full/export', { passphrase: BACKUP_PASSPHRASE });
     assert.equal(archive.subarray(0, 12).toString(), 'CHICORYFULL1', 'A full backup file');
     const later = await payer.receive(await payer.quoteReceive({ amountSats: 1000, description: 'qualify after backup' }));
@@ -629,7 +633,7 @@ try {
     assert.equal((await attempt(BACKUP_PASSPHRASE, tampered)).refused, 'BAD_ARCHIVE');
     assert.deepEqual(await restored.api('/wallets'), [], 'Refused restores leave nothing');
     const { result } = await attempt(BACKUP_PASSPHRASE, archive);
-    assert.deepEqual(result.restored.map(item => item.id), [id], 'The wallet comes back under its own identity');
+    assert.deepEqual(result.restored.map(item => item.id).sort(), inApp, 'Every wallet in the backup comes back under its own identity');
     await restored.api(`/wallets/${id}/start`, {});
     await healthy(restored.api.bind(restored), id, false);
     const listChannels = async () => (await (await restored.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;

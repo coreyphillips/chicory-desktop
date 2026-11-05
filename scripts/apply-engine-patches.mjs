@@ -60,7 +60,7 @@ export function patchEngine(directory) {
   const root = path.resolve(directory);
   if (fs.existsSync(path.join(root, '.git'))) throw new Error('Refusing to patch a source checkout. Install or copy the engine first.');
   const packageInfo = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  if (packageInfo.name !== 'beignet' || packageInfo.version !== '0.36.1') throw new Error('The host patch requires exactly Beignet 0.36.1.');
+  if (packageInfo.name !== 'beignet' || packageInfo.version !== '0.38.0') throw new Error('The host patch requires exactly Beignet 0.38.0.');
   const nodePath = path.join(root, 'dist/cli/beignet-node.js');
   const daemonPath = path.join(root, 'dist/cli/daemon.js');
   const node = fs.readFileSync(nodePath, 'utf8');

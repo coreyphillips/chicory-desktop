@@ -1,6 +1,6 @@
 {
   "name": "chicory-desktop-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Private local wallet manager for Chicory Desktop.",
   "license": "MIT",
