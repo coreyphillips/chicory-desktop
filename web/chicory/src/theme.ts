@@ -303,17 +303,91 @@ export const nextFace = (
  * - `kern`: a display sign drawn in by this share of the figures' size, so the
  *   gap after it is the gap between two figures. SF leaves it 2pt wider at
  *   64pt; Roboto's is already theirs.
+ * - `rise`: how far a sign standing in a line of text is raised, as a share
+ *   of the line's size, so its middle is the figures'. Nothing on a phone.
  */
-const SIGN_SET = Platform.select({
-  ios: { display: 0.75, text: 0.9, drop: 0, natural: 1.193, kern: 0.03 },
-  default: { display: 0.7, text: 0.85, drop: 0.046, natural: 0, kern: 0 },
+type SignSet = {
+  display: number;
+  text: number;
+  drop: number;
+  natural: number;
+  kern: number;
+  rise: number;
+};
+
+const PHONE_SIGN_SET: SignSet = Platform.select({
+  ios: { display: 0.75, text: 0.9, drop: 0, natural: 1.193, kern: 0.03, rise: 0 },
+  default: { display: 0.7, text: 0.85, drop: 0.046, natural: 0, kern: 0, rise: 0 },
 });
+
+/** What react-native-web draws text in when no family is named. */
+const SYSTEM_FACE =
+  '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+
+/**
+ * In a browser the figures are drawn in the computer's own face, SF Pro on a
+ * Mac, Segoe UI on Windows and the desktop's sans on Linux, none of which is
+ * the face the phone's `drop` was measured in. Android's lift, nearly a
+ * twentieth of the figures' size, left the sign hugging their tops in SF Pro.
+ * Here the sign's and the figures' ink are measured once, in the face that
+ * draws them, and the drop and rise are what centres one on the other. A
+ * browser centres each line in its box from the face's ascent and descent,
+ * so at share `k` the ink's middle sits `k` times the face's own offset from
+ * the box's middle. The phone's shares and spacing stay.
+ */
+function browserSignSet(phone: SignSet): SignSet {
+  try {
+    const context =
+      typeof document === 'undefined'
+        ? null
+        : document.createElement('canvas').getContext('2d');
+    if (!context) return phone;
+    const em = 100;
+    context.font = `300 ${em}px ${SYSTEM_FACE}`;
+    const figures = context.measureText('0123456789');
+    context.font = `400 ${em}px ${SYSTEM_FACE}`;
+    const sign = context.measureText(BITCOIN_SIGN);
+    // Where each ink's middle sits below its baseline, and where the baseline
+    // sits below the middle of a line box it is centred in, in ems.
+    const middle = (ink: TextMetrics) =>
+      (ink.actualBoundingBoxDescent - ink.actualBoundingBoxAscent) / 2 / em;
+    const baseline =
+      (figures.fontBoundingBoxAscent - figures.fontBoundingBoxDescent) / 2 / em;
+    const drop =
+      phone.display * (baseline + middle(sign)) -
+      (baseline + middle(figures));
+    const rise = phone.text * middle(sign) - middle(figures);
+    // A face that measures nothing, or a missing glyph, keeps the phone's.
+    const sane = (value: number) => Number.isFinite(value) && Math.abs(value) < 0.2;
+    if (!sane(drop) || !sane(rise) || !(figures.actualBoundingBoxAscent > 0))
+      return phone;
+    return { ...phone, drop, natural: 0, rise };
+  } catch {
+    return phone;
+  }
+}
+
+const SIGN_SET: SignSet =
+  Platform.OS === 'web' ? browserSignSet(PHONE_SIGN_SET) : PHONE_SIGN_SET;
 
 /** The bitcoin sign's share of figures drawn on their own (`SIGN_SET`). */
 export const SYMBOL_SCALE = SIGN_SET.display;
 
 /** The bitcoin sign's share of a line of text it stands in (`SIGN_SET`). */
 export const TEXT_SYMBOL_SCALE = SIGN_SET.text;
+
+/**
+ * The bitcoin sign inside a line of text set at `size`: TEXT_SYMBOL_SCALE of
+ * the line, on its baseline, raised where the face needs it (`rise`) so its
+ * middle is the figures'. Shifted in place, so the line keeps its height.
+ */
+export const symbolInText = (size: number): TextStyle => {
+  const rise = SIGN_SET.rise * size;
+  return {
+    fontSize: size * SIGN_SET.text,
+    ...(rise ? { position: 'relative', top: -rise } : {}),
+  };
+};
 
 /**
  * How far the bitcoin sign is raised beside figures set at `size` in a line
