@@ -143,8 +143,7 @@ function checkAddress(wallet, address) {
 }
 
 function validateHistory(scriptHash, response) {
-  if (!state?.requireWatchAck) return;
-  checkHash(scriptHash);
+  if (state?.requireWatchAck) checkHash(scriptHash);
   const entries = response?.data;
   const rows = entries?.[0]?.result;
   if (!Array.isArray(entries) || entries.length !== 1 || entries[0]?.error || !Array.isArray(rows) ||

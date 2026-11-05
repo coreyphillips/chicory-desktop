@@ -113,6 +113,20 @@ test('pinned Lightning watcher exports funding candidates, pre-splice legs, clai
   assert.equal(control.acknowledge(result.generation).accepted, false);
 });
 
+test('ordinary Lightning history distinguishes an empty script from a failed Electrum batch', { skip: !available }, async () => {
+  const { ElectrumBackend } = dist('lightning/chain/electrum-backend.js');
+  let data = [{ result: [] }];
+  const backend = new ElectrumBackend({ connectedToElectrum: true,
+    getAddressScriptHashesHistory: async () => ({ isErr: () => false, value: { data } }) });
+  const scriptHash = hash(4);
+  assert.deepEqual(await backend.getScriptHashHistory(scriptHash), []);
+  for (data of [[], [{ error: { code: -32000 } }], [{ result: null }], [{ result: [{ height: 0 }] }]]) {
+    await assert.rejects(backend.getScriptHashHistory(scriptHash), /Incomplete Electrum history/);
+  }
+  data = [{ result: [{ tx_hash: hash(7), height: -1 }] }];
+  assert.deepEqual(await backend.getScriptHashHistory(scriptHash), [{ txid: hash(7), height: -1 }]);
+});
+
 test('acknowledgement gates exact Lightning reads, gossip and receive issuance', { skip: !available }, async t => {
   const { control, daemon } = walletFixture(t, true);
   const { computeScriptHash, classifyAnnouncedChannelFunding } = dist('lightning/chain/chain-watcher.js');
