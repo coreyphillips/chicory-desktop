@@ -49,7 +49,7 @@ Expected history includes only the original 50,000 sat funding and the winning 2
 In the second run, Floresta identified its peer as `/btcwire:0.5.0/utreexod:0.6.0/` with `NETWORK|BLOOM|WITNESS|COMPACT_FILTERS|NETWORK_LIMITED|P2P_V2|0x3000`. On that same connection the proof peer reported `subver: /Floresta:0.9.1/`, `services: 00006152` and `relaytxes: false`. These observations are reproducible with `getpeerinfo` on both nodes.
 
 * The release's version handshake disables transaction relay, its peer handler drops transaction announcements, and received transactions satisfy outstanding by-txid requests. Its mempool admission function performs context-free checks and assumes input inclusion proofs have already been validated. The development branch also sets relay to false. [Release handshake][relay] · [Inventory handling][inv] · [Received transactions][recv] · [Mempool admission][accept] · [Development handshake][dev-relay]
-* The selected peer **can** supply a dedicated `utreexotx` message containing a transaction, Utreexo proof and input leaf data. Its witness-capable `getdata` path supports requests for specific proof positions. A receiver must reconstruct input leaf hashes for the active chain, verify the proof against its local accumulator and handle unconfirmed parents, conflicts and changes of tip before publishing a coherent wallet view. This capability was identified in peer source. The lab observed the release handshake and mempool behavior, on the connection. Proof-carrying transaction exchange remains an implementation dependency. [Peer message][peer-tx] · [Proof request][peer-get] · [Peer validation][peer-verify] · [Floresta roadmap][roadmap]
+* The selected peer **can** supply a dedicated `utreexotx` message containing a transaction, Utreexo proof and input leaf data. Its witness-capable `getdata` path supports requests for specific proof positions. A receiver must reconstruct input leaf hashes for the active chain, verify the proof against its local accumulator and handle unconfirmed parents, conflicts and changes of tip before publishing a coherent wallet view. This capability was identified in peer source. The lab observed the release handshake and mempool behavior, on the connection. The managed candidate now tests proof-carrying transaction exchange on an explicitly configured loopback regtest peer. Public peer coverage remains a release dependency. [Peer message][peer-tx] · [Proof request][peer-get] · [Peer validation][peer-verify] · [Floresta roadmap][roadmap]
 
 ## Control listener
 
@@ -85,6 +85,14 @@ Both cases use Floresta v0.9.1 at `bc2db8d07e72651f9981ce589c5688f4d575dc7a` and
 1. **Promoting an already verified block loses its persisted accumulator.** Open a fresh regtest chain store, accept and connect the first non-genesis block from the release's `crates/floresta-chain/testdata/blocks.txt`, and save its nonempty in-memory stump. Call `mark_block_as_valid(block_hash)`, then read `get_roots_for_block(1)`. Expected the saved stump. The header update resets both the accumulator file offset and length. The subsequent read returns `None`. In a funded downstream run we exercised the same upstream store by completing a background replay through block 102, stopping the daemon, truncating only the downstream replay marker and reopening the same store. Independent replay reconstructed 105 leaves and four roots at the identical active block hash. The persisted foreground state contained zero leaves and zero roots. This can prevent a restarted node from verifying subsequent proofs. The downstream fix preserves already-verified headers and checks the active hash under the write lock before promotion. The development snapshot still rewrites the header and initializes both storage fields to zero. [Release promotion][mark-valid] · [Release header rewrite][flat-rewrite] · [Release startup][load-stump] · [Development promotion][dev-mark] · [Development store][dev-flat]
 2. **Assuming a non-genesis checkpoint stores its accumulator at genesis.** On a second fresh store accept the same block's header, then call `mark_chain_as_assumed(nonempty_stump, block_hash)`. The first test case supplies the actual stump for this block. Expected the validation index and persisted stump to reference height 1, and the genesis stump to remain empty. In v0.9.1 the ancestry loop stops at genesis and passes that final header to `update_view`, then sets the in-memory validation index to height 1. Inspect the two accumulator records, flush, and reopen before connecting another block. Startup looks up the accumulator at height 1, where the assumed stump was never saved. The downstream fix passes the original assumed header into `update_view`. The development snapshot already uses the original assumed header. This case supports a release backport. [Release assumption][assume-state] · [Release startup][load-stump] · [Development fix][dev-mark]
 
+## Reading the validation index while a chain reorganizes
+
+The v0.9.1 flat chain store exposes a short interval when the old validated block is already marked `InFork` but the best-chain record still points to it. A concurrent `get_validation_index()` returns `BadValidationIndex`. A caller monitoring the chain needs to distinguish an ongoing fork transition from a permanent storage failure. [Release reorg sequence][chain-reorg] · [Release validation index][chain-index]
+
+Use the two branches in `crates/floresta-chain/testdata/test_reorg.json` with a fresh regtest flat store. Connect the first ten blocks. Retain the competing branch's first five headers, which also reach height 10. Verify the old chain reports height 10 and validation height 10. Run `mark_chain_as_inactive` on the old tip down to the common ancestor at height 5, exactly as the reorg worker does. Before `change_active_chain` runs, the old best height still reads 10 and a concurrent validation-index query returns the error above. Finish the switch and the new header tip reads 10 with validated height 5. The regression exercises this schedule deterministically. [Downstream test][chain-read-fix]
+
+The downstream heartbeat previously stopped polling after any index error, and its background scanner could stop the daemon. The downstream fix reads the header tip, validated header, indexed hashes and IBD flag under one read lock, withholds inconsistent observations, and retries. An earlier funded run lost its watch connection during a reorg. Its report did not capture the native exit reason, so the deterministic test establishes the reader hazard separately. The development snapshot also updates the individual header records before publishing the new best chain and still returns `BadValidationIndex` for an `InFork` validated header. [Development reorg][dev-reorg] · [Development index][dev-index]
+
 ## Related upstream work
 
 * The backfill script policy already has an open report. The v0.9.1 partial chain also matches only the `BlockchainError::BlockValidation` variant when handling a failed block check. The script verifier can return `BlockchainError::TransactionError`, which that condition drops. This is supplementary evidence for the existing report. [Upstream issue 1335](https://github.com/getfloresta/Floresta/issues/1335) · [Partial replay error propagation][partial-errors] · [Script failure type][script-errors]
@@ -116,6 +124,34 @@ Source inspection of `be2574fc5e39a442ed3737de6b7deb825907c677` found the follow
 [roadmap]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/doc/roadmap-2026.md#L50-L55
 [release]: https://github.com/getfloresta/Floresta/releases/tag/v0.9.1
 [peer]: https://github.com/utreexo/utreexod/releases/tag/v0.6.0
+## A reorg can expose a transient invalid validation index to chain readers
+
+On v0.9.1, a reader can call `get_best_block` and see height 10 while
+`get_validation_index` returns `BadValidationIndex` for the former active
+header. The reorg path marks old headers inactive before it replaces the
+published validation tip. Our deterministic flat-chainstore test uses the
+release's ten-block competing-branch fixture and reads between those two
+mutations. The first integrated funding run also lost its observation
+session during a reorg. That run did not capture evidence sufficient to
+attribute its failure to this precise interleaving.
+
+A downstream observer needs either a coherent header and validation snapshot,
+or a retryable transition, so it cannot treat a valid reorg as fatal or
+publish disconnected wallet history. The candidate checks indexed headers
+and the validation anchor together, waits through the transition and
+continues to surface persistent storage errors. Its regression checks the
+original height-10 tip, the unavailable intermediate observation and the
+winning tip with validated height 5. Use the fork branch and run:
+
+```sh
+cargo test --locked -p floresta-chain --features flat-chainstore --lib active_chain_status_retries_a_reorg_between_disk_and_tip_updates
+```
+
+Suggested filing target is the chain-state reader contract. Separate this
+from the stock Electrum wallet retaining detached rows. [Reproducing test and
+candidate correction](../build/floresta/managed-reorg-reads.patch)
+
+
 [lab]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/scripts/qualification/floresta-lab.mjs
 [probe]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/scripts/qualification/floresta-electrum.mjs
 [beignet]: https://github.com/coreyphillips/chicory-desktop/blob/5ea634f2098125c7fae532e85bad4dd74a76b342/docs/floresta-beignet.md
@@ -151,3 +187,8 @@ Source inspection of `be2574fc5e39a442ed3737de6b7deb825907c677` found the follow
 [assume-state]: https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L1230-L1253
 [dev-mark]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L1372-L1411
 [dev-flat]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-chain/src/pruned_utreexo/flat_chain_store.rs#L1073-L1091
+[chain-reorg]: https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L440-L462
+[chain-index]: https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L1192-L1202
+[dev-reorg]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L458-L473
+[dev-index]: https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-chain/src/pruned_utreexo/chain_state.rs#L1333-L1343
+[chain-read-fix]: ../build/floresta/managed-reorg-reads.patch

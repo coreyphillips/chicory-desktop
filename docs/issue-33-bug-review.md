@@ -18,6 +18,15 @@ Use this register to decide what to file, where to file it and which existing is
 
 **Chicory fix.** Check that the single requested script received exactly one valid history result before using its rows. A successful empty result remains valid. The prepared-engine tests exercise an empty result, a funded result, a missing response, a per-item error and malformed data with ordinary external wallets as well as the managed watch guard. Run `node --test server/engine-watch-control.test.js` after preparing the desktop runtime. [Engine guard](../scripts/engine-watch-control.cjs) · [Regression tests](../server/engine-watch-control.test.js)
 
+### A wallet health check can reject an authenticated selective index
+
+On a private, per-wallet Electrum bridge, the pinned wallet connected successfully
+but its refresh still reported the peer offline. Its health check queried a
+hardcoded wallet script that lay outside the registered owner scope. The
+qualification path uses `server.ping` on the authenticated local connection.
+The ordinary external health check keeps its existing behavior. [Pinned calls
+and scoped correction](floresta-beignet.md)
+
 ## Floresta
 
 The following rows are separate filing or follow-up decisions. Check the linked upstream work before opening another issue. No report has been submitted to Floresta by this project.
@@ -35,6 +44,7 @@ The following rows are separate filing or follow-up decisions. Check the linked 
 | Overlapping subscriptions, descriptor branches and partial rescans | Release source and comparison to a pinned development commit | Reproduce each separately before filing as a runtime defect. |
 | Historical validation can skip script checks or discard errors | Partial-chain script flag and error match, plus regressions in the Chicory backfill patch | Supplement existing #1335. |
 | Historical completion and assumed-state persistence | Empty/truncated checkpoint path, replay commitment comparison, and repeated-start accumulator checks | See the detailed store findings and distinguish a downstream regression from the upstream writes it exposed. |
+| Inconsistent active-tip reads during a reorg | A deterministic ten-block fork exposes an inactive validated header to a concurrent reader | Request a coherent snapshot or a retryable transition, and include the native regression. |
 | Unverified historical blocks can reach retrieval callers | Existing upstream report and proposed fix | Follow #1354 and its associated change. |
 
 Each row's release/development comparison, upstream links and precise evidence are in the [upstream report](floresta-upstream-bugs.md). Protected control, explicit watch scopes, per-owner historical lookup and independent replay in the candidate are downstream mitigations. A successful confirmed scan alone provides no evidence about mempool or Lightning recovery.

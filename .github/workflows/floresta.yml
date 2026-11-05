@@ -14,8 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Boost 1.85 recognizes the MSVC 2022 toolchain on this Windows image.
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -40,31 +39,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'boost.tar.bz2'
-          curl.exe --fail --location --retry 3 --output $archive https://archives.boost.io/release/1.85.0/source/boost_1_85_0.tar.bz2
-          if ($LASTEXITCODE -ne 0 -or (Get-FileHash $archive).Hash -ne '7009fe1faa1697476bdc7027703a2badb84e849b7b0baad5086b087b971f8617') { throw 'Boost source verification failed.' }
-          tar.exe -xf $archive -C $env:RUNNER_TEMP
-          if ($LASTEXITCODE -ne 0) { throw 'Boost extraction failed.' }
-          Push-Location "$env:RUNNER_TEMP/boost_1_85_0"
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -version '[17.0,18.0)' -latest -property installationPath
-          if (!$vs) { throw 'Visual Studio 2022 with C++ build tools is required.' }
-          $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
-          # Stage generates Boost::headers against the verified source tree.
-          # Installing would copy every header again via individual commands.
-          $prefix = Join-Path $env:RUNNER_TEMP 'boost-stage'
-          @(
-            "call `"$devcmd`" -arch=x64",
-            'if errorlevel 1 exit /b 1',
-            'call bootstrap.bat vc143',
-            'if errorlevel 1 exit /b 1',
-            "b2.exe --with-system variant=release --stagedir=`"$prefix`" stage"
-          ) | Set-Content -Encoding ascii install-headers.cmd
-          & .\install-headers.cmd
-          if ($LASTEXITCODE -ne 0) { throw 'Boost installation failed.' }
-          Pop-Location
-          if (!(Test-Path "$prefix/lib/cmake/boost_headers-1.85.0/boost_headers-config.cmake")) { throw 'Boost headers were not staged.' }
-          "CMAKE_PREFIX_PATH=$prefix" >> $env:GITHUB_ENV
+          # libbitcoinkernel links only Boost::headers. These matching Win64
+          # packages supply the include tree and Boost's generated CMake config.
+          $prefix = Join-Path $env:RUNNER_TEMP 'boost-headers'
+          $packages = [ordered]@{
+            'libboost-headers-1.85.0-h57928b3_4.conda' = 'c1b5f878403534ac1b2d1b84d5c6e522f5b988ff3904ce246f1272b6b3d85f54'
+            'libboost-devel-1.85.0-h91493d7_4.conda' = '64ecbc36863488ac08f67aa7272932d5d2d35e4515b3d39cbfeeef45f03ad7f2'
+          }
+          foreach ($name in $packages.Keys) {
+            $archive = Join-Path $env:RUNNER_TEMP $name
+            curl.exe --fail --location --retry 3 --output $archive "https://conda.anaconda.org/conda-forge/win-64/$name"
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash $archive).Hash -ne $packages[$name]) { throw "Boost package verification failed: $name" }
+            Write-Host "Extracting verified $name"
+            & "$env:CONDA/python.exe" -c "import sys; from conda_package_handling.api import extract; extract(sys.argv[1], dest_dir=sys.argv[2], components=['pkg'])" $archive $prefix
+            if ($LASTEXITCODE -ne 0) { throw "Boost extraction failed: $name" }
+          }
+          $library = Join-Path $prefix 'Library'
+          if (!(Test-Path "$library/include/boost/version.hpp") -or !(Test-Path "$library/lib/cmake/boost_headers-1.85.0/boost_headers-config.cmake")) { throw 'Boost headers or CMake config are missing.' }
+          "CMAKE_PREFIX_PATH=$library" >> $env:GITHUB_ENV
+          "Boost_DIR=$library/lib/cmake/Boost-1.85.0" >> $env:GITHUB_ENV
           "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
       - name: Compile the pinned candidate
         id: build
