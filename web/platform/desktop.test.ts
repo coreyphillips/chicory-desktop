@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { desktopScene, desktopShortcut } from './desktop.ts';
+import { desktopScene, desktopShortcut, florestaTipProgress } from './desktop.ts';
 import { activityWidth, desktopLayout } from './browserLayout.ts';
+
+test('the checkpoint display identifies the next required proof without claiming an outage or wallet readiness', () => {
+  const state = { tipSynced: false, validatedHeight: 939969, historicalTarget: 939969, height: 974692 };
+  assert.deepEqual(florestaTipProgress('mainnet', state),
+    { label: `Needs block ${(939970).toLocaleString()} and its proof`, remaining: 34723 });
+  for (const network of ['testnet', 'regtest'] as const)
+    assert.deepEqual(florestaTipProgress(network, state), { label: 'Syncing', remaining: null });
+  assert.equal(florestaTipProgress('mainnet', { ...state, validatedHeight: null }).label, 'Syncing');
+  assert.deepEqual(florestaTipProgress('mainnet', { ...state, validatedHeight: state.height, tipSynced: true }),
+    { label: 'Caught up to known tip', remaining: null });
+});
 
 test('desktop layouts retain a readable payment workspace at supported window widths', () => {
   assert.equal(desktopLayout(899), false);

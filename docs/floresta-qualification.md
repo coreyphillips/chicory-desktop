@@ -288,6 +288,14 @@ The same network trial sent a confirmed-block proof request for height 939,970 t
 
 The public trials used fresh data. The preview inherits a v0.9.1 shutdown bug that can save an empty list of recently connected proof peers in `anchors.json`. The independent `peers.json` address book and fresh discovery can still supply candidates at restart. Warm mainnet recovery and the availability of a proof provider for the checkpoint gap remain unmeasured. [Anchor persistence and its upstream fix](floresta-upstream-bugs.md#connected-proof-peer-anchors-can-be-lost-at-shutdown)
 
+### Can Chicory use a Floresta maintainer's bridge?
+
+Yes. Chicory can fetch public block proofs from a compatible bridge and verify them locally against the pinned accumulator. The bridge needs proofs covering the next block Chicory must validate. The two peers that answered the earlier control advertised service value 6152 (Utreexo, v2 transport and witness). Neither advertised historical proof service. Castor retains proofs for blocks it processes after its bootstrap height. [Utreexo service bits](https://github.com/utreexo/biptreexo/blob/917bdf3d344e69bfe387af5c0d761c93a91bbd95/bip-0183.md#service-bits), [Castor proof storage](https://github.com/getfloresta/castor/blob/20a5eed172c53d13e6f8999d1b5a377fc462052a/README.md#sequential-steady-state)
+
+Floresta contributor Luís Schwab identifies his mainnet bridge at `195.26.240.213:8433`. Port 8333 on that IP belongs to Bitcoin Core. The DNS-seed trial above used only port 8333. A separate operator reported syncing past the same checkpoint in May using `45.77.242.77:8333`. [Bridge operator's port confirmation](https://github.com/getfloresta/Floresta/issues/971#issuecomment-4284241912), [operator's May sync](https://indianboy.sh/blog/floresta-mainnet-journey)
+
+On November 5, 2026, a separate wallet-free check tried both published endpoints for block 939,970. The maintainer's port accepted TCP, but neither Bitcoin transport completed a version handshake. The May endpoint timed out while connecting. The check finished in 6.04 seconds with 174 application bytes sent and zero received. Both attempts ended before a proof request could be sent. Historical coverage at either endpoint remains unknown. The preview continues peer discovery and local verification without giving either endpoint special trust.
+
 ## Before a wallet can switch
 
 The release keeps the selected Electrum backend until all of the following

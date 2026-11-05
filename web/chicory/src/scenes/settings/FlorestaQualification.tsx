@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { Network } from '@beignet/wallet-core';
-import type { FlorestaSettingsBridge, FlorestaState } from '../../../../platform/desktop';
+import { florestaTipProgress, type FlorestaSettingsBridge, type FlorestaState } from '../../../../platform/desktop';
 import { Action, Line, Link, Note, Row } from './ui';
 
 function scanStatus(watches: FlorestaState['watches']) {
@@ -53,6 +53,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
     finally { active.current = false; setBusy(false); }
   }
   const phases = { stopped: 'Stopped', starting: 'Starting', running: 'Running', 'waiting-for-tip': 'Waiting for fresh chain data', restarting: 'Restarting', failed: 'Failed' };
+  const tip = state && florestaTipProgress(network, state);
   return <>
     <Row glyph="flask" label="Experimental Floresta node" expanded={open} onPress={() => setOpen(value => !value)} />
     {open ? <>
@@ -66,10 +67,8 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
         {state.height !== null ? <>
           <Line label="Header height" value={String(state.height)} />
           <Line label="Validated height" value={String(state.validatedHeight ?? 'Unavailable')} />
-          <Line label="Current tip" value={state.tipSynced ? 'Caught up to known tip' : 'Syncing'} />
-          {network === 'mainnet' && !state.tipSynced && state.historicalTarget === 939969 &&
-            state.validatedHeight !== null && state.validatedHeight >= state.historicalTarget && state.height > state.validatedHeight ?
-            <Line label="Known blocks still to validate" value={(state.height - state.validatedHeight).toLocaleString()} /> : null}
+          {tip && <Line label="Current tip" value={tip.label} />}
+          {tip && tip.remaining !== null ? <Line label="Known blocks still to validate" value={tip.remaining.toLocaleString()} /> : null}
         </> : null}
         {network === 'mainnet' ? <>
           <Line label="Checkpoint quick start" value={state.checkpointQuickStart ? 'Use checkpoint while verifying history' : 'Wait for full verification'} />

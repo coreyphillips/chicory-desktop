@@ -28,6 +28,17 @@ export interface FlorestaState {
 
 export type FlorestaSettingsBridge = Record<'status' | 'start' | 'stop' | 'folder' | 'remove' | 'allowCheckpoint' | 'requireHistory', (network: Network) => Promise<FlorestaState>>;
 
+export function florestaTipProgress(network: Network, state: Pick<FlorestaState, 'height' | 'validatedHeight' | 'historicalTarget' | 'tipSynced'>) {
+  const { height, validatedHeight, historicalTarget, tipSynced } = state;
+  if (tipSynced) return { label: 'Caught up to known tip', remaining: null };
+  if (network === 'mainnet' && historicalTarget === 939969 && validatedHeight !== null &&
+      validatedHeight >= historicalTarget && height !== null && height > validatedHeight) {
+    const next = (validatedHeight + 1).toLocaleString();
+    return { label: `Needs block ${next} and its proof`, remaining: height - validatedHeight };
+  }
+  return { label: 'Syncing', remaining: null };
+}
+
 export type DesktopScene = 'home' | 'send' | 'receive' | 'activity' | 'settings';
 export type DesktopCommand = DesktopScene | 'payment-link';
 
