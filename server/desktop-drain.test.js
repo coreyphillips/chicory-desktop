@@ -121,6 +121,10 @@ test('a reviewed drain holds the wallet until its close is seen, then sweeps and
 	const quote = await h.request('/wallets/w1/api/drain/quote', { requestId: 'drain-request-01', address: destination });
 	assert.equal(quote.ok, true);
 	assert.equal(quote.result.phase, 'review');
+	assert.deepEqual(h.drains.watchTargets('w1'), {
+		scripts: [bitcoinAddress.toOutputScript(destination, networks.regtest).toString('hex')],
+		outpoints: [{ txid: fundingTxid, vout: 0 }, { txid: coin.txid, vout: coin.vout }],
+	});
 	assert.equal(quote.result.debitSats, 9300 + 2000);
 	assert.equal(quote.result.amountSats + quote.result.feeSats, quote.result.debitSats);
 	// A review holds nothing.

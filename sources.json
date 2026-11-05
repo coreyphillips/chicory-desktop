@@ -28,6 +28,8 @@
   "engineVersion": "0.38.0",
   "enginePatches": [
     "scripts/apply-engine-patches.mjs",
+    "scripts/apply-engine-endpoint-policy.mjs",
+    "scripts/apply-engine-watch-control.mjs",
     "scripts/apply-storage-encryption.mjs"
   ],
   "chicory-umbrel": {

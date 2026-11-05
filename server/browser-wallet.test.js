@@ -198,3 +198,14 @@ test('an offline request keeps its offline flag, confirmed in the engine\'s offl
   assert.equal((await ordinary.store.register(request())).offlineReceive, undefined);
   assert.equal(ordinary.calls.some(([, route]) => route === '/receive/status'), false);
 });
+
+test('receipt and splice journals export only the watched scripts and original funding outpoint', async t => {
+  const f = fixture(t);
+  await f.store.allocate({});
+  await f.store.register(request());
+  await f.store.submitSplice({ ...body(), address: foreign });
+  assert.deepEqual(new BrowserWallet(f.options).watchTargets(), {
+    scripts: ['0014' + '01'.repeat(20), '0014' + '02'.repeat(20)],
+    outpoints: [{ txid: previous, vout: 0 }],
+  });
+});

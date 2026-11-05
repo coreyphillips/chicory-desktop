@@ -68,6 +68,10 @@ module.exports = async function verifyRuntime(context) {
   if (!fs.readFileSync(path.join(engine, 'dist/lightning/storage/engine-storage.cjs')).equals(fs.readFileSync(path.join(root, 'server/engine-storage.cjs')))) throw new Error('The encrypted storage helper is stale. Run npm run runtime:prepare.');
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   if (execFileSync(node, ['--version'], { encoding: 'utf8' }).trim() !== 'v24.22.1') throw new Error('Wrong bundled Node version.');
+  const { patchEngineEndpointPolicy } = await import(pathToFileURL(path.join(root, 'scripts/apply-engine-endpoint-policy.mjs')).href);
+  patchEngineEndpointPolicy(engine, { verifyOnly: true });
+  const { patchEngineWatchControl } = await import(pathToFileURL(path.join(root, 'scripts/apply-engine-watch-control.mjs')).href);
+  patchEngineWatchControl(engine, { verifyOnly: true });
   const { verifyDriver } = await import(pathToFileURL(path.join(root, 'scripts/apply-storage-encryption.mjs')).href);
   verifyDriver(node, engine);
   verifyTor(path.join(runtime, 'tor'), manifest.platform, manifest.arch);

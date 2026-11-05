@@ -26,6 +26,10 @@ module.exports = async function verifyPackage(context) {
   if (JSON.parse(fs.readFileSync(path.join(engine, 'package.json'), 'utf8')).version !== '0.38.0') throw new Error('Wrong packaged engine version.');
   if (!fs.readFileSync(path.join(engine, 'dist/lightning/storage/sqlite-binding.js'), 'utf8').includes("require('./engine-storage.cjs').EncryptedDatabase")) throw new Error('Packaged engine is missing encrypted storage.');
   if (!fs.readFileSync(path.join(engine, 'dist/cli/restore.js'), 'utf8').includes('chicory-desktop-encrypted-restore-v1')) throw new Error('Packaged engine is missing encrypted database restore.');
+  const { patchEngineEndpointPolicy } = await import(pathToFileURL(path.join(context.packager.projectDir, 'scripts/apply-engine-endpoint-policy.mjs')).href);
+  patchEngineEndpointPolicy(engine, { verifyOnly: true });
+  const { patchEngineWatchControl } = await import(pathToFileURL(path.join(context.packager.projectDir, 'scripts/apply-engine-watch-control.mjs')).href);
+  patchEngineWatchControl(engine, { verifyOnly: true });
   const { verifyDriver } = await import(pathToFileURL(path.join(context.packager.projectDir, 'scripts/apply-storage-encryption.mjs')).href);
   verifyDriver(node, engine);
   verifyTor(path.join(resources, 'runtime/tor'), context.electronPlatformName, process.arch);

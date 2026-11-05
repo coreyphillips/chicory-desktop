@@ -634,6 +634,11 @@ function drainCoordinator({
 		},
 		get: (id) => publicInfo(find(id)),
 		list: () => records().map(publicInfo),
+		watchTargets: () => records().map(row => ({
+			address: row.address,
+			outpoints: [...(row.channelId ? [{ txid: row.fundingTxid, vout: row.fundingOutputIndex }] : []),
+				...row.coins.map(coin => ({ txid: coin.txid, vout: coin.vout }))],
+		})),
 		quote: (input = {}) =>
 			locked(async () => {
 				if (
