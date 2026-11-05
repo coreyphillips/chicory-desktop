@@ -142,7 +142,7 @@ two binaries in the lab command above to exercise both builds.
 | Competing confirmed spends | At height 103 an outpoint watch found one transaction on the initial branch. After a longer branch reached height 104, the same watch found zero and the funded wallet retained two canonical transactions. |
 | Parent and confirmed wallet recovery | The seven-patch candidate recovered the unwatched 105-byte height-1 coinbase that funded the watched spend. Two bounded owner sessions returned independent history. The miner's script had 103 entries at tip 102, 105 at tip 103 and 106 after the competing tip reached 104. All history and spendable outpoints matched independently decoded blocks. |
 | Historical verification after restart | A foreground sync from genesis verified through height 102. On reopen, independent replay reached its persisted height-102 accumulator. Truncating the saved replay certificate to seven bytes forced safe replay through the same anchor. That anchor stayed verified through the competing tips. |
-| Node data removal | An explicit Settings action on macOS APFS removed recognized managed data only while the cleanup helper held the node's exclusive lock. The funded wallet backup and node data have separate lifecycles. The native test also covered refusal of unrecognized files and links. |
+| Node data removal | An explicit Settings action removes recognized data on local macOS APFS or Linux ext4 while holding the same exclusive lock as the daemon. Native tests on both filesystems covered foreign owners, unknown files, symbolic links, hard links, interruption and restart. An unprivileged Linux arm64 run refused an overlay filesystem and a same-device bind mount. Linux requires kernel 5.8 or later with openat2, mount identity and readable kernel mountinfo. Windows requires manual removal after shutdown. |
 | Cold channel funding after full-backup restore | An empty node verified all 126 blocks mined by the independent Bitcoin Core fixture. Both the live channel counterparty and the restored recipient found the old 386,634 sat channel output at height 117 and the new 406,634 sat output at height 123. The restored recipient also recovered the 22,000 sat payer input at height 121 through its parent transaction. Both owners reported exactly two history rows and one current funding UTXO. Beignet kept the stale channel held or closed. |
 | Pending wallet reads on a controlled proof peer | The pinned Beignet client used an owner-bound TLS session to read the 29,000 sat pending receipt and its 25,000 sat replacement. It decoded and verified both transactions, received the script notification, recovered the same replacement on cold restart and checked its confirmation at height 105, position 1. |
 | Existing external Lightning backend | Eighteen checks passed in the complete suite, including direct funding, crash during submission, offline receipt, send max, drain, restart, on-chain recovery and full-backup restore. Iroh path inspection was skipped and seed-only live channel recovery is unsupported. |
@@ -156,6 +156,17 @@ seconds, and two wallet scans took 2.0 seconds. The test snapshot occupied
 2,217,205,149 bytes. The difference includes sparse chain store files.
 Sustained mainnet sync, peak disk use, peer diversity and recovery of a live
 channel from cold data require their own runs.
+
+The same twelve-patch history, fork and pending fixtures passed with both
+debug and optimized binaries. On the same Mac, validating the first 102
+regtest blocks took 33.4 seconds for the 62.0 MB debug daemon and 18.6
+seconds for the 17.7 MB optimized daemon. Two initial owner scans took
+1.03 seconds and 0.28 seconds respectively. In the generation that handled
+the longer fork, the largest interval between native status messages was
+13.96 seconds in the debug run and 2.00 seconds in the optimized run.
+A separate test deliberately paused the owned child, verified that wallet
+access was withdrawn, resumed the same child with fresh grants, then
+confirmed prolonged silence closed the control pipe after about 105 seconds.
 
 ## Qualify a locally observed pending transaction
 
@@ -227,16 +238,33 @@ The second command builds the proof index from those exact blocks, starts
 Floresta with empty chain and wallet caches and registers the two owners'
 actual watch snapshots. It compares transaction bytes, block anchors,
 funding history, Merkle proofs and balances with the independent Core chain.
-This exercise covers confirmed on-chain recovery for a funded splice. The
-guardian quorum, channel-close deadlines and safe wallet handoff require
-separate live fixtures.
+This exercise covers confirmed on-chain recovery for a funded splice. Guardian quorum and peer-storage recovery have separate funded and cold-scan fixtures in the [desktop qualification guide](desktop-qualification.md).
+
+## Catching up after a one-week block backlog
+
+On macOS arm64, a disposable regtest node stopped at height 102 after recording a 100,000 sat funding output. The proof peer mined 1,008 more blocks while the node was offline. A transaction at height 606 spent the original output and returned 31,000 sats to the watched script. Another paid it 47,000 sats at height 1,109. At tip 1,110 the same saved registration found all three transactions, with 1,009, 505 and two confirmations respectively. The verifier compared their exact bytes and active block positions with the peer and found two current outputs totaling 78,000 sats.
+
+On an Apple M5 Pro the optimized managed supervisor reached the verified tip and finished its saved watch scan in 34.46 seconds. During catch-up its two loopback P2P streams received 592,226 bytes and sent 106,605 bytes. Its node files used 67,203,072 allocated bytes before shutdown and 68,567,040 after catch-up. The counts cover the proof peer transport, including handshakes and historical wallet block retrieval. Filesystem allocation was measured with the node stopped. The fixture represents a week's expected block count on a local regtest chain with sparse wallet activity. Mainnet block sizes, peer bandwidth, calendar-time Lightning deadlines and hardware will affect other runs.
+
+The `--desktop` run exercised Chicory's source Electron app on a fresh profile. It accepted the regtest opt-in, quit the application, then reopened the same profile in a new process after the peer mined the backlog. The saved opt-in restarted the node automatically and recovered the same three payments from a single watch registration. From launch, reaching the verified tip took 34.848 seconds and checking all three transactions took 34.870 seconds. The two loopback connections received 588,952 bytes and sent 106,605. Node files grew by 1,363,968 allocated bytes. Both Electron processes exited successfully. The harness uses Electron's mock keychain and supplies the isolated proof peer through the existing settings test factory.
+
+```sh
+node scripts/qualification/floresta-offline-lab.mjs \
+  --utreexod /absolute/path/to/utreexod \
+  --digest "$CHICORY_FLORESTA_CANDIDATE_SHA256" --desktop
+```
 
 ## Before a wallet can switch
 
-The candidate's confirmed index passes the funded checks above. The remaining
-wallet-serving gates include peer coverage beyond the controlled regtest,
-production fee and broadcast policy, recovery across closes and breaches, qualification of
-mainnet checkpoint replay, a safe live Lightning transition and cold
-channel/guardian recovery. Production signing,
-platform qualification and sustained mainnet measurements also remain open.
+The release keeps the selected Electrum backend until all of the following
+wallet-serving gates have evidence.
+
+| Gate | Evidence still needed |
+| --- | --- |
+| Peer transactions and fees | A way to identify compatible public proof peers, receive funding and conflicts through disconnects, qualify delivery on those peers, and provide usable fee estimates or an explicit unavailable result. The private regtest bridge can prove only the transactions it observes. |
+| Automatic handoff and fallback consent | A durable engine admission check that covers payments, peer-initiated channel changes, splices, closes and recovery. Switch only at a safe lifecycle point, verify refresh and subscriptions, and honor external-server permission across failure and restart. |
+| Channel recovery | Qualify breach remedies and safe local wallet handoff through recovery. Cold native scans of guardian, peer-storage and stale full-backup wallets have been compared against Core. Close, HTLC and sweeper evidence is recorded separately. |
+| Distribution | Per-platform signed artifacts, installation checks, upgrade and rollback rules, and storage behavior on every supported filesystem. The macOS developer preview uses an ad hoc signature. |
+| Mainnet operation | Qualify historical checkpoint replay on mainnet and measure sustained sync, bandwidth, disk growth and recovery there. The local measurements above use controlled regtest chains. |
+
 [Floresta source contract](floresta-upstream.md) · [Beignet calls and Lightning dependencies](floresta-beignet.md)
