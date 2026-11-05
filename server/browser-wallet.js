@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { address: bitcoinAddress, networks, Transaction } = require('bitcoinjs-lib');
 const { electrumRequests } = require('./electrum-probe');
+const { createOfflineCapacity } = require('./offline-capacity');
 
 const MAX_SATS = 2100000000000000;
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -301,6 +302,9 @@ function mountBrowserWalletApi(app, manager, { drainActivity } = {}) {
   }));
   router.get('/receive/requests', handle(req => ({ requests: get(req.params.id).requests() })));
   router.get('/receive/onchain', handle(req => get(req.params.id).receipts(req.query.address)));
+  // How much one offline receive can take, which the daemon does not report.
+  const offlineReceive = createOfflineCapacity(manager);
+  router.get('/receive/offline', handle(req => offlineReceive(req.params.id)));
   router.post('/address/new', express.json({ limit: '64kb' }), handle(req => get(req.params.id).allocate(req.body)));
   router.post('/receive/requests', express.json({ limit: '64kb' }), handle(async req => ({ request: await get(req.params.id).register(req.body?.request) })));
   router.post('/channel/splice-out', express.json({ limit: '64kb' }), handle(req => get(req.params.id).submitSplice(req.body)));
