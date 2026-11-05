@@ -47,6 +47,7 @@ const {
 const fullBackup = require('./full-backup');
 const {
 	engineVersion,
+	drainAvailable,
 	recoveryAvailable,
 	lfbwAvailable,
 	jitQuoteAvailable,
@@ -217,6 +218,8 @@ class WalletManager {
 		this.irohSupported = irohAvailable();
 		// Electrum TLS certificate verification (beignet #1776, engine 0.31.0).
 		this.electrumTlsVerifySupported = electrumTlsVerifyAvailable();
+		// The routes the desktop drain drives (issue #29), probed on the bundle.
+		this.drainSupported = drainAvailable();
 		// Lightning-first setups in flight, one per wallet at a time.
 		this.lfbwSetupRunning = new Set();
 	}
@@ -819,6 +822,15 @@ class WalletManager {
 
 	fforAvailable() {
 		return this.fforSupported === true;
+	}
+
+	drainAvailable() {
+		return this.drainSupported === true;
+	}
+
+	/** Whether a wallet drain holds channelize back. The drain module replaces it. */
+	channelizeHeld() {
+		return false;
 	}
 
 	recoveryAvailable() {
@@ -3905,6 +3917,8 @@ class WalletManager {
 		const lf = rec.lfbw;
 		if (!rt.proc || !rt.healthy || rt.stopping) return null;
 		if (lf.setup !== 'ready' || !lf.primaryPubkey) return null;
+		// A wallet being emptied keeps its coins out of the channel it is closing.
+		if (this.channelizeHeld(id)) return null;
 		if (rt.lfbwBusy) return { action: 'busy' };
 		if (!force && Date.now() < rt.lfbwRetryAt) return null;
 		rt.lfbwBusy = true;
@@ -3985,6 +3999,8 @@ class WalletManager {
 				}
 				return decided(order);
 			}
+			// A drain that started while this pass was quoting owns the coins now.
+			if (this.channelizeHeld(id)) return null;
 			if (order.action === 'splice-in') {
 				this._log(id, `lightning-first: splicing ${order.body.amountSats} sats on-chain into the home channel`);
 				await this._daemonCall(rec, 'POST', '/channel/splice-in', order.body);

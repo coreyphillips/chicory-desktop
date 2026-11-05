@@ -8,7 +8,8 @@ const desktopNetwork = require('./desktop-network');
 const { WalletManager } = require('./wallet-manager');
 const { createAccessGuard } = require('./access-control');
 const { releaseUpstreamOnClose } = require('./proxy-release');
-const { mountBrowserWalletApi } = require('./browser-wallet');
+const { mountBrowserWalletApi, atomicSave } = require('./browser-wallet');
+const { createDesktopDrains } = require('./desktop-drain');
 const { createDesktopAccessGuard } = require('./desktop-access');
 const { createUpdateHold } = require('./update-hold');
 const { createSecureStore } = require('./secure-store');
@@ -66,9 +67,13 @@ async function startManager({
 		strict: (_req, _res, next) => next()
 	}) : createAccessGuard({ log: (m) => console.log(m) });
 	app.use(accessGuard);
+	// The wallet drain (issue #29) and its fence, mounted ahead of every other
+	// wallet route so a held wallet refuses new sends and receives.
+	const drains = createDesktopDrains(manager, { atomicSave });
+	drains.mount(app);
 	// Public request metadata and durable browser payment identities live on
 	// the host because the stock daemon does not implement the portable routes.
-	mountBrowserWalletApi(app, manager);
+	drains.useWallets(mountBrowserWalletApi(app, manager, { drainActivity: (id) => drains.activity(id) }));
 
 	// --- Reverse proxy to the per-wallet beignet daemons. Mounted BEFORE the
 	// JSON body parser so request bodies (e.g. POST /send) stream through intact.
@@ -229,7 +234,10 @@ async function startManager({
 				// it is offline through a settlement peer, probed on the bundle.
 				fforAvailable: manager.fforAvailable(),
 				concurrentOfflineReceiveAvailable: manager.concurrentOfflineReceiveAvailable(),
-				offlineReceiveAvailable: manager.offlineReceiveAvailable()
+				offlineReceiveAvailable: manager.offlineReceiveAvailable(),
+				// Settings > Empty wallet to an address (issue #29): the two-leg
+				// drain this manager serves when the bundled engine has its routes.
+				drainAvailable: manager.drainAvailable()
 			}
 		});
 	});
@@ -671,6 +679,7 @@ async function startManager({
 	const close = () => {
 		if (closePromise) return closePromise;
 		closing = true;
+		drains.close();
 		const httpClosed = new Promise((resolve) => server.close(resolve));
 		server.closeIdleConnections?.();
 		closePromise = (async () => {

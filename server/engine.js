@@ -118,6 +118,22 @@ function lfbwAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'openapi.js', LFBW_ROUTE_MARKERS);
 }
 
+// What the desktop drain drives (issue #29): a cooperative close quote and
+// close to an address, and a prepared, durable sweep of chosen coins.
+const DRAIN_ROUTE_MARKERS = [
+	"'POST /channel/close-quote'",
+	"'POST /channel/close'",
+	"'POST /onchain/sweep/prepare'",
+	"'POST /onchain/sweep/submit'",
+	"'POST /onchain/sweep/cancel'",
+	"'GET /onchain/sweep'"
+];
+
+/** True when the engine behind `bin` serves every route the desktop drain drives. */
+function drainAvailable(bin = process.env.BEIGNET_BIN) {
+	return probe(bin, 'daemon.js', DRAIN_ROUTE_MARKERS);
+}
+
 /** True when the engine behind `bin` quotes a JIT receive without an intent. */
 function jitQuoteAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'openapi.js', JIT_QUOTE_MARKERS);
@@ -179,6 +195,8 @@ function irohAvailable(bin = process.env.BEIGNET_BIN) {
 }
 
 module.exports = {
+	drainAvailable,
+	DRAIN_ROUTE_MARKERS,
 	irohAvailable,
 	concurrentOfflineReceiveAvailable,
 

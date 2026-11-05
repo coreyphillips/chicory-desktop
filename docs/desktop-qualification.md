@@ -33,11 +33,12 @@ CHICORY_ELECTRON_EXECUTABLE="release/mac-arm64/Chicory.app/Contents/MacOS/Chicor
 
 Without `CHICORY_ELECTRON_EXECUTABLE` the source checkout runs instead, which
 does not qualify a package. `CHICORY_QUALIFY_STAGES` selects stages:
-`preflight`, `payments`, `restart`, `crash`, `offline`, `drain`, `recovery`,
-`transport`. Results go to `artifacts/qualification/report.json` with host
-details, lockfile dependency versions, and a digest of the whole application
-plus each part that carries code under test (`app.asar`, `dist`, `server` and
-every `runtime/*` component, including the engine, Node and Tor).
+`preflight`, `payments`, `restart`, `crash`, `persistence`, `offline`, `max`,
+`drain`, `recovery`, `transport`, `backup`. Results go to
+`artifacts/qualification/report.json` with host details, lockfile dependency
+versions, and a digest of the whole application plus each part that carries
+code under test (`app.asar`, `dist`, `server` and every `runtime/*` component,
+including the engine, Node and Tor).
 
 `CHICORY_ELECTRON_ARGS` passes extra switches to the app. On a Mac that already
 holds a `Chicory Safe Storage` keychain item from another build, macOS asks
@@ -64,7 +65,8 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | crash | Freeze the peer so the payment cannot settle, then kill the whole process tree while the engine holds it as pending and the send has not returned. On reopen: one wallet with the same ID, exactly one settled outgoing row that agrees with the payee, the same invoice resubmitted through the manager refused or coming to nothing with the payee credited exactly once, the held receive request still saved and paid by the peer. Skipped on Windows, which has no SIGSTOP to freeze the peer |
 | persistence | Five small payments are sent to the wallet while the whole app is killed, so the engine's encrypted database and the manager's vault files are being written when it dies. On reopen the wallet opens intact, every payment settles one way or the other, and each payment the payer saw complete is credited exactly once |
 | offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary enables settlement. It also opens a channel to the wallet with nothing on the wallet's side, because the engine carries an offline receive only on such a channel unless concurrent receive is negotiated. Then: an offline request, saved with its offline flag, a full app quit, the peer pays, two reopenings, one credit and one row |
-| drain | Send-max quote. Where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain with each leg confirmed on chain, the later deposit retained |
+| max | A new wallet in the same app, funded only by a Lightning receive, so the primary opens its one channel just in time and waives its reserve. Send max over Lightning to an invoice with no amount keeps nothing back, the payee is credited and the wallet reaches zero |
+| drain | A new wallet in the same app with that one home channel and a coin below the channelize floor, confirmed in the wallet's own engine. A send-max quote, then, where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain (cooperative close and sweep, each confirmed on chain), the destination credited exactly the drained amount, the later deposit retained |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
 | transport | Records whether the bundled engine advertises Iroh |
 | backup | Full backup exported from the funded wallet, then made stale by a later payment. With the original app closed, it is restored into a fresh profile with its own keys. A wrong passphrase and a changed byte are refused and leave nothing. The restored wallet keeps its identity and history, every open channel is held (`restoreRecencyUnproven`), and a payment over it does not complete. Runs last, because the peer may close the channel when it meets the stale copy |
@@ -93,9 +95,6 @@ passed:
   diagnostics and relocks the app lock on suspend, but the harness cannot put
   the host to sleep, and a simulated event would not test the engine or Tor.
   Check this manually per platform.
-- Two-leg drain. The bundled engine's daemon has no `/drain` routes and the
-  manager implements none, so `/api/config` never advertises `drainAvailable`
-  and the stage records it as unsupported. Send max does work. Tracked in #29.
 - A crash at a chosen point inside one encrypted write. The persistence stage
   kills the app while payments are being written, which is not the same as
   stopping it between two specific writes.
