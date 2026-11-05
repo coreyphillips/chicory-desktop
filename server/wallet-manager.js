@@ -71,6 +71,13 @@ const netmode = require('./network-mode');
 
 const HEALTH_TIMEOUT_MS = 45000;
 const HEALTH_POLL_MS = 500;
+// How long an edit to a lightning-first wallet's primary waits, before it
+// answers, for the restarted daemon to be linked with its primary again.
+// The phone's engine reconnects before it answers, and the app reads the
+// connection right after the save; past this the save answers anyway and the
+// app says the wallet has not reconnected yet, which is then true.
+const PRIMARY_RELINK_WAIT_MS = 30000;
+const PRIMARY_RELINK_POLL_MS = 250;
 // A daemon holding for a guardian restore answers /health with 503 until
 // the restore runs, which can be never if nobody asks for it. The startup
 // poll keeps watching it at this pace instead of giving up; a local GET
@@ -1478,9 +1485,42 @@ class WalletManager {
 		this.registry.upsert(rec);
 
 		// Restart a running daemon so it comes up with the record as it is now:
-		// Electrum server, network mode, announced addresses, roles.
-		if (rt.proc) await this._restartWallet(id);
+		// Electrum server, network mode, announced addresses, roles. An edit to
+		// the primary answers once the wallet is linked with it again.
+		if (rt.proc) {
+			await this._restartWallet(id);
+			if (nextLfbw !== undefined && lfbw.isLfbw(rec)) await this._awaitPrimaryLink(id);
+		}
 		return this.publicRecord(id);
+	}
+
+	/**
+	 * Wait, at most PRIMARY_RELINK_WAIT_MS, for a restarted lightning-first
+	 * wallet to be linked with its primary again: the new daemon spawned and
+	 * healthy, and its post-start setup (trust, direct funding, the peer
+	 * connection) run. The restart answers well before that, on the desktop
+	 * before the daemon has even spawned, so a primary edit that answered at
+	 * the restart read as not reconnected every time, a moment before it was.
+	 * A start that fails or is stopped ends the wait, as does the deadline.
+	 */
+	async _awaitPrimaryLink(id, timeoutMs = PRIMARY_RELINK_WAIT_MS) {
+		const rt = this.runtimeState(id);
+		const deadline = Date.now() + timeoutMs;
+		const linked = () => rt.proc && rt.linksRestored && rt.linksRestored.proc === rt.proc;
+		while (!linked()) {
+			if (rt.stopping || this.shuttingDown || rt.status === 'error') return;
+			if (!rt.proc && !rt.spawning && !rt.startTask) return;
+			if (Date.now() >= deadline) return;
+			await new Promise((resolve) => setTimeout(resolve, PRIMARY_RELINK_POLL_MS));
+		}
+		let timer;
+		await Promise.race([
+			rt.linksRestored.done,
+			new Promise((resolve) => {
+				timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+			})
+		]);
+		clearTimeout(timer);
 	}
 
 	/** Kill a running daemon and start it again with the record as it is now. */
@@ -2968,8 +3008,16 @@ class WalletManager {
 	 * and die with the process, so they are re-applied on every start.
 	 */
 	async _onHealthy(id) {
-		await this._captureNodeId(id);
-		await this._restoreLfbwLinks(id);
+		const rt = this.runtimeState(id);
+		const links = (async () => {
+			await this._captureNodeId(id);
+			await this._restoreLfbwLinks(id);
+		})();
+		// What a primary edit waits on (_awaitPrimaryLink): this child's links,
+		// not the offline-receive return after them, which can wait on a
+		// channel for much longer.
+		rt.linksRestored = { proc: rt.proc, done: links.then(() => {}, () => {}) };
+		await links;
 		await this._fforReturn(id);
 	}
 
