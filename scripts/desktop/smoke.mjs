@@ -84,6 +84,19 @@ try {
   assert.deepEqual(preferences, { sandbox: true, contextIsolation: true, nodeIntegration: false });
   checks.push('Stable custom origin, sandbox, context isolation, no Node globals, narrow preload bridge');
 
+  // As the app opens it lands focus on the balance for a screen reader. With
+  // nothing pressed yet it must not wear a focus ring until the next click.
+  const focusNow = () => page.evaluate(() => ({
+    onBalance: !!document.activeElement?.closest('[data-testid="home-hero"]'),
+    ring: document.activeElement?.matches(':focus-visible') ?? false,
+  }));
+  assert.deepEqual(await focusNow(), { onBalance: true, ring: false }, 'The balance takes focus on launch without a ring');
+  await screenshot('desktop-launch');
+  await page.keyboard.press('Tab');
+  assert.equal((await focusNow()).ring, true, 'The keyboard still shows where focus is');
+  await page.evaluate(() => document.activeElement?.blur());
+  checks.push('The balance takes focus on launch without a focus ring, and the keyboard still shows one');
+
   await electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1320, 860));
   await page.waitForTimeout(600);
   await screenshot('desktop-home');
