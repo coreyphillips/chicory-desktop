@@ -112,9 +112,36 @@ for the chain read lock. The generated store used sparse preallocated files.
 For a maintainer reproduction, run the funded fork fixture, timestamp native
 status output before the desktop processes it and take a process stack sample
 during a gap. Compare a debug build and an optimized build on the same volume.
-The timings above describe the debug build. The filing question is whether a
+The lost connection in the earlier debug run was reproduced and timed: the
+supervisor reached its 15-second deadline 86 ms before the next valid height
+104 status. In a later comparison using the same funded fork fixture, the
+largest interval during the fork was 13.96 seconds in debug and 2.00 seconds
+in an optimized build. The filing question is whether a
 durable post-sync block commit can keep chain readers responsive while retaining
 the on-disk integrity checks. [Release checksum computation](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-chain/src/pruned_utreexo/flat_chain_store.rs#L789-L806)
+
+## Mainnet and signet share 215 fixed peer records
+
+The v0.9.1 mainnet file contains 222 distinct address and port pairs. The signet file contains 220. Exactly 215 records appear in both, including the same port (38333), service bits, last-connected time and state. The same records are present on development commit `be2574fc`. The seven mainnet-only entries advertise Utreexo service on port 8333 or 8433. These counts describe the bundled lists. Current peer availability requires separate measurement. [Pinned mainnet list](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/seeds/mainnet_seeds.json) · [Pinned signet list](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/seeds/signet_seeds.json) · [Development seed files](https://github.com/getfloresta/Floresta/tree/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-wire/seeds)
+
+The downstream patch removes the exact duplicates from mainnet and includes the Utreexo DNS seed from upstream PR 1094. Its native test uses Floresta's own address parser and compares both the address and port. It fails on the release data and passes with the corrected list. A separate in-memory transport test rejected a signet-magic header on a mainnet connection. Neither test dials a public peer. [Upstream DNS seed change](https://github.com/getfloresta/Floresta/pull/1094) · [Development chain parameters](https://github.com/getfloresta/Floresta/blob/be2574fc5e39a442ed3737de6b7deb825907c677/crates/floresta-chain/src/pruned_utreexo/chainparams.rs)
+
+Upstream issue 971 covered the reachability and advertised services of the seven Utreexo seed entries. Its closing comment records that a bridge was running again. PR 1287 added a signet DNS seed. The 215 identical static records persisted after both changes. [Issue 971](https://github.com/getfloresta/Floresta/issues/971) · [Signet seed PR 1287](https://github.com/getfloresta/Floresta/pull/1287)
+
+## SOCKS5 peer addresses in the pinned release
+
+A local duplex test captured the SOCKS5 greeting and CONNECT frame from v0.9.1.
+The IPv4 request passed. An IPv6 target and a domain both sent address type
+`01` (IPv4) ahead of their longer payloads. Closing the proxy before the
+greeting caused a panic. The release's peer-address adapter also passed raw
+BIP155 Tor and I2P bytes to the proxy as a domain. [Release handshake](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/src/p2p_wire/socks.rs) · [Release peer adapter](https://github.com/getfloresta/Floresta/blob/bc2db8d07e72651f9981ce589c5688f4d575dc7a/crates/floresta-wire/src/p2p_wire/transport.rs)
+
+The downstream fixture checks exact CONNECT bytes for IPv4, IPv6 and domain
+names, including synthetic Tor v3 and I2P names reconstructed from BIP155
+records. It covers valid and invalid domain lengths, a closed proxy and a
+refused request. All connections use in-memory test streams. Upstream already
+fixed the address type, greeting error and Tor v3 conversion on its
+development branch. [Upstream fix](https://github.com/getfloresta/Floresta/commit/a0bdfebcf4e9708f72eda3d93b7390ea72602267) · [BIP155 address encodings](https://github.com/bitcoin/bips/blob/master/bip-0155.mediawiki) · [Tor v3 checksum](https://spec.torproject.org/rend-spec/encoding-onion-addresses.html)
 
 ## Related upstream work
 

@@ -16,6 +16,9 @@
     "pending-transactions.patch",
     "managed-wallet-offers.patch",
     "managed-reorg-reads.patch",
-    "linux-ext4-removal.patch"
+    "linux-ext4-removal.patch",
+    "mainnet-discovery.patch",
+    "socks-peer-addresses.patch",
+    "managed-verified-prefix.patch"
   ]
 }
