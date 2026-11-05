@@ -11,6 +11,7 @@ const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, veri
 const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
 const { installFullBackupIpc } = require('./full-backup-ipc.cjs');
 const { candidateDigest, FlorestaSettings, installFlorestaIpc } = require('./floresta-settings.cjs');
+const { previewCandidate } = require('./floresta-preview.cjs');
 const { setWatchCollection, reconcileQualificationWatches } = require('./floresta-wallet-sync.cjs');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
@@ -28,9 +29,12 @@ const demo = process.argv.includes('--demo');
 // that need an empty first run (CHICORY_MANUAL_SETUP=1), load the page for
 // first-run setup instead, where Restore is offered.
 const SETUP_URL = `${APP_URL}?setup`;
-const manualSetup = process.env.CHICORY_MANUAL_SETUP === '1';
-app.setName('Chicory');
-const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), demo ? 'Chicory Desktop Demo' : 'Chicory Desktop');
+const metadata = app.isPackaged ? require('../package.json') : {};
+const preview = metadata.chicoryChannel === 'floresta-preview';
+const manualSetup = preview || process.env.CHICORY_MANUAL_SETUP === '1';
+app.setName(preview ? 'Chicory Floresta Preview' : 'Chicory');
+const profileName = (preview ? 'Chicory Floresta Preview' : 'Chicory Desktop') + (demo ? ' Demo' : '');
+const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), profileName);
 app.setPath('userData', profile);
 const locked = app.requestSingleInstanceLock();
 let window;
@@ -52,8 +56,10 @@ let quitting;
 const token = randomBytes(32).toString('hex');
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const runtime = path.join(root, app.isPackaged ? 'runtime' : '.runtime');
-const candidate = candidateDigest({ isPackaged: app.isPackaged, demo, digest: process.env.CHICORY_FLORESTA_CANDIDATE_SHA256 });
+const bundledCandidate = demo ? null : previewCandidate(metadata, root);
+const candidate = bundledCandidate?.sha256 || candidateDigest({ isPackaged: app.isPackaged, demo, digest: process.env.CHICORY_FLORESTA_CANDIDATE_SHA256 });
 const floresta = candidate ? new FlorestaSettings({ root, profile, digest: candidate,
+  ...(bundledCandidate ? { load: () => bundledCandidate } : {}),
   canCollect: () => !!manager?.connected && !!appLock && !appLock.required() && !stopping && !erasing,
   setCollection: (network, enabled) => setWatchCollection(manager, network, enabled),
   reconcile: (node, network, signal) => reconcileQualificationWatches({ node, network, manager, signal }),
@@ -72,9 +78,7 @@ const diagnosticRequests = new Map();
 const RELEASES = 'https://github.com/coreyphillips/chicory-desktop/releases';
 // electron-builder writes the channel into the packaged package.json. Source
 // checkouts and CI test packages are development builds and never update.
-const channel = (() => {
-  try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')).chicoryChannel; } catch {}
-})() === 'stable' && app.isPackaged ? 'stable' : 'development';
+const channel = metadata.chicoryChannel === 'stable' ? 'stable' : 'development';
 // An unreadable key list turns updates off. It must never stop Chicory opening.
 let updateKeys = [];
 if (channel === 'stable') {

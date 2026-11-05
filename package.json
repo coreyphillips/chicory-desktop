@@ -28,6 +28,7 @@
     "runtime:prepare": "node scripts/desktop/prepare-runtime.mjs",
     "runtime:prepare:floresta": "node scripts/desktop/prepare-floresta.mjs",
     "package": "npm run build && electron-builder --config build/electron-builder.yml --dir",
+    "package:floresta-preview": "npm run build && node scripts/desktop/package-floresta-preview.mjs",
     "dist": "npm run build && electron-builder --config build/electron-builder.yml --publish never",
     "postinstall": "node node_modules/electron/install.js"
   },
@@ -43,6 +44,8 @@
     "vite": "^7.2.2",
     "electron": "45.2.1",
     "electron-builder": "26.18.0",
+    "@electron/asar": "3.4.1",
+    "js-yaml": "4.3.2",
     "@playwright/test": "1.64.1",
     "@beignet/wallet-core": "github:coreyphillips/beignet-wallet-core#d1d83e2e173623fcbb5c44190ad265b9f13221e4",
     "@zxing/browser": "^0.1.5",
