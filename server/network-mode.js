@@ -15,6 +15,7 @@
  * (BEIGNET_TOR_PROXY_ONION_ONLY, beignet #963, engine 0.22.0).
  */
 const net = require('net');
+const { isIrohPrimary } = require('./lfbw');
 
 const MODES = ['tor', 'clearnet', 'hybrid'];
 const DEFAULT_MODE = 'hybrid';
@@ -209,8 +210,18 @@ function normalizeIroh(input, { existing, available = false, onchainOnly = false
 	return { enabled, ...(normalized?.length ? { relays: [...new Set(normalized)] } : {}) };
 }
 
+/**
+ * The daemon's Iroh env. The opt-in listener is the wallet's own `iroh`
+ * block. A lightning-first wallet whose primary is an Iroh link needs the
+ * endpoint as well, because the engine dials Iroh only through it; that one
+ * runs as the phone runs it, discovery off on the default relays, so nothing
+ * about the wallet is published and only a peer given its address reaches it.
+ */
 function irohEnv(rec, available) {
-	if (!available || rec.onchainOnly || rec.iroh?.enabled !== true) return {};
+	if (!available || rec.onchainOnly) return {};
+	if (rec.iroh?.enabled !== true) {
+		return isIrohPrimary(rec.lfbw) ? { BEIGNET_IROH: 'true', BEIGNET_IROH_DISCOVERY: 'false' } : {};
+	}
 	return {
 		BEIGNET_IROH: 'true',
 		BEIGNET_IROH_DISCOVERY: rec.iroh.relays?.length ? 'false' : 'true',

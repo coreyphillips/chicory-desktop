@@ -34,11 +34,72 @@ function normalize(input, extra = {}) {
 	});
 }
 
-test('parseNodeUri takes pubkey@host:port and nothing else', () => {
+test('parseNodeUri takes pubkey@host:port', () => {
 	const parsed = lfbw.parseNodeUri(`${PK.toUpperCase()}@node.example:9735`);
 	assert.deepEqual(parsed, { pubkey: PK, host: 'node.example', port: 9735, uri: `${PK}@node.example:9735` });
-	for (const bad of ['', 'abc', `${PK}@host`, `${PK}@host:0`, `${PK}@host:70000`, `zz@host:9735`]) {
-		assert.throws(() => lfbw.parseNodeUri(bad), /pubkey@host:port|1\.\.65535/, bad);
+	assert.deepEqual(lfbw.parseNodeUri(`${PK}@[::1]:9735`), { pubkey: PK, host: '::1', port: 9735, uri: `${PK}@[::1]:9735` });
+	for (const bad of ['', 'abc', `${PK}@host`, `${PK}@host:0`, `${PK}@host:70000`, `zz@host:9735`, `04${'ab'.repeat(32)}@host:9735`]) {
+		assert.throws(() => lfbw.parseNodeUri(bad), /public key@host:port|between 1 and 65535/, bad);
+	}
+});
+
+// The shape a phone pairs with: an Iroh endpoint id and the relay it sits
+// on, here the public n0 relay with its fully qualified trailing dot.
+const ENDPOINT = '8e'.repeat(32);
+const RELAY = 'https://use1-1.relay.n0.iroh.link./';
+const IROH_URI = `${PK2}@iroh:${ENDPOINT}?relay=${encodeURIComponent(RELAY)}`;
+const ONION = 'a'.repeat(56) + '.onion';
+
+test('parseNodeUri takes the Iroh link the phone accepts, relay and all', () => {
+	assert.equal(IROH_URI, `${PK2}@iroh:${ENDPOINT}?relay=https%3A%2F%2Fuse1-1.relay.n0.iroh.link.%2F`);
+	assert.deepEqual(lfbw.parseNodeUri(`  ${PK2.toUpperCase()}@IROH:${ENDPOINT.toUpperCase()}?relay=${encodeURIComponent(RELAY)}  `), {
+		pubkey: PK2,
+		host: ENDPOINT,
+		port: 0,
+		transport: { type: 'iroh', endpointId: ENDPOINT, relayUrl: RELAY },
+		uri: IROH_URI
+	});
+	assert.deepEqual(lfbw.parseNodeUri(`${PK2}@iroh:${ENDPOINT}`), {
+		pubkey: PK2,
+		host: ENDPOINT,
+		port: 0,
+		transport: { type: 'iroh', endpointId: ENDPOINT },
+		uri: `${PK2}@iroh:${ENDPOINT}`
+	});
+	assert.equal(
+		lfbw.parseNodeUri(`${PK2}@iroh:r2hi5duor2hi5duor2hi5duor2hi5duor2hi5duor2hi5duor2ha`).uri,
+		`${PK2}@iroh:${ENDPOINT}`,
+		'a base32 endpoint id is the same endpoint in hex'
+	);
+	for (const bad of [
+		`${PK2}@iroh:`,
+		`${PK2}@iroh:${'8e'.repeat(31)}`,
+		`${PK2}@iroh:${ENDPOINT}?relay=${encodeURIComponent(RELAY)}&relay=${encodeURIComponent(RELAY)}`,
+		`${PK2}@iroh:${ENDPOINT}?via=${encodeURIComponent(RELAY)}`,
+		`${PK2}@iroh:${ENDPOINT}?relay=${encodeURIComponent('ftp://relay.example/')}`,
+		`${PK2}@iroh:${ENDPOINT}?relay=${encodeURIComponent('https://user:pw@relay.example/')}`
+	]) {
+		assert.throws(() => lfbw.parseNodeUri(bad), /Iroh|relay/i, bad);
+	}
+});
+
+test('an Iroh primary may fall back to an onion for the same node key, and nothing else may', () => {
+	const iroh = lfbw.parseNodeUri(IROH_URI);
+	assert.equal(lfbw.parsePrimaryFallback(iroh, ''), undefined);
+	assert.equal(lfbw.parsePrimaryFallback(iroh, null), undefined);
+	assert.deepEqual(lfbw.parsePrimaryFallback(iroh, `${PK2}@${ONION}:9735`), {
+		pubkey: PK2,
+		host: ONION,
+		port: 9735,
+		uri: `${PK2}@${ONION}:9735`
+	});
+	for (const [primary, fallback] of [
+		[iroh, `${PK}@${ONION}:9735`],
+		[iroh, `${PK2}@lsp.example:9735`],
+		[iroh, IROH_URI],
+		[lfbw.parseNodeUri(`${PK2}@lsp.example:9735`), `${PK2}@${ONION}:9735`]
+	]) {
+		assert.throws(() => lfbw.parsePrimaryFallback(primary, fallback), /onion address for the same primary node key/, fallback);
 	}
 });
 
@@ -90,7 +151,52 @@ test('an external primary is a node URI, trusted for zero-conf unless declined, 
 	assert.equal(normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735`, trusted: false }).trusted, false);
 	assert.throws(
 		() => normalize({ enabled: true, primaryUri: 'garbage' }),
-		(err) => err.code === 'BAD_LFBW_PEER' && /pubkey@host:port/.test(err.message)
+		(err) => err.code === 'BAD_LFBW_PEER' && /public key@host:port/.test(err.message)
+	);
+});
+
+test('an external Iroh primary is stored with its onion fallback, and refused by an engine without Iroh', () => {
+	const block = normalize({ enabled: true, primaryUri: IROH_URI }, { irohAvailable: true });
+	assert.equal(block.mode, 'external');
+	assert.equal(block.primaryUri, IROH_URI);
+	assert.equal(block.primaryPubkey, PK2);
+	assert.equal(block.primaryFallbackUri, null);
+	assert.equal(lfbw.isIrohPrimary(block), true);
+	assert.equal(lfbw.isIrohPrimary(normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735` })), false);
+	assert.equal(lfbw.isIrohPrimary(normalize({ enabled: true, primaryWalletId: 'p1' })), false);
+
+	const withFallback = normalize(
+		{ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: `${PK2}@${ONION}:9735` },
+		{ irohAvailable: true }
+	);
+	assert.equal(withFallback.primaryFallbackUri, `${PK2}@${ONION}:9735`);
+	// An edit naming the same primary and no fallback keeps the stored one;
+	// null clears it, and a different primary does not inherit it.
+	const kept = normalize({ enabled: true, primaryUri: IROH_URI, trusted: false }, { irohAvailable: true, existing: withFallback });
+	assert.equal(kept.primaryFallbackUri, `${PK2}@${ONION}:9735`);
+	const cleared = normalize(
+		{ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: null },
+		{ irohAvailable: true, existing: withFallback }
+	);
+	assert.equal(cleared.primaryFallbackUri, null);
+	const moved = normalize(
+		{ enabled: true, primaryUri: `${PK2}@iroh:${'9f'.repeat(32)}` },
+		{ irohAvailable: true, existing: withFallback }
+	);
+	assert.equal(moved.primaryFallbackUri, null);
+
+	const refused = (input, extra) =>
+		assert.throws(() => normalize(input, extra), (err) => err.status === 400 && err.code === 'BAD_LFBW_PEER');
+	refused({ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: `${PK}@${ONION}:9735` }, { irohAvailable: true });
+	refused({ enabled: true, primaryUri: `${PK2}@lsp.example:9735`, primaryFallbackUri: `${PK2}@${ONION}:9735` }, { irohAvailable: true });
+	assert.throws(
+		() => normalize({ enabled: true, primaryUri: IROH_URI }, { irohAvailable: false }),
+		(err) => err.status === 400 && err.code === 'IROH_UNSUPPORTED'
+	);
+	assert.equal(
+		normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735` }, { irohAvailable: false }).primaryUri,
+		`${PK2}@lsp.example:9735`,
+		'a TCP primary needs no Iroh'
 	);
 });
 
@@ -259,6 +365,16 @@ test('the direct-funding policy names the primary as liquidity peer and relay, s
 	);
 });
 
+test('an Iroh primary is signed in as the relay only through its onion fallback', () => {
+	const bare = lfbw.directFundingConfig({ mode: 'external', trusted: true }, { pubkey: PK2, relayHost: null, relayPort: 0 });
+	assert.equal(bare.lspPubkey, PK2);
+	assert.equal('lspHost' in bare, false, 'the engine fails the call on a null host, so the key is left out');
+	assert.equal('lspPort' in bare, false);
+	const fallback = lfbw.directFundingConfig({ mode: 'external', trusted: true }, { pubkey: PK2, relayHost: ONION, relayPort: 9735 });
+	assert.equal(fallback.lspHost, ONION);
+	assert.equal(fallback.lspPort, 9735);
+});
+
 
 test('a payer reaches the wallet at its public address, else its onion, else not directly at all', () => {
 	assert.deepEqual(lfbw.walletReach({ onionAddress: 'abcd.onion:9101', listenPort: 9101 }), { host: 'abcd.onion', port: 9101 });
@@ -331,6 +447,7 @@ test('an open order sweeps the quoted max into a channel with the primary, zero-
 	const internal = lfbw.channelizeOrder({ action: 'open' }, { txQuote: { maxSendSats: 48000 }, feeNormal: 7, mode: 'internal', trusted: true, primary });
 	assert.deepEqual(internal, {
 		action: 'open',
+		path: '/channel/connect-and-open',
 		body: { pubkey: PK, host: '127.0.0.1', port: 9101, amountSats: 48000, satsPerVbyte: 7, max: true, trusted: true }
 	});
 	const untrusted = lfbw.channelizeOrder({ action: 'open' }, { txQuote: { maxSendSats: 48000 }, feeNormal: 0, mode: 'internal', trusted: false, primary });
@@ -368,6 +485,31 @@ test('an external primary is first asked to sell inbound in a dual-funded open, 
 		{ txQuote: { maxSendSats: 30000 }, feeNormal: 7, mode: 'external', blockHeight: 500, primary }
 	);
 	assert.equal(small.action, 'open', 'too small to buy inbound alongside: a plain open');
+});
+
+test('an Iroh primary opens on the live connection, having no host and port to dial', () => {
+	const primary = {
+		pubkey: PK2,
+		connectHost: ENDPOINT,
+		connectPort: 0,
+		transport: { type: 'iroh', endpointId: ENDPOINT, relayUrl: RELAY }
+	};
+	const plain = lfbw.channelizeOrder(
+		{ action: 'open' },
+		{ txQuote: { maxSendSats: 30000 }, feeNormal: 7, mode: 'external', trusted: true, blockHeight: 500, primary }
+	);
+	assert.deepEqual(plain, {
+		action: 'open',
+		path: '/channel/open',
+		body: { pubkey: PK2, amountSats: 30000, satsPerVbyte: 7, max: true }
+	});
+	const v2 = lfbw.channelizeOrder(
+		{ action: 'open' },
+		{ txQuote: { maxSendSats: 200000 }, feeNormal: 7, mode: 'external', trusted: true, blockHeight: 500, primary }
+	);
+	assert.equal(v2.action, 'open-v2');
+	assert.equal(v2.fallback.path, '/channel/open');
+	assert.deepEqual(v2.fallback.body, { pubkey: PK2, amountSats: 200000, satsPerVbyte: 7, max: true });
 });
 
 test('a wait target passes through an order unchanged', () => {

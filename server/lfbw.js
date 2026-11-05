@@ -12,7 +12,8 @@
  * sending to a bitcoin address is a splice-out of the home channel. The
  * primary is either a sibling wallet under this manager (internal, paired
  * both ways, zero-conf by default) or an external node given as
- * pubkey@host:port.
+ * pubkey@host:port or as the Iroh link pubkey@iroh:<endpoint-id>?relay=<url>,
+ * which the phone pairs with too (primary-uri.js).
  *
  * Numbers here are the prototype's, kept because they were exercised on a
  * live regtest pair: a channel below 20k sats trips common peer minimums, a
@@ -20,7 +21,7 @@
  * the rough funding fee margin a wallet must hold beyond the amount.
  */
 
-const NODE_URI_RE = /^([0-9a-fA-F]{66})@([^:\s]+):(\d+)$/;
+const { parsePrimaryUri, parsePrimaryFallback } = require('./primary-uri');
 
 // On-chain funds below this wait; at or above it they move into the home
 // channel once every UTXO has confirmed.
@@ -134,14 +135,16 @@ function httpError(status, code, message) {
 	return err;
 }
 
-/** `pubkey@host:port` to its parts, or throws naming what is wrong. */
-function parseNodeUri(input) {
-	const uri = String(input || '').trim();
-	const m = uri.match(NODE_URI_RE);
-	if (!m) throw new Error('External node URI must be pubkey@host:port');
-	const port = parseInt(m[3], 10);
-	if (!(port >= 1 && port <= 65535)) throw new Error('External node port must be 1..65535');
-	return { pubkey: m[1].toLowerCase(), host: m[2], port, uri: `${m[1].toLowerCase()}@${m[2]}:${port}` };
+/**
+ * A node URI to its parts, or throws naming what is wrong. An Iroh primary
+ * comes back with port 0, its endpoint id as the host, and a `transport`
+ * the daemon dials it by; a TCP one has no `transport`.
+ */
+const parseNodeUri = parsePrimaryUri;
+
+/** Whether a lightning-first block's primary is reached over Iroh. */
+function isIrohPrimary(lf) {
+	return !!(lf && lf.enabled && lf.mode === 'external' && /^[^@]+@iroh:/i.test(lf.primaryUri || ''));
 }
 
 function isLfbw(rec) {
@@ -154,7 +157,7 @@ function isLfbw(rec) {
  * (setup state, the one-time initial open) when the primary is unchanged so
  * an edit that only touches trust does not re-run a first open.
  */
-function normalizeLfbw(input, { network, selfId, getRecord, available, existing } = {}) {
+function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, existing } = {}) {
 	if (!input || !input.enabled) return null;
 	if (!available) {
 		throw httpError(
@@ -206,16 +209,36 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, existing 
 		};
 	} else {
 		let parsed;
+		let fallback;
 		try {
 			parsed = parseNodeUri(input.primaryUri);
+			// The onion an Iroh primary falls back to, for the same node key.
+			// An edit that names the same primary without a fallback keeps the
+			// one already stored; null clears it.
+			fallback = parsePrimaryFallback(
+				parsed,
+				input.primaryFallbackUri !== undefined
+					? input.primaryFallbackUri
+					: existing && parsed.uri === existing.primaryUri
+						? existing.primaryFallbackUri
+						: undefined
+			);
 		} catch (err) {
 			throw httpError(400, 'BAD_LFBW_PEER', err.message);
+		}
+		if (parsed.transport && parsed.transport.type === 'iroh' && !irohAvailable) {
+			throw httpError(
+				400,
+				'IROH_UNSUPPORTED',
+				'The bundled engine does not support Iroh, so it cannot reach this primary node.'
+			);
 		}
 		block = {
 			enabled: true,
 			mode: 'external',
 			primaryWalletId: null,
 			primaryUri: parsed.uri,
+			primaryFallbackUri: fallback ? fallback.uri : null,
 			primaryPubkey: parsed.pubkey,
 			// The wallet's trust toward its primary is what lets the primary's
 			// zero-conf channel (a JIT open) be used the moment the payment
@@ -459,13 +482,18 @@ function providerRoleChanged(spawnedEnv, rec) {
 function directFundingConfig(lf, primary, { allowSpliceSupported = true } = {}) {
 	const cfg = {
 		lspPubkey: primary.pubkey,
-		lspHost: primary.relayHost,
-		lspPort: primary.relayPort,
 		// Internal pairs buy no inbound alongside (JIT covers it for free);
 		// an external primary is asked to sell the default target.
 		targetInboundSat: lf.mode === 'external' ? DEFAULT_INBOUND_SATS : 0,
 		trusted: lf.trusted === true
 	};
+	// The relay is a TCP address a payer dials. An Iroh primary has one only
+	// through its onion fallback; without it the keys are left out, since
+	// the engine reads a null host as a string and fails the whole call.
+	if (primary.relayHost && primary.relayPort > 0) {
+		cfg.lspHost = primary.relayHost;
+		cfg.lspPort = primary.relayPort;
+	}
 	if (allowSpliceSupported) {
 		cfg.allowSplice = true;
 		cfg.allowUnpairedSplice = true;
@@ -572,18 +600,24 @@ function channelizeOrder(
 		if (!amount || amount < MIN_CHANNEL_SATS) return { action: 'wait', reason: 'quote-too-small' };
 		const feeWait = feeTooHigh(amount, txQuote.feeSats, force);
 		if (feeWait) return feeWait;
-		const open = {
-			pubkey: primary.pubkey,
-			host: primary.connectHost,
-			port: primary.connectPort,
-			amountSats: amount,
-			satsPerVbyte,
-			max: true,
-			// Zero-conf is explicit opt-in per open: a paired internal primary
-			// negotiates option_zeroconf so the channel is usable at broadcast;
-			// an external primary that does not trust us would reject the type.
-			trusted: mode === 'internal' && trusted === true
-		};
+		// connect-and-open dials by host and port, which an Iroh primary does
+		// not have: the manager connects it over Iroh first and opens on the
+		// live connection instead. Its open is never zero-conf, being external.
+		const openPath = primary.transport ? '/channel/open' : '/channel/connect-and-open';
+		const open = primary.transport
+			? { pubkey: primary.pubkey, amountSats: amount, satsPerVbyte, max: true }
+			: {
+				pubkey: primary.pubkey,
+				host: primary.connectHost,
+				port: primary.connectPort,
+				amountSats: amount,
+				satsPerVbyte,
+				max: true,
+				// Zero-conf is explicit opt-in per open: a paired internal primary
+				// negotiates option_zeroconf so the channel is usable at broadcast;
+				// an external primary that does not trust us would reject the type.
+				trusted: mode === 'internal' && trusted === true
+			};
 		if (mode === 'external') {
 			const requested = Math.min(amount, DEFAULT_INBOUND_SATS);
 			const leaseFeeCeil =
@@ -598,11 +632,11 @@ function channelizeOrder(
 						requestFunds: { requestedSats: requested, blockheight: blockHeight },
 						maxLeaseRates: { ...MAX_LEASE_RATES }
 					},
-					fallback: { action: 'open', body: open }
+					fallback: { action: 'open', path: openPath, body: open }
 				};
 			}
 		}
-		return { action: 'open', body: open };
+		return { action: 'open', path: openPath, body: open };
 	}
 	return target;
 }
@@ -621,7 +655,6 @@ function feeTooHigh(amountSats, feeSats, force) {
 }
 
 module.exports = {
-	NODE_URI_RE,
 	CHANNELIZE_FLOOR_SATS,
 	CHANNELIZE_FEE_MULTIPLE,
 	MIN_CHANNEL_SATS,
@@ -642,6 +675,8 @@ module.exports = {
 	swapsEnv,
 	OPERATOR_PASSTHROUGH,
 	parseNodeUri,
+	parsePrimaryFallback,
+	isIrohPrimary,
 	isLfbw,
 	normalizeLfbw,
 	previousPrimaryAfterEdit,

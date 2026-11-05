@@ -1328,6 +1328,7 @@ class WalletManager {
 			selfId,
 			existing,
 			available: this.lfbwAvailable(),
+			irohAvailable: this.irohAvailable(),
 			getRecord: (id) => this.registry.get(id)
 		});
 	}
@@ -3184,7 +3185,9 @@ class WalletManager {
 	 * The primary as something to connect to and to sign into requests. An
 	 * internal primary is reached on loopback inside this container, and
 	 * payers off-box reach it at its public address or its onion, whichever it
-	 * announces (walletReach picks); an external primary is its URI.
+	 * announces (walletReach picks); an external primary is its URI. An Iroh
+	 * primary carries the transport the daemon dials it by, with its onion
+	 * fallback inside, and has a relay for payers only through that onion.
 	 */
 	async _primaryEndpoint(lf) {
 		if (lf.mode === 'internal') {
@@ -3217,14 +3220,55 @@ class WalletManager {
 			};
 		}
 		const parsed = lfbw.parseNodeUri(lf.primaryUri);
+		if (!parsed.transport) {
+			return {
+				pubkey: parsed.pubkey,
+				connectHost: parsed.host,
+				connectPort: parsed.port,
+				relayHost: parsed.host,
+				relayPort: parsed.port,
+				rec: null
+			};
+		}
+		const fallback = lfbw.parsePrimaryFallback(parsed, lf.primaryFallbackUri);
 		return {
 			pubkey: parsed.pubkey,
 			connectHost: parsed.host,
-			connectPort: parsed.port,
-			relayHost: parsed.host,
-			relayPort: parsed.port,
+			connectPort: 0,
+			transport: fallback
+				? { ...parsed.transport, fallbackOnion: { host: fallback.host, port: fallback.port } }
+				: parsed.transport,
+			relayHost: fallback ? fallback.host : null,
+			relayPort: fallback ? fallback.port : 0,
 			rec: null
 		};
+	}
+
+	/**
+	 * Connect a wallet's daemon to its primary: by host and port, or over Iroh
+	 * by endpoint id and relay, falling back to the onion when one is set. An
+	 * already-connected peer can make /peer/connect complain; that is success
+	 * by another name, so the live peer list is checked before it counts as a
+	 * failure.
+	 */
+	async _connectPrimary(rec, primary) {
+		const t = primary.transport;
+		const body = t
+			? {
+				pubkey: primary.pubkey,
+				transport: 'iroh',
+				endpointId: t.endpointId,
+				...(t.relayUrl ? { relayUrl: t.relayUrl } : {}),
+				...(t.fallbackOnion ? { fallbackOnion: t.fallbackOnion } : {})
+			}
+			: { pubkey: primary.pubkey, host: primary.connectHost, port: primary.connectPort };
+		try {
+			await this._daemonCall(rec, 'POST', '/peer/connect', body);
+		} catch (err) {
+			const peers = await this._daemonCall(rec, 'GET', '/peers').catch(() => []);
+			const connected = (peers || []).some((p) => p.pubkey === primary.pubkey);
+			if (!connected) throw err;
+		}
 	}
 
 	/**
@@ -3299,20 +3343,7 @@ class WalletManager {
 				lfbw.directFundingConfig(lf, primary, { allowSpliceSupported: this.lfbwAvailable() })
 			);
 
-			// An already-connected peer can make /peer/connect complain; that
-			// is success by another name, so check the live peer list before
-			// treating it as a failure.
-			try {
-				await this._daemonCall(rec, 'POST', '/peer/connect', {
-					pubkey: primary.pubkey,
-					host: primary.connectHost,
-					port: primary.connectPort
-				});
-			} catch (err) {
-				const peers = await this._daemonCall(rec, 'GET', '/peers').catch(() => []);
-				const connected = (peers || []).some((p) => p.pubkey === primary.pubkey);
-				if (!connected) throw err;
-			}
+			await this._connectPrimary(rec, primary);
 
 			if (primary.rec && lf.initialChannelSats > 0 && !lf.initialChannelOpened) {
 				this._log(
@@ -3965,6 +3996,7 @@ class WalletManager {
 			const feeNormal = fees && fees.normal > 0 ? fees.normal : 0;
 			const perkw = lfbw.perkwFromSatVb(feeNormal > 0 ? feeNormal : 2);
 			let order;
+			let primary = null;
 			if (target.action === 'splice-in') {
 				const spliceQuote = await this._daemonCall(rec, 'POST', '/channel/splice-quote', {
 					channelId: target.channelId,
@@ -3978,7 +4010,7 @@ class WalletManager {
 					max: true,
 					channelFunding: true
 				}).catch(() => null);
-				const primary = await this._primaryEndpoint(lf);
+				primary = await this._primaryEndpoint(lf);
 				const info = lf.mode === 'external' ? await this._daemonCall(rec, 'GET', '/info').catch(() => null) : null;
 				order = lfbw.channelizeOrder(target, {
 					txQuote,
@@ -4024,7 +4056,10 @@ class WalletManager {
 				}
 			}
 			this._log(id, `lightning-first: moving ${order.body.amountSats} sats on-chain into a new channel with the primary`);
-			await this._daemonCall(rec, 'POST', '/channel/connect-and-open', order.body);
+			// A plain open rides the live connection, so an Iroh primary that
+			// dropped since setup is dialed again first.
+			if (order.path === '/channel/open') await this._connectPrimary(rec, primary);
+			await this._daemonCall(rec, 'POST', order.path || '/channel/connect-and-open', order.body);
 			return decided({ action: 'open', amountSats: order.body.amountSats });
 		} catch (err) {
 			rt.lfbwRetryAt = Date.now() + lfbw.CHANNELIZE_RETRY_MS;

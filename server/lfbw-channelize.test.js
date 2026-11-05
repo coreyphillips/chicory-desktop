@@ -178,6 +178,46 @@ test('an external primary is asked to sell inbound first, then opened to plainly
 	assert.match(m.logs.find((l) => /inbound purchase failed/.test(l)), /sells no liquidity/);
 });
 
+test('an Iroh primary is dialed again over Iroh, then opened to on that connection', async () => {
+	const PK_X = '02' + '33'.repeat(32);
+	const endpoint = '8e'.repeat(32);
+	const relay = 'https://use1-1.relay.n0.iroh.link./';
+	const { m } = harness({
+		lf: {
+			mode: 'external',
+			primaryWalletId: null,
+			primaryUri: `${PK_X}@iroh:${endpoint}?relay=${encodeURIComponent(relay)}`,
+			primaryPubkey: PK_X,
+			trusted: true
+		},
+		answers: {
+			'w1 GET /balance': { onchain: 200000 },
+			'w1 GET /utxos': confirmed,
+			'w1 GET /channels': [],
+			'w1 GET /fees/estimates': { normal: 7 },
+			'w1 POST /tx/quote': { maxSendSats: 200000 },
+			'w1 POST /channel/open-v2': new Error('peer sells no liquidity')
+		}
+	});
+	const outcome = await m._lfbwChannelize('w1');
+	assert.equal(outcome.action, 'open', outcome.error);
+	const seq = m.calls.filter((c) => c.method === 'POST').map((c) => c.path);
+	assert.deepEqual(seq, ['/tx/quote', '/channel/open-v2', '/peer/connect', '/channel/open']);
+	assert.deepEqual(m.calls.find((c) => c.path === '/peer/connect').body, {
+		pubkey: PK_X,
+		transport: 'iroh',
+		endpointId: endpoint,
+		relayUrl: relay
+	});
+	assert.deepEqual(m.calls.find((c) => c.path === '/channel/open').body, {
+		pubkey: PK_X,
+		amountSats: 200000,
+		satsPerVbyte: 7,
+		max: true
+	});
+	assert.equal(m.calls.some((c) => c.path === '/channel/connect-and-open'), false, 'there is no host and port to dial');
+});
+
 test('a dual-funded open that succeeds is a decision of its own, and "move now" reports it', async () => {
 	const PK_X = '02' + '33'.repeat(32);
 	const { m } = harness({

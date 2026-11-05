@@ -430,3 +430,23 @@ test('Iroh is isolated per wallet, independent of network mode and never enabled
 	manager.irohSupported = false;
 	assert.equal(manager._daemonEnv(rec({ iroh: { enabled: true } }), PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
 });
+
+test('a lightning-first wallet whose primary is an Iroh link gets the endpoint it dials by, as the phone runs it', () => {
+	const manager = bareManager();
+	manager.irohSupported = true;
+	const pk = '02' + '33'.repeat(32);
+	const lf = (primaryUri) => ({ enabled: true, mode: 'external', primaryWalletId: null, primaryUri, primaryPubkey: pk });
+	const iroh = rec({ lfbw: lf(`${pk}@iroh:${'8e'.repeat(32)}?relay=${encodeURIComponent('https://use1-1.relay.n0.iroh.link./')}`) });
+	const env = manager._daemonEnv(iroh, PATHS, 'seed words', 'token');
+	assert.equal(env.BEIGNET_IROH, 'true');
+	assert.equal(env.BEIGNET_IROH_DISCOVERY, 'false', 'nothing about the wallet is published');
+	assert.equal(env.BEIGNET_IROH_RELAYS, undefined, 'the default relays, as on the phone');
+	// The opt-in listener keeps its own settings when both apply.
+	const both = manager._daemonEnv({ ...iroh, iroh: { enabled: true, relays: ['https://relay.example/'] } }, PATHS, 'seed words', 'token');
+	assert.equal(both.BEIGNET_IROH_RELAYS, 'https://relay.example/');
+	assert.equal(manager._daemonEnv(rec({ lfbw: lf(`${pk}@lsp.example:9735`) }), PATHS, 'seed words', 'token').BEIGNET_IROH, undefined, 'a TCP primary needs no Iroh');
+	assert.equal(manager._daemonEnv({ ...iroh, lfbw: { ...iroh.lfbw, enabled: false } }, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
+	assert.equal(manager._daemonEnv({ ...iroh, onchainOnly: true }, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
+	manager.irohSupported = false;
+	assert.equal(manager._daemonEnv(iroh, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
+});
