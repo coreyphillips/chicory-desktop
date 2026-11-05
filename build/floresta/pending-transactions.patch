@@ -1,0 +1,114 @@
+diff --git a/crates/floresta-node/src/florestad.rs b/crates/floresta-node/src/florestad.rs
+--- a/crates/floresta-node/src/florestad.rs
++++ b/crates/floresta-node/src/florestad.rs
+@@ -563,7 +563,7 @@
+                     let status = serde_json::json!({
+                         "protocol": "chicory.floresta/1", "watchProtocol": "chicory.watch/1",
+                         "transactionProtocol": "chicory.tx/1", "confirmedReadsProtocol": "chicory.confirmed/1",
+-                        "pendingProtocol": "chicory.pending/1",
++                        "pendingProtocol": "chicory.pending/1", "pendingTransactionProtocol": "chicory.pending-tx/1",
+                         "network": network.to_string(),
+                         "historical": historical.snapshot(height, validated, chain.is_in_ibd(), |at| chain.get_block_hash(at).ok()),
+                         "endpoint": endpoint.to_string(), "genesis": genesis.to_string(),
+diff --git a/crates/floresta-node/src/managed_watch.rs b/crates/floresta-node/src/managed_watch.rs
+--- a/crates/floresta-node/src/managed_watch.rs
++++ b/crates/floresta-node/src/managed_watch.rs
+@@ -223,7 +223,7 @@
+             owner.reconcile(chain)?;
+             return confirmed::page(owner, chain, query);
+         }
+-        if request.action == "transaction" {
++        if matches!(request.action.as_str(), "transaction" | "pending-transaction") {
+             if !request.scripts.is_empty()
+                 || !request.outpoints.is_empty()
+                 || !request.descriptors.is_empty()
+@@ -236,6 +236,9 @@
+                 return Ok(json!({"phase":"unavailable"}));
+             };
+             owner.reconcile(chain)?;
++            if request.action == "pending-transaction" {
++                return self.pool.lock().map_err(storage)?.transaction(owner, chain, txid, offset);
++            }
+             return owner.transaction(chain, txid, offset);
+         }
+         if request.txid.is_some() || request.offset.is_some() {
+diff --git a/crates/floresta-node/src/managed_watch/pending.rs b/crates/floresta-node/src/managed_watch/pending.rs
+--- a/crates/floresta-node/src/managed_watch/pending.rs
++++ b/crates/floresta-node/src/managed_watch/pending.rs
+@@ -333,6 +333,76 @@
+         );
+         self.revision += 1;
+         Ok(())
++    }
++
++    pub(super) fn transaction(
++        &mut self,
++        owner: &Owner,
++        chain: &impl BlockchainInterface,
++        txid: Txid,
++        offset: u32,
++    ) -> Result<Value> {
++        use bitcoin::hex::DisplayHex;
++        self.reconcile(chain);
++        let unavailable = || json!({"phase":"unavailable"});
++        let Some(tip) = self.anchor else {
++            return Ok(unavailable());
++        };
++        if owner.cursor != Some(tip) || owner.unavailable || owner.has_missing_parents()? {
++            return Ok(unavailable());
++        }
++        let Some(entry) = self.entries.get(&txid) else {
++            return Ok(unavailable());
++        };
++        // A direct pending parent can be needed for a wallet spend. Broader
++        // ancestry and unrelated pending transactions stay outside this grant.
++        let relevant = |id: Txid, e: &Entry| {
++            e.tx.input.iter().zip(&e.inputs).any(|(i, o)| {
++                owner.watches.outpoints.contains(&i.previous_output)
++                    || owner.watches.scripts.contains(&o.script_pubkey)
++            }) || e.tx.output.iter().enumerate().any(|(vout, o)| {
++                owner.watches.scripts.contains(&o.script_pubkey)
++                    || owner
++                        .watches
++                        .outpoints
++                        .contains(&OutPoint::new(id, vout as u32))
++            })
++        };
++        if !relevant(txid, entry)
++            && !(0..entry.tx.output.len()).any(|vout| {
++                self.spent
++                    .get(&OutPoint::new(txid, vout as u32))
++                    .is_some_and(|child| {
++                        self.entries.get(child).is_some_and(|e| relevant(*child, e))
++                    })
++            })
++        {
++            return Ok(unavailable());
++        }
++        let size = entry.tx.total_size();
++        if offset as usize >= size || offset % super::REPLY_BYTES != 0 {
++            return Err("Invalid transaction offset.");
++        }
++        let raw = bitcoin::consensus::serialize(&entry.tx);
++        let end = (offset as usize + super::REPLY_BYTES as usize).min(size);
++        let chunk = raw[offset as usize..end].to_lower_hex_string();
++        let height = if entry
++            .tx
++            .input
++            .iter()
++            .any(|i| self.entries.contains_key(&i.previous_output.txid))
++        {
++            -1
++        } else {
++            0
++        };
++        if !active(chain, tip) {
++            return Ok(unavailable());
++        }
++        Ok(
++            json!({"phase":"observed-transaction","coverageComplete":false,"txid":txid,"wtxid":entry.tx.compute_wtxid(),
++            "tipHeight":tip.0,"tipHash":tip.1,"revision":self.revision,"height":height,"fee":entry.fee,"size":size,"offset":offset,"chunk":chunk}),
++        )
+     }
+ 
+     pub(super) fn page(

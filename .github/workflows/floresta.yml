@@ -50,17 +50,20 @@ jobs:
           $vs = & $vswhere -version '[17.0,18.0)' -latest -property installationPath
           if (!$vs) { throw 'Visual Studio 2022 with C++ build tools is required.' }
           $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
-          $prefix = Join-Path $env:RUNNER_TEMP 'boost-install'
+          # Stage generates Boost::headers against the verified source tree.
+          # Installing would copy every header again via individual commands.
+          $prefix = Join-Path $env:RUNNER_TEMP 'boost-stage'
           @(
             "call `"$devcmd`" -arch=x64",
             'if errorlevel 1 exit /b 1',
             'call bootstrap.bat vc143',
             'if errorlevel 1 exit /b 1',
-            "b2.exe --with-system --prefix=`"$prefix`" install"
+            "b2.exe --with-system variant=release --stagedir=`"$prefix`" stage"
           ) | Set-Content -Encoding ascii install-headers.cmd
           & .\install-headers.cmd
           if ($LASTEXITCODE -ne 0) { throw 'Boost installation failed.' }
           Pop-Location
+          if (!(Test-Path "$prefix/lib/cmake/boost_headers-1.85.0/boost_headers-config.cmake")) { throw 'Boost headers were not staged.' }
           "CMAKE_PREFIX_PATH=$prefix" >> $env:GITHUB_ENV
           "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
       - name: Compile the pinned candidate

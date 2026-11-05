@@ -10,6 +10,9 @@
     "backfill-validation.patch",
     "managed-parents.patch",
     "managed-removal.patch",
-    "confirmed-reads.patch"
+    "confirmed-reads.patch",
+    "managed-tx-relay.patch",
+    "managed-pending.patch",
+    "pending-transactions.patch"
   ]
 }
