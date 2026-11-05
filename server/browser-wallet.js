@@ -264,7 +264,7 @@ class BrowserWallet {
   }
 }
 
-function mountBrowserWalletApi(app, manager) {
+function mountBrowserWalletApi(app, manager, { drainActivity } = {}) {
   const stores = new Map();
   const get = id => {
     const record = manager.registry.get(id);
@@ -281,7 +281,11 @@ function mountBrowserWalletApi(app, manager) {
     return stores.get(id);
   };
   const handle = operation => (req, res, next) => Promise.resolve().then(() => operation(req)).then(result => { res.setHeader('Cache-Control', 'no-store'); res.json({ ok: true, result }); }).catch(next);
-  app.get('/api/wallets/:id/activity', handle(req => get(req.params.id).activity()));
+  // A wallet drain's rows come first, as the portable runtime lists them.
+  app.get('/api/wallets/:id/activity', handle(async req => [
+    ...(drainActivity ? await drainActivity(req.params.id) : []),
+    ...await get(req.params.id).activity(),
+  ]));
   const router = express.Router({ mergeParams: true });
   // Beignet 0.36.1 documents outgoing amountSats as the rounded total debit.
   // Name that wire meaning explicitly. A future engine must be verified
@@ -301,6 +305,7 @@ function mountBrowserWalletApi(app, manager) {
   router.post('/receive/requests', express.json({ limit: '64kb' }), handle(async req => ({ request: await get(req.params.id).register(req.body?.request) })));
   router.post('/channel/splice-out', express.json({ limit: '64kb' }), handle(req => get(req.params.id).submitSplice(req.body)));
   app.use('/wallets/:id/api', router);
+  return get;
 }
 
 module.exports = { BrowserWallet, mountBrowserWalletApi, atomicSave };

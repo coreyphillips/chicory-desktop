@@ -28,7 +28,7 @@ const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
 // backup runs last: restoring a stale copy of the node may lead its peer to
 // close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'drain', 'recovery', 'transport', 'backup'];
+const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
 for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
@@ -508,24 +508,68 @@ try {
     }
   }
 
+  // The max and drain stages each take a wallet of their own in the same app,
+  // funded only by a Lightning receive as a new wallet usually is: one home
+  // channel, opened by the primary. The subject's channels after payments (one
+  // it opened itself, one just-in-time) are not a shape either stage is about.
+  const channelsOf = async id => (await (await subject.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;
+  const freshWallet = async label => {
+    const made = await subject.client().createWallet({ name: `Qualify ${label} ${run}`, network: 'regtest', primaryUri, electrum });
+    assertRegtestWallets(await subject.api('/wallets'));
+    await healthy(subject.api.bind(subject), made.id);
+    const client = subject.client(made.id);
+    const incoming = await client.receive(await client.quoteReceive({ amountSats: 30000, description: `qualify ${label}` }));
+    checkSent(`payer pays the ${label} wallet`, await payer.send(await payer.prepareSend({ request: incoming.bolt11 })));
+    await until(`${label} wallet's just-in-time receive settled`, mining(() => client.getReceiveStatus(incoming)), status => status.phase === 'completed');
+    const channels = await channelsOf(made.id);
+    assert.ok(channels.length === 1 && channels[0].isOpener === false, `The primary opened the ${label} wallet's only channel`);
+    return { id: made.id, client, channel: channels[0] };
+  };
+
+  if (stages.has('max')) {
+    // The primary waives the reserve of a wallet it opens a just-in-time
+    // channel to, so send max over Lightning keeps nothing back.
+    const maxed = await freshWallet('max');
+    assert.equal(maxed.channel.localReserveWaived, true, 'The primary waived the wallet reserve');
+    const invoice = await payer.receive(await payer.quoteReceive({ description: 'qualify max out' }));
+    const quote = await maxed.client.quoteMax({ request: invoice.bolt11 });
+    assert.equal(quote.keptSats, 0, `Send max keeps nothing back (kept ${quote.keptSats}, ${quote.keptReason})`);
+    const sent = checkSent('send max', await maxed.client.send(await maxed.client.prepareSend({ request: invoice.bolt11, max: true })));
+    await until('payee credited', () => payer.getReceiveStatus(invoice), status => status.phase === 'completed');
+    const emptied = await until('max wallet emptied', () => maxed.client.snapshot(), snap => snap.balance.totalSats === 0);
+    record.pass('Lightning send max emptied a wallet funded by a Lightning receive', {
+      reserveWaived: maxed.channel.localReserveWaived, quote, sent: sent.status, balance: emptied.balance,
+    });
+  }
+
   if (stages.has('drain')) {
     const destination = rpc('getnewaddress');
-    const max = await wallet().quoteMax({ request: destination });
-    record.pass('send max quoted', max);
+    // Its home channel, and a coin below the channelize floor that stays loose.
+    const drained = await freshWallet('drain');
+    const loose = await fundWallet(drained.client, 10000);
+    // The review covers the coins the wallet's own engine lists, which can trail
+    // what Electrum already shows. Wait for the engine.
+    await until('loose coin confirmed in the wallet', mining(async () => (await (await subject.fetch(`/wallets/${encodeURIComponent(drained.id)}/api/utxos`)).json()).result),
+      coins => coins.some(coin => coin.txid === loose.txid && coin.height > 0));
+    record.pass('send max quoted', await drained.client.quoteMax({ request: destination }));
     if ((await subject.api('/config')).drainAvailable !== true) {
       record.unsupported('two-leg drain', 'The manager does not advertise drainAvailable, so the wallet refuses to prepare a drain');
     } else {
-      const review = await wallet().prepareDrain({ address: destination });
-      const late = await fundWallet(wallet(), 7000, false);
-      const result = await wallet().send(review);
-      const drain = await until('two-leg drain completes', async () => { gate.mine(1); return wallet().getDrain(result.drain?.requestId ?? review.drain?.requestId); },
+      const review = await drained.client.prepareDrain({ address: destination });
+      // A coin that arrives after the review, at an address the wallet already watches.
+      const late = { txid: gate.fund(loose.address, 7000) };
+      const result = await drained.client.send(review);
+      const requestId = result.drain?.requestId ?? review.drain?.requestId;
+      const drain = await until('two-leg drain completes', async () => { gate.mine(1); return drained.client.getDrain(requestId); },
         progress => progress.phase === 'completed', 300000);
-      const after = await until('late deposit kept', () => wallet().snapshot(), snap => snap.balance.totalSats >= 7000);
-      assert.ok(after.balance.totalSats < 7000 + 1000, 'Only the later deposit remains');
+      const after = await until('late deposit kept', () => drained.client.snapshot(), snap => snap.balance.totalSats >= 7000);
+      assert.ok(after.balance.totalSats < 7000 + 1000, `Only the later deposit remains: ${JSON.stringify({ balance: after.balance, drain, channels: await channelsOf(drained.id) })}`);
       assert.ok(drain.txids?.length >= 2, 'Both drain legs have confirmed transaction references');
       for (const txid of drain.txids) assert.ok(rpc('getrawtransaction', txid, true).confirmations > 0, `Drain leg ${txid} confirmed`);
+      const receivedSats = Math.round(rpc('getreceivedbyaddress', destination, 1) * 1e8);
+      assert.equal(receivedSats, drain.amountSats, 'The destination received what the drain reports');
       state.drain = drain;
-      record.pass('two-leg drain completed, later deposit excluded', { drain, lateDeposit: late.txid, remainingSats: after.balance.totalSats });
+      record.pass('two-leg drain completed, later deposit excluded', { drain, lateDeposit: late.txid, loose: loose.txid, receivedSats, remainingSats: after.balance.totalSats });
     }
   }
 

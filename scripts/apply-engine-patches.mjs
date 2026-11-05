@@ -35,6 +35,26 @@ const RESPONSES = [
 ];
 const once = (text, needle) => text.split(needle).length === 2;
 
+// The daemon builds every node as a zero-reserve primary, which never accepts
+// its primary's reserve waiver. A desktop wallet is a client like Chicory
+// mobile, whose engine builds its node as a wallet: without the waiver the
+// home channel keeps a reserve (546 sats at least) that Lightning can never
+// send, so send max stopped short of zero. A daemon that is a primary, one
+// that waives its clients' reserve or sells JIT receives, keeps its role.
+export const ORIGINAL_ZERO_RESERVE = `            zeroReserve: {
+                role: 'primary',
+                advertise: opts.waiveClientReserve === true,
+                waiveClientReserve: opts.waiveClientReserve === true
+            },`;
+export const WALLET_ZERO_RESERVE = `            // chicory-host-zero-reserve-v1: a wallet accepts its primary's reserve waiver.
+            zeroReserve: opts.waiveClientReserve === true || opts.jitReceive?.enabled === true
+                ? {
+                    role: 'primary',
+                    advertise: opts.waiveClientReserve === true,
+                    waiveClientReserve: opts.waiveClientReserve === true
+                }
+                : { role: 'wallet', advertise: true, waiveClientReserve: false },`;
+
 /** Patch an installed package or an isolated copy, never a source checkout. */
 export function patchEngine(directory) {
   const root = path.resolve(directory);
@@ -45,14 +65,24 @@ export function patchEngine(directory) {
   const daemonPath = path.join(root, 'dist/cli/daemon.js');
   const node = fs.readFileSync(nodePath, 'utf8');
   const daemon = fs.readFileSync(daemonPath, 'utf8');
-  if (once(node, FRESH_METHOD) && once(daemon, FRESH_ROUTE) && RESPONSES.every(([, replacement]) => once(daemon, replacement))) return { changed: false, version: packageInfo.version };
-  if (node.includes('chicory-host-fresh-address-v1') || daemon.includes('chicory-host-fresh-address-v1') || !once(node, ORIGINAL_METHOD) || !once(daemon, ORIGINAL_ROUTE) || !RESPONSES.every(([original]) => once(daemon, original)))
+  // Each patch is either already applied exactly once or applies to its
+  // reviewed original exactly once. Both are checked before anything is written.
+  const freshDone = once(node, FRESH_METHOD) && once(daemon, FRESH_ROUTE) && RESPONSES.every(([, replacement]) => once(daemon, replacement));
+  if (!freshDone && (node.includes('chicory-host-fresh-address-v1') || daemon.includes('chicory-host-fresh-address-v1') || !once(node, ORIGINAL_METHOD) || !once(daemon, ORIGINAL_ROUTE) || !RESPONSES.every(([original]) => once(daemon, original))))
     throw new Error('The engine source shape does not match the reviewed fresh-address patch. No files were changed.');
-  const nodePatched = node.replace(ORIGINAL_METHOD, ORIGINAL_METHOD + FRESH_METHOD);
-  let daemonPatched = daemon.replace(ORIGINAL_ROUTE, FRESH_ROUTE);
-  for (const [original, replacement] of RESPONSES) daemonPatched = daemonPatched.replace(original, replacement);
+  const reserveDone = once(node, WALLET_ZERO_RESERVE) && !node.includes(ORIGINAL_ZERO_RESERVE);
+  if (!reserveDone && (node.includes('chicory-host-zero-reserve-v1') || !once(node, ORIGINAL_ZERO_RESERVE)))
+    throw new Error('The engine source shape does not match the reviewed zero-reserve patch. No files were changed.');
+  if (freshDone && reserveDone) return { changed: false, version: packageInfo.version };
+  let nodePatched = freshDone ? node : node.replace(ORIGINAL_METHOD, ORIGINAL_METHOD + FRESH_METHOD);
+  if (!reserveDone) nodePatched = nodePatched.replace(ORIGINAL_ZERO_RESERVE, WALLET_ZERO_RESERVE);
+  let daemonPatched = daemon;
+  if (!freshDone) {
+    daemonPatched = daemonPatched.replace(ORIGINAL_ROUTE, FRESH_ROUTE);
+    for (const [original, replacement] of RESPONSES) daemonPatched = daemonPatched.replace(original, replacement);
+  }
   fs.writeFileSync(nodePath, nodePatched);
-  fs.writeFileSync(daemonPath, daemonPatched);
+  if (daemonPatched !== daemon) fs.writeFileSync(daemonPath, daemonPatched);
   return { changed: true, version: packageInfo.version };
 }
 
@@ -60,5 +90,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const directory = process.argv[2];
   if (!directory) throw new Error('Usage: node scripts/apply-engine-patches.mjs /path/to/installed/beignet');
   const result = patchEngine(directory);
-  console.log(`Beignet ${result.version} host fresh-address patch ${result.changed ? 'applied' : 'already present'}.`);
+  console.log(`Beignet ${result.version} host fresh-address and zero-reserve patches ${result.changed ? 'applied' : 'already present'}.`);
 }
