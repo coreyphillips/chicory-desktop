@@ -485,6 +485,14 @@ try {
       await until('primary opens a channel to the wallet', () => peer.call(`/wallets/${primary.id}/api/channel/open`, { pubkey: nodeId, amountSats: 150000 }));
       await until('the primary-opened channel is usable', mining(listChannels), list => Array.isArray(list) &&
         list.some(channel => channel.state === 'NORMAL' && channel.htlcUsable && channel.localBalanceSats === 0 && channel.remoteBalanceSats >= OFFLINE_SATS + 50000), 240000);
+      // The Receive screen says how much an offline receive can take, and the
+      // engine agrees: that much is quoted, one sat more is refused.
+      const cap = (await until('offline receive capacity reported', () => wallet().snapshot(),
+        value => value.balance.offlineReceivableSats > 0)).balance.offlineReceivableSats;
+      const atCap = await until('an offline quote at the reported capacity', () => wallet().quoteReceive({ amountSats: cap, mode: 'offline' }));
+      const over = await wallet().quoteReceive({ amountSats: cap + 1, mode: 'offline' }).then(() => null, error => error);
+      assert.ok(over, `An offline receive over the reported ${cap} sats is refused`);
+      record.pass('offline receive capacity reported, quoted in full and refused one sat over', { cap, quoted: atCap.amountSats, over: over.code ?? over.message });
       const quote = await until('settlement provider quotes offline receive', () => wallet().quoteReceive({ amountSats: OFFLINE_SATS, mode: 'offline', description: 'qualify offline' }))
         .catch(async error => { throw new Error(`${error.message}; channels ${JSON.stringify((await listChannels()).map(channel => ({ state: channel.state,
           usable: channel.htlcUsable, local: channel.localBalanceSats, remote: channel.remoteBalanceSats })))}`); });
