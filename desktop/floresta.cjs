@@ -211,7 +211,13 @@ class ManagedFloresta {
   async confirmedTransaction(owner, txid) {
     const watch = this.watch;
     if (!watch?.active || !watch.transactionsActive) throw new Error('The running local node does not support confirmed transaction proofs.');
-    return readConfirmedTransaction(command => watch.request(command), owner, txid);
+    const lifetime = watch.lifetime.signal;
+    return readConfirmedTransaction(async command => {
+      lifetime.throwIfAborted();
+      const result = await watch.request(command);
+      lifetime.throwIfAborted();
+      return result;
+    }, owner, txid);
   }
   openConfirmedWallet(owner, signal) {
     return openConfirmedWallet(this.watch, owner, signal, () => this.status());
@@ -221,8 +227,9 @@ class ManagedFloresta {
     if (!watch?.active || !Number.isSafeInteger(height) || height < 0 || height > tip?.tipHeight ||
         this.state.tipHash !== tip?.tipHash || this.state.height !== tip?.tipHeight || !this.state.tipSynced ||
         this.state.historicalVerification !== 'verified') return null;
+    const lifetime = watch.lifetime.signal;
     const [before, header, after] = await watch.headers([tip.tipHeight, height, tip.tipHeight]);
-    if (!watch.active || this.watch !== watch || this.state.tipHash !== tip.tipHash || headerHash(before) !== tip.tipHash || before !== after ||
+    if (lifetime.aborted || !watch.active || this.watch !== watch || this.state.tipHash !== tip.tipHash || headerHash(before) !== tip.tipHash || before !== after ||
         (height === 0 && headerHash(header) !== NETWORKS[this.options.network][1]) ||
         (height === tip.tipHeight && header !== before)) return null;
     return header;
@@ -302,6 +309,7 @@ class ManagedFloresta {
     const stop = () => {
       if (stopping) return;
       stopping = true;
+      clearTimeout(watchdog);
       watch.close(failure || cancelled());
       connection.abort();
       child.stdin.destroy(); // Close the OS pipe, including Windows. EOF releases the child.
@@ -309,7 +317,11 @@ class ManagedFloresta {
       // On a slow disk this can exceed the normal heartbeat deadline.
       killTimer = setTimeout(() => child.kill('SIGKILL'), 60000);
     };
-    const fail = error => { failure = error; stop(); };
+    const fail = error => {
+      if (stopping) return;
+      failure = error;
+      stop();
+    };
     const watch = new WatchRequests(line => child.stdin.write(line, error => {
       if (error && !stopping) fail(new Error('The private local node control pipe closed.'));
     }), fail);
@@ -317,7 +329,17 @@ class ManagedFloresta {
     this.watch = watch;
     const heartbeat = () => {
       clearTimeout(watchdog);
-      watchdog = setTimeout(() => fail(new Error('The local node stopped reporting its chain state.')), first ? 60000 : 15000);
+      const timedOut = () => fail(new Error('The local node stopped reporting its chain state.'));
+      if (first) { watchdog = setTimeout(timedOut, 60000); return; }
+      watchdog = setTimeout(() => {
+        // A chain store flush can block reads during a reorg. Withdraw every
+        // wallet lease immediately and give the same child a bounded recovery
+        // interval. A later heartbeat must establish the endpoint and store anew.
+        const recoveryMs = 90000;
+        watch.suspend(new Error('The local node is waiting for fresh chain data.'), recoveryMs);
+        this._state('waiting-for-tip');
+        watchdog = setTimeout(timedOut, recoveryMs);
+      }, 15000);
     };
     // The bounded status channel carries only observations. It never authorizes
     // an Electrum endpoint switch, work submission or a wallet refresh.
@@ -327,14 +349,16 @@ class ManagedFloresta {
       endpoint = state.port;
       if (checking) return;
       checking = true;
+      const recovering = watch.lifetime.signal.aborted;
       try {
-        if (first) await verifyElectrum(endpoint, network, connection.signal);
-        if (first || ++sequence % 5 === 0) {
+        if (first || recovering) await verifyElectrum(endpoint, network, connection.signal);
+        if (first || recovering || ++sequence % 5 === 0) {
           const current = await privateDirectory(dir);
           if (current.dev !== identity.dev || current.ino !== identity.ino) throw new Error('The local node storage volume changed.');
           await checkSpace(dir);
         }
-        if (stopping || signal.aborted) return;
+        if (stopping || signal.aborted || (!recovering && watch.lifetime.signal.aborted)) return;
+        if (recovering) watch.lifetime = new AbortController();
         first = false;
         watch.active = message.watchProtocol === PROTOCOL;
         watch.transactionsActive = message.transactionProtocol === 'chicory.tx/1';

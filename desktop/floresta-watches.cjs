@@ -85,6 +85,11 @@ class WatchRequests {
     }
     const failed = Object.hasOwn(reply, 'error');
     if (failed && typeof reply.error !== 'string') throw new Error('Invalid local node watch error.');
+    if (req.retired) {
+      clearTimeout(req.timer);
+      this.requests.delete(reply.id);
+      return;
+    }
     const validate = req.command.action === 'broadcast'
       ? (command, value) => {
           if (value?.phase !== 'relayed' || value.txid !== command.txid || value.tipHash !== command.offer.tip) {
@@ -100,6 +105,19 @@ class WatchRequests {
     this.requests.delete(reply.id);
     if (failed) req.reject(new Error('The local node refused this watch request.'));
     else req.resolve(result);
+  }
+  suspend(reason, drainMs) {
+    this.active = false;
+    this.lifetime.abort();
+    // The child may have executed a request before its tip became unavailable.
+    // Drain the known reply ID exactly once and never retry its operation.
+    for (const req of this.requests.values()) {
+      if (req.retired) continue;
+      req.retired = true;
+      clearTimeout(req.timer);
+      req.timer = setTimeout(() => this.fail(new Error('The local node did not finish its previous control request.')), drainMs);
+      req.reject(reason);
+    }
   }
   close(reason) {
     this.active = false;

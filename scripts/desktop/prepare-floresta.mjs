@@ -13,7 +13,7 @@ const recipe = path.join(root, 'build', 'floresta');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const name = process.platform === 'win32' ? 'florestad.exe' : 'florestad';
 
-async function build({ archive, debug }) {
+async function build({ archive, debug, test }) {
   const pin = JSON.parse(await fs.readFile(path.join(recipe, 'source.json'), 'utf8'));
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-build-'));
   try {
@@ -44,6 +44,14 @@ async function build({ archive, debug }) {
     execFileSync('cargo', ['build', '--locked', '--bin', 'florestad', '--no-default-features',
       '--features', 'compact-filters', '--target-dir', target, ...(debug ? [] : ['--release'])],
       { cwd: source, stdio: 'inherit' });
+    if (test) {
+      // Exercise the patched storage, consensus, wire, Electrum and managed
+      // control crates against the same source, features and build profile.
+      execFileSync('cargo', ['test', '--locked', '--lib', '--no-default-features',
+        '-p', 'floresta-chain', '-p', 'floresta-wire', '-p', 'floresta-electrum', '-p', 'floresta-node',
+        '--features', 'floresta-node/compact-filters,floresta-chain/flat-chainstore,floresta-chain/bitcoinkernel',
+        '--target-dir', target, ...(debug ? [] : ['--release'])], { cwd: source, stdio: 'inherit' });
+    }
     const built = path.join(target, profile, name);
     const digest = sha256(await fs.readFile(built));
     const parent = path.join(root, '.runtime', 'floresta-candidates', process.platform + '-' + process.arch);
@@ -73,5 +81,5 @@ async function build({ archive, debug }) {
   }
 }
 
-const { values } = parseArgs({ options: { archive: { type: 'string' }, debug: { type: 'boolean' } } });
+const { values } = parseArgs({ options: { archive: { type: 'string' }, debug: { type: 'boolean' }, test: { type: 'boolean' } } });
 console.log(await build(values));

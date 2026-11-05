@@ -26,6 +26,10 @@ async function fixture(t, { invalidMessage, wrongHeader, silent, watches, storag
   const profileDirectory = await mkdtemp(path.join(os.tmpdir(), 'chicory-floresta-supervisor-'));
   const binary = path.join(profileDirectory, 'fixture.bin');
   await writeFile(binary, 'public fixture', { mode: 0o700 });
+  // Resolve the physical parent before spawning. Windows temporary paths can
+  // contain 8.3 aliases, even when the native path names the same directory.
+  const root = await fs.promises.realpath(storageDirectory || profileDirectory);
+  const expectedDirectory = path.join(root, 'chicory-floresta', 'regtest');
   const children = [];
   const options = {
     profileDirectory, storageDirectory, network: 'regtest', binary, sha256: digest('public fixture'),
@@ -33,7 +37,10 @@ async function fixture(t, { invalidMessage, wrongHeader, silent, watches, storag
       assert.equal(file, binary);
       assert.deepEqual(Object.keys(config.env).sort(), ['APPDATA', 'HOME', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE',
         ...(process.platform === 'win32' ? ['SystemRoot'] : [])].sort());
-      assert(config.env.HOME.startsWith(fs.realpathSync(storageDirectory || profileDirectory) + path.sep));
+      assert.equal(config.cwd, expectedDirectory);
+      for (const key of ['APPDATA', 'HOME', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'USERPROFILE']) {
+        assert.equal(config.env[key], expectedDirectory);
+      }
       assert.deepEqual(args, ['--managed-stdio', '--data-dir', config.cwd, '--network', 'regtest', '--assume-valid', '0', '--disable-dns-seeds']);
       const js = `
         const net = require('node:net');
@@ -148,6 +155,60 @@ test('a running child crash retries twice and then requires explicit action', as
   }
   await waitFor(() => node.status().phase === 'failed');
   assert.equal(children.length, 3); assert.equal(node.status().height, null);
+});
+
+test('a slow flush preserves the original control failure after its heartbeat deadline', async t => {
+  const { node, children } = await fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await node.start();
+  children[0].stdout.emit('data', 'invalid control message\n');
+  t.mock.timers.tick(16000);
+  await node.task;
+  assert.equal(node.status().phase, 'failed');
+  assert.match(node.status().error, /invalid control message/);
+});
+
+test('a missing chain heartbeat revokes old wallet reads and bounds recovery on the same pipe', async t => {
+  const { options, children } = await fixture(t, { watches: true });
+  let heartbeat;
+  const node = new ManagedFloresta({ ...options, spawnProcess(...args) {
+    const child = options.spawnProcess(...args);
+    child.stdout.once('data', text => { heartbeat = JSON.parse(text); });
+    return child;
+  } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await node.start();
+  t.after(() => node.stop());
+  const watch = node.watch;
+  const owner = 'a1'.repeat(32);
+  watch.transactionsActive = true;
+  watch.confirmedReadsActive = true;
+  const old = node.openConfirmedWallet(owner, new AbortController().signal);
+  const oldSignal = watch.lifetime.signal;
+  const outstanding = assert.rejects(node.watchCoverage(owner), /fresh chain data/);
+  t.mock.timers.tick(15001);
+  await outstanding;
+  assert.equal(node.status().phase, 'waiting-for-tip');
+  assert.equal(node.status().tipHash, null);
+  assert.equal(watch.active, false);
+  assert.equal(oldSignal.aborted, true);
+  await assert.rejects(old.history(owner), /closed/);
+
+  const resumed = new Promise(resolve => { node.onStatus = value => { if (value.phase === 'running') resolve(); }; });
+  children[0].stdout.emit('data', JSON.stringify(heartbeat) + '\n');
+  await resumed;
+  assert.equal(children.length, 1);
+  assert.notEqual(watch.lifetime.signal, oldSignal);
+  await assert.rejects(old.history(owner), /closed/);
+  const result = await node.registerWatches({ owner, scripts: ['51'], outpoints: [] });
+  assert.equal(result.requiredScripts, 1);
+
+  t.mock.timers.tick(15001);
+  assert.equal(node.status().phase, 'waiting-for-tip');
+  t.mock.timers.tick(90001);
+  await node.task;
+  assert.equal(node.status().phase, 'failed');
+  assert.match(node.status().error, /stopped reporting/);
 });
 
 test('registration and coverage require the negotiated owner pipe and validate public input', async t => {

@@ -65,7 +65,9 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.99.1
         run: |
-          $binary = node scripts/desktop/prepare-floresta.mjs | Select-Object -Last 1
+          $flags = @()
+          if ($env:RUNNER_OS -eq 'Linux') { $flags += '--test' }
+          $binary = node scripts/desktop/prepare-floresta.mjs @flags | Select-Object -Last 1
           if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Candidate build failed.' }
           "CHICORY_TEST_MANAGED_FLORESTA_BINARY=$binary" >> $env:GITHUB_ENV
       - name: Test native control, storage ownership and exit

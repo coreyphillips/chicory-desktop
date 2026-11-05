@@ -52,7 +52,7 @@ export function FlorestaQualification({ network, bridge }: { network: Network; b
     catch { setError('Chicory could not change the local node settings. Check the profile lock and storage folder.'); }
     finally { active.current = false; setBusy(false); }
   }
-  const phases = { stopped: 'Stopped', starting: 'Starting', running: 'Running', restarting: 'Restarting', failed: 'Failed' };
+  const phases = { stopped: 'Stopped', starting: 'Starting', running: 'Running', 'waiting-for-tip': 'Waiting for fresh chain data', restarting: 'Restarting', failed: 'Failed' };
   return <>
     <Row glyph="flask" label="Experimental Floresta node" expanded={open} onPress={() => setOpen(value => !value)} />
     {open ? <>

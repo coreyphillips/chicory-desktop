@@ -34,9 +34,10 @@ function openConfirmedWallet(watch, owner, signal, status) {
   if (!hash(owner) || !(signal instanceof AbortSignal) || !watch?.confirmedReadsActive || !watch.transactionsActive) {
     throw new Error('The managed node cannot authorize this confirmed wallet session.');
   }
+  const lifetime = watch.lifetime?.signal;
   let closed = false;
   function active() {
-    if (closed || !watch.active || signal.aborted) throw new Error('Confirmed wallet session closed.');
+    if (closed || lifetime?.aborted || !watch.active || signal.aborted) throw new Error('Confirmed wallet session closed.');
   }
   active();
   async function send(command) {

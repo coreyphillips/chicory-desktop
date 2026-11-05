@@ -41,9 +41,10 @@ function openPendingWallet(watch, owner, signal, status) {
   if (!hash(owner) || !(signal instanceof AbortSignal) || !watch?.pendingActive) {
     throw new Error('The managed node cannot authorize this pending wallet session.');
   }
+  const lifetime = watch.lifetime?.signal;
   let closed = false;
   function active() {
-    if (closed || !watch.active || !watch.pendingActive || signal.aborted) throw new Error('Pending wallet session closed.');
+    if (closed || lifetime?.aborted || !watch.active || !watch.pendingActive || signal.aborted) throw new Error('Pending wallet session closed.');
   }
   function current(page) {
     const state = status();

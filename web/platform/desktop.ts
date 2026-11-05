@@ -9,7 +9,7 @@ export interface FlorestaState {
   freeBytes: number | null;
   removalAvailable: boolean;
   customStorage: boolean;
-  phase: 'stopped' | 'starting' | 'running' | 'restarting' | 'failed';
+  phase: 'stopped' | 'starting' | 'running' | 'waiting-for-tip' | 'restarting' | 'failed';
   height: number | null;
   validatedHeight: number | null;
   tipSynced: boolean | null;
