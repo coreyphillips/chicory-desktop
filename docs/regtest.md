@@ -23,7 +23,7 @@ writable. This is test infrastructure, separate from the app container.
 ## Prepare the host engine
 
 The production image installs Beignet 0.36.1 and applies the project-owned
-fresh-address patch during its engine stage. For local development, install
+fresh-address and zero-reserve patches during its engine stage. For local development, install
 the engine in a separate directory rather than patching a source checkout:
 
 ```sh
@@ -38,6 +38,14 @@ the ordinary `/address/new` route. The bridge explicitly requests `fresh:true`
 and requires a matching acknowledgement. The patched method advances the
 durable receive index and registers its exact Electrum subscription before
 acknowledging the address. It respects the wallet's unused-address gap limit.
+
+The zero-reserve patch builds a daemon that is not a primary as a wallet, the
+way the portable engine Chicory mobile runs does, so it advertises
+`option_zero_reserve` and accepts the reserve waiver its primary offers when
+it opens a just-in-time channel. Without it the wallet keeps a reserve (546
+sats at least) that send max over Lightning can never spend. A daemon that
+waives its clients' reserve or sells just-in-time receives keeps the primary
+role. The patch changes only channels opened after it.
 
 ## Start the test manager
 

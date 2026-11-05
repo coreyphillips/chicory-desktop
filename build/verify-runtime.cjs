@@ -62,6 +62,9 @@ module.exports = async function verifyRuntime(context) {
   const binding = fs.readFileSync(path.join(engine, 'dist/lightning/storage/sqlite-binding.js'), 'utf8');
   if (!binding.includes("require('./engine-storage.cjs').EncryptedDatabase")) throw new Error('The engine encrypted storage patch is missing.');
   if (!fs.readFileSync(path.join(engine, 'dist/cli/restore.js'), 'utf8').includes('chicory-desktop-encrypted-restore-v1')) throw new Error('The encrypted database restore patch is missing.');
+  // A wallet that cannot accept its primary's reserve waiver keeps sats that
+  // send max can never reach. An older runtime predates this patch.
+  if (!fs.readFileSync(path.join(engine, 'dist/cli/beignet-node.js'), 'utf8').includes('chicory-host-zero-reserve-v1')) throw new Error('The engine zero-reserve patch is missing. Run npm run runtime:prepare.');
   if (!fs.readFileSync(path.join(engine, 'dist/lightning/storage/engine-storage.cjs')).equals(fs.readFileSync(path.join(root, 'server/engine-storage.cjs')))) throw new Error('The encrypted storage helper is stale. Run npm run runtime:prepare.');
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   if (execFileSync(node, ['--version'], { encoding: 'utf8' }).trim() !== 'v24.22.1') throw new Error('Wrong bundled Node version.');
