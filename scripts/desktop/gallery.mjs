@@ -178,6 +178,15 @@ function audit() {
     if (el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== 'visible') problems.push(`truncated figure ${describe(el)}`);
   }
 
+  // The desktop heading shares the status row with the tile of a phrase still
+  // to save, so it has to start where the tile ends.
+  const heading = document.querySelector('[data-desktop-heading]');
+  const tile = document.querySelector('[data-backup-tile]');
+  if (heading && tile && live(heading) && live(tile) &&
+      heading.getBoundingClientRect().left < tile.getBoundingClientRect().right) {
+    problems.push(`overlapping heading ${describe(heading)}`);
+  }
+
   // Confirmation controls the user has to reach: on screen, or brought fully
   // on screen by scrolling, as focusing the control does.
   const outside = rect => rect.left < 0 || rect.top < 0 || rect.right > vw || rect.bottom > vh;

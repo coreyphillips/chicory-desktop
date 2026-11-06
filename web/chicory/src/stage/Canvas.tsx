@@ -37,6 +37,7 @@ import { curves, durations } from '../motion/tokens';
 import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { SheetPane } from '../scenes/activity/SheetPane';
 import { DetailLayer } from '../scenes/detail/DetailLayer';
+import { BACKUP_TILE_ROOM } from '../scenes/home/BackupTile';
 import { Backdrop } from '../scenes/home/Backdrop';
 import { HomePane } from '../scenes/home/HomePane';
 import { useOpening } from '../scenes/home/signals';
@@ -603,9 +604,9 @@ export function Canvas({
               {desktop ? (
                 <View style={[styles.browserHeading, {
                   right: sideWidth + 24,
-                  left: 82 + (isTestNetwork(snapshot.wallet.network) ? 24 : 0) + (backup?.pending && home ? 40 : 0),
+                  left: 82 + (isTestNetwork(snapshot.wallet.network) ? 24 : 0) + (backup?.pending && home ? BACKUP_TILE_ROOM : 0),
                 }]}>
-                  <Text style={styles.browserTitle}>{overview ? 'Overview' : shown === 'detail' ? 'Payment details' : shown.charAt(0).toUpperCase() + shown.slice(1)}</Text>
+                  <Text {...{ dataSet: { desktopHeading: 'true' } }} style={styles.browserTitle}>{overview ? 'Overview' : shown === 'detail' ? 'Payment details' : shown.charAt(0).toUpperCase() + shown.slice(1)}</Text>
                   <Pressable accessibilityRole="button" accessibilityLabel={view.hidden ? 'Show balances' : 'Hide balances'}
                     onPress={() => view.setHidden(value => !value)} style={styles.privacy}>
                     <Glyph name={view.hidden ? 'eyeOff' : 'eye'} size={19} color={colors.muted} />

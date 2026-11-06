@@ -16,6 +16,12 @@ import { riseIn, sceneOut } from '../../motion/presets';
 import { curves, durations } from '../../motion/tokens';
 import { HIT_SLOP, radius, space } from '../../theme';
 
+const SHIELD = 18;
+const KEY = 16;
+
+/** What the tile takes from the status row: its pill and the gap before it. */
+export const BACKUP_TILE_ROOM = space.sm * 2 + SHIELD + space.xs + KEY + space.xs;
+
 /**
  * A recovery phrase still to save, as the honey shield tile beside the mark
  * (REDESIGN.md 6, Backup and setup). It cannot be dismissed: it goes when the
@@ -73,11 +79,11 @@ export function BackupTile({
         }
         style={styles.target}
       >
-        <View style={styles.tile}>
+        <View {...{ dataSet: { backupTile: 'true' } }} style={styles.tile}>
           <Reanimated.View style={shield}>
-            <Glyph name="shieldAlert" size={18} color={palette.honey} />
+            <Glyph name="shieldAlert" size={SHIELD} color={palette.honey} />
           </Reanimated.View>
-          <Glyph name="key" size={16} color={palette.honey} />
+          <Glyph name="key" size={KEY} color={palette.honey} />
         </View>
       </Pressable>
     </Reanimated.View>
