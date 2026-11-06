@@ -1,0 +1,239 @@
+diff --git a/crates/floresta-chain/src/pruned_utreexo/chainparams.rs b/crates/floresta-chain/src/pruned_utreexo/chainparams.rs
+index bb37415..7f72b90 100644
+--- a/crates/floresta-chain/src/pruned_utreexo/chainparams.rs
++++ b/crates/floresta-chain/src/pruned_utreexo/chainparams.rs
+@@ -83,6 +83,10 @@ pub struct DnsSeed {
+ 
+     /// Useful filters we can use to find relevant peers
+     pub filters: ServiceFlags,
++
++    /// Candidate service hints for a seed queried without a filter prefix.
++    /// The peer's version handshake determines its actual services.
++    pub unfiltered_services: ServiceFlags,
+ }
+ 
+ /// This functionality is used to create a new DNS seed with possible filters.
+@@ -93,8 +97,15 @@ impl DnsSeed {
+             network,
+             seed,
+             filters,
++            unfiltered_services: ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
+         }
+     }
++
++    /// Set the services to probe among an unfiltered seed's candidates.
++    pub fn with_unfiltered_services(mut self, services: ServiceFlags) -> Self {
++        self.unfiltered_services = services;
++        self
++    }
+ }
+ 
+ /// If enabled, the node will assume that the provided Utreexo state is valid, and will
+@@ -391,6 +402,10 @@ pub fn get_chain_dns_seeds(network: Network) -> Vec<DnsSeed> {
+     #[rustfmt::skip]
+     match network {
+         Network::Bitcoin => {
++            // Utreexod's bare seed supplies proof candidates. Probe for archival
++            // support, then replace these hints with the version handshake flags.
++            seeds.push(DnsSeed::new(Network::Bitcoin, "manualseed.calvinkim.info", none)
++                .with_unfiltered_services(ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | service_flags::UTREEXO.into() | service_flags::UTREEXO_ARCHIVE.into()));
+             seeds.push(DnsSeed::new(Network::Bitcoin, "bitcoin.seed.dlsouza.lol", service_flags::UTREEXO.into()));
+             seeds.push(DnsSeed::new(Network::Bitcoin, "seed.calvinkim.info", x1009));
+             seeds.push(DnsSeed::new(Network::Bitcoin, "seed.bitcoin.luisschwab.com", x1009));
+diff --git a/crates/floresta-wire/src/p2p_wire/address_man.rs b/crates/floresta-wire/src/p2p_wire/address_man.rs
+index 08ce216..85183b0 100644
+--- a/crates/floresta-wire/src/p2p_wire/address_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/address_man.rs
+@@ -642,13 +642,22 @@ impl AddressMan {
+         default_port: u16,
+         socks5: Option<SocketAddr>,
+     ) -> Result<Vec<LocalAddress>, std::io::Error> {
++        Ok(Self::get_seeds_with_lookup(seed, |host| {
++            Self::do_lookup(host, default_port, socks5)
++        }))
++    }
++
++    fn get_seeds_with_lookup(
++        seed: &DnsSeed,
++        mut lookup: impl FnMut(&str) -> Vec<LocalAddress>,
++    ) -> Vec<LocalAddress> {
+         let mut addresses = Vec::new();
+         let now = Self::time_since_unix();
+ 
+         // ask for utreexo peers (if filtering is available)
+         if seed.filters.has(service_flags::UTREEXO.into()) {
+             let host = format!("x1000.{}", seed.seed);
+-            let _addresses = Self::do_lookup(&host, default_port, socks5);
++            let _addresses = lookup(&host);
+             let _addresses = _addresses.into_iter().map(|mut x| {
+                 x.services = ServiceFlags::NETWORK_LIMITED
+                     | service_flags::UTREEXO.into()
+@@ -663,7 +672,7 @@ impl AddressMan {
+         // ask for compact filter peers (if filtering is available)
+         if seed.filters.has(ServiceFlags::COMPACT_FILTERS) {
+             let host = format!("x49.{}", seed.seed);
+-            let _addresses = Self::do_lookup(&host, default_port, socks5);
++            let _addresses = lookup(&host);
+             let _addresses = _addresses.into_iter().map(|mut x| {
+                 x.services = ServiceFlags::COMPACT_FILTERS
+                     | ServiceFlags::NETWORK_LIMITED
+@@ -678,7 +687,7 @@ impl AddressMan {
+         // ask for any peer (if filtering is available)
+         if seed.filters.has(ServiceFlags::WITNESS) {
+             let host = format!("x9.{}", seed.seed);
+-            let _addresses = Self::do_lookup(&host, default_port, socks5);
++            let _addresses = lookup(&host);
+             let _addresses = _addresses.into_iter().map(|mut x| {
+                 x.services = ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS;
+                 x.state = AddressState::Tried(now);
+@@ -690,9 +699,9 @@ impl AddressMan {
+ 
+         // ask for any peer (if filtering isn't available)
+         if seed.filters == ServiceFlags::NONE {
+-            let _addresses = Self::do_lookup(seed.seed, default_port, socks5);
++            let _addresses = lookup(seed.seed);
+             let _addresses = _addresses.into_iter().map(|mut x| {
+-                x.services = ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS;
++                x.services = seed.unfiltered_services;
+                 x.state = AddressState::Tried(now);
+                 x
+             });
+@@ -700,7 +709,7 @@ impl AddressMan {
+             addresses.extend(_addresses);
+         }
+ 
+-        Ok(addresses)
++        addresses
+     }
+ 
+     /// Returns a new random address to open a new connection, we try to get addresses with
+@@ -1295,6 +1304,59 @@ mod test {
+     use crate::address_man::ReachableNetworks;
+     use crate::address_man::SUPPORTED_NETWORKS;
+ 
++    #[test]
++    fn unfiltered_utreexo_seed_is_queried_bare_and_selected_for_proofs() {
++        let seeds = get_chain_dns_seeds(Network::Bitcoin);
++        let seed = seeds
++            .iter()
++            .find(|seed| seed.seed == "manualseed.calvinkim.info")
++            .unwrap();
++        let mut queried = Vec::new();
++        let addresses = AddressMan::get_seeds_with_lookup(seed, |host| {
++            queried.push(host.to_owned());
++            vec![LocalAddress::try_from("8.8.8.8:8333").unwrap()]
++        });
++        assert_eq!(queried, ["manualseed.calvinkim.info"]);
++        assert_eq!(addresses.len(), 1);
++        assert!(addresses[0].services.has(service_flags::UTREEXO.into()));
++        assert!(addresses[0]
++            .services
++            .has(service_flags::UTREEXO_ARCHIVE.into()));
++        let mut manager = AddressMan::new(None, &[ReachableNetworks::IPv4]);
++        manager.push_addresses(&addresses);
++        assert!(manager
++            .get_address_to_connect(service_flags::UTREEXO_ARCHIVE.into(), false)
++            .is_some());
++        let recent_only =
++            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | service_flags::UTREEXO.into();
++        manager.update_set_service_flag(addresses[0].id, recent_only);
++        assert!(manager
++            .get_address_by_service(service_flags::UTREEXO_ARCHIVE.into())
++            .is_none());
++        assert_eq!(
++            manager
++                .get_address_by_service(service_flags::UTREEXO.into())
++                .unwrap()
++                .0,
++            addresses[0].id
++        );
++    }
++
++    #[test]
++    fn ordinary_unfiltered_seed_keeps_ordinary_candidate_services() {
++        let seed =
++            floresta_chain::DnsSeed::new(Network::Testnet, "ordinary.example", ServiceFlags::NONE);
++        let addresses = AddressMan::get_seeds_with_lookup(&seed, |host| {
++            assert_eq!(host, "ordinary.example");
++            vec![LocalAddress::try_from("8.8.8.8:18333").unwrap()]
++        });
++        assert_eq!(
++            addresses[0].services,
++            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS
++        );
++        assert!(AddressMan::get_seeds_with_lookup(&seed, |_| Vec::new()).is_empty());
++    }
++
+     #[test]
+     fn mainnet_and_signet_fixed_seeds_are_separate() {
+         let peers = |network| {
+diff --git a/crates/floresta-wire/src/p2p_wire/node/conn.rs b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+index e4a9b3c..975bd99 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/conn.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+@@ -529,21 +529,25 @@ where
+             let default_port = Self::get_port(network);
+             let dns_seeds = floresta_chain::get_chain_dns_seeds(network);
+ 
+-            let mut addresses = Vec::new();
++            // Publish each seed promptly so a slow unrelated resolver cannot hold
++            // an already resolved proof source until the entire seed list finishes.
+             for seed in &dns_seeds {
+-                if let Ok(got) = AddressMan::get_seeds_from_dns(seed, default_port, proxy_addr) {
+-                    addresses.extend(got);
++                if let Ok(addresses) =
++                    AddressMan::get_seeds_from_dns(seed, default_port, proxy_addr)
++                {
++                    info!(
++                        "Fetched {} peer addresses from DNS seed {}",
++                        addresses.len(),
++                        seed.seed
++                    );
++                    if node_sender
++                        .send(NodeNotification::DnsSeedAddresses(addresses))
++                        .is_err()
++                    {
++                        return;
++                    }
+                 }
+             }
+-
+-            info!(
+-                "Fetched {} peer addresses from all DNS seeds",
+-                addresses.len()
+-            );
+-
+-            node_sender
+-                .send(NodeNotification::DnsSeedAddresses(addresses))
+-                .unwrap();
+         });
+ 
+         Ok(())
+@@ -552,13 +556,23 @@ where
+     /// Check whether it's necessary to request more addresses from DNS seeds.
+     ///
+     /// Perform another address request from DNS seeds if we still don't have enough addresses
+-    /// on the [`AddressMan`] and the last address request from DNS seeds was over 2 minutes ago.
++    /// on the [`AddressMan`] or a connected historical proof provider, subject to the
++    /// existing hourly DNS request interval.
+     fn maybe_ask_dns_seed_for_addresses(&mut self) {
+         let enough_addresses = self.address_man.enough_addresses();
+ 
+-        // Skip if address fetching from DNS seeds is disabled,
+-        // or if the [`AddressMan`] has enough addresses in its database.
+-        if self.config.disable_dns_seeds || enough_addresses {
++        // Address hints do not establish a live provider of historical proofs.
++        // Retry even with a full address book while historical synchronization
++        // lacks the required service. The existing interval bounds DNS traffic.
++        let historical_gap = self
++            .chain
++            .get_best_block()
++            .map(|best| best.0)
++            .unwrap_or_default()
++            .saturating_sub(self.chain.get_validation_index().unwrap_or_default());
++        let needs_archive =
++            (self.historical_replay || historical_gap >= 288) && !self.has_historical_proof_peer();
++        if self.config.disable_dns_seeds || (enough_addresses && !needs_archive) {
+             return;
+         }
+ 
