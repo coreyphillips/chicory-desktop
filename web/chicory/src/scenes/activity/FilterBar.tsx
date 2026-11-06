@@ -186,7 +186,9 @@ function searchOpens(): EntryExitAnimationFunction {
 
 /**
  * One filter. The chosen one sits on a mocha disc that springs in behind its
- * glyph, and a screen reader hears it as selected.
+ * glyph, and a screen reader hears it as selected. A browser drops that state
+ * and a button there cannot be selected, so it is pressed instead, which fits:
+ * pressing it again clears it.
  */
 function FilterChip({
   glyph,
@@ -215,6 +217,7 @@ function FilterChip({
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ selected }}
+      {...{ 'aria-pressed': selected }}
       hitSlop={HIT_SLOP}
       onPress={
         onPress &&
