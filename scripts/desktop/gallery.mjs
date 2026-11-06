@@ -395,6 +395,28 @@ async function interactions(names) {
   assert.doesNotMatch(balanceText, /₿\s?\d[\d,]*\b(?!.*(fee|sent|received))/i, 'Hidden balance draws no amount');
   checks.push('Hidden balance exposes no amount visibly or by accessible name');
 
+  // Leaving raises the privacy cover. Coming back, nothing of it may stay over
+  // the wallet: exits skipped on the phone still run in a browser. Playwright
+  // keeps a hidden window awake, so the page is told it is hidden instead.
+  assert.deepEqual(await reach(indexOf(names, 'home')), []);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.waitForSelector('[data-testid="privacy-cover"]', { state: 'attached' });
+  const left = await page.evaluate(async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    delete document.visibilityState;
+    return {
+      cover: document.querySelectorAll('[data-testid="privacy-cover"]').length,
+      fading: document.getAnimations().filter(motion => motion.animationName === 'FadeOut').length,
+    };
+  });
+  assert.deepEqual(left, { cover: 0, fading: 0 }, 'Coming back leaves nothing of the privacy cover over the wallet');
+  checks.push('The privacy cover leaves nothing over the wallet on the way back');
+
   // Resize in the middle of a transition: the review lands in the new window
   // with its confirmation reachable.
   await page.evaluate(at => window.chicoryGallery.go(at), review);

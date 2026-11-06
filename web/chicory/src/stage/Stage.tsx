@@ -436,13 +436,16 @@ export function Stage({
             >
               {/* On iOS the native cover the switcher keeps is plain, and
                   this one is what shows for a moment on the way back, so it
-                  is plain there too: one look, not a step to the mark. */}
-              {Platform.OS === 'ios' ? null : (
+                  is plain there too: one look, not a step to the mark. A
+                  hidden browser page paints nothing, so on the desktop the
+                  mark would never be seen, and skipExiting only reaches a
+                  phone: its petals would fade out over the wallet instead. */}
+              {Platform.OS === 'android' ? (
                 <Bloom
                   size={SIZES.loader}
                   tone={bloomTone(activeProfile.network)}
                 />
-              )}
+              ) : null}
             </View>
           </LayoutAnimationConfig>
         ) : null}
