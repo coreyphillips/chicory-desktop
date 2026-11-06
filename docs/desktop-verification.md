@@ -111,11 +111,18 @@ successfully for [Windows x64, Linux x64 and macOS Apple Silicon](https://github
 and [macOS Intel](https://github.com/coreyphillips/chicory-desktop/actions/runs/41755649209).
 These artifacts use identical production source; intervening fixes affect test
 fixtures only. Native interaction and installation qualification on Windows,
-Linux and Intel macOS remain separate release work. macOS local builds use ad hoc signing without Developer ID or
-notarization. No signed binary release has been published. The release
-workflow, signed update manifest and manual update path are described in
-[releases.md](releases.md). They stay unused until the owner's signing
-identities are configured and a release passes its qualification list.
+Linux and Intel macOS remain separate release work. macOS development builds use ad hoc signing without Developer ID or
+notarization.
+
+[v0.3.0](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.0) is the first signed release, published on 2026-11-06 from commit
+`42e7629` for macOS Apple Silicon only. The app inside its DMG and ZIP passed
+`codesign`, Gatekeeper and stapler validation, and its signed update manifest
+was verified against the pinned key after publishing. No qualification run is
+recorded for this package, so funded flows remain unqualified.
+
+The release workflow, signed update manifest and manual update path are
+described in [releases.md](releases.md). The workflow stays unused until the
+owner's signing identities are configured on GitHub.
 
 New funded Lightning/on-chain payments, full disaster recovery, physical camera
 hardware, OS protocol installation and Windows/Linux permissions remain release

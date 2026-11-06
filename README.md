@@ -131,9 +131,11 @@ The [package workflow](.github/workflows/package.yml) builds development
 artifacts for macOS Apple Silicon, macOS Intel, Windows x64 and Linux x64 on
 their respective hosts. They are not notarized or Windows signed, and they never
 update. The [release workflow](.github/workflows/release.yml) builds signed
-releases with a verified update manifest once the owner configures signing. No
-signed release has been published yet. `npm run release:mac` builds a signed,
-notarized package on the owner's own Mac. See [releases](docs/releases.md).
+releases with a verified update manifest once the owner configures signing.
+`npm run release:mac` builds a signed, notarized package on the owner's own
+Mac. That is how [v0.3.0](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.0), the first signed release, was built. It is for Apple
+Silicon Macs only and has no recorded qualification run. See
+[releases](docs/releases.md).
 
 ## Verification
 
