@@ -154,7 +154,7 @@ test('preload exposes only window commands, the diagnostics report, the lock bri
     },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'preload.cjs'), 'utf8'), context);
-  assert.deepEqual(Object.keys(api).sort(), ['close', 'diagnostics', 'erase', 'fullBackup', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
+  assert.deepEqual(Object.keys(api).sort(), ['close', 'copySecret', 'diagnostics', 'erase', 'fullBackup', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
   assert.equal(Object.isFrozen(api), true);
   api.minimize(); api.toggleMaximize(); api.close();
   assert.deepEqual(sent, [['window:minimize'], ['window:maximize'], ['window:close']]);
@@ -179,6 +179,11 @@ test('preload exposes only window commands, the diagnostics report, the lock bri
   emitter.emit('desktop:command', privilegedEvent, 'send');
   assert.equal(received.length, 2);
   assert.equal(emitter.listenerCount('desktop:command'), 0);
+
+  // A secret reaches the main process as text and as nothing else.
+  invoked.length = 0;
+  api.copySecret('twelve words'); api.copySecret({ text: 'twelve words' });
+  assert.deepEqual(invoked, [['clipboard:copy-secret', 'twelve words'], ['clipboard:copy-secret', '']]);
 
   // The lock bridge can only ask the main process to prompt.
   invoked.length = 0;

@@ -36,6 +36,7 @@ but a manual run that contradicts them is a bug.
 | A link only fills Send. It never gets camera provenance, so Auto-pay cannot act on it | `web/platform/links.test.ts` |
 | A link that arrives mid-payment does not replace the payment on screen | `web/platform/links.test.ts` |
 | A refused or missing clipboard says to paste into the field, and copying falls back to the page | `web/platform/clipboard.test.ts` |
+| A copied recovery phrase leaves the clipboard after 60 seconds or on quit, sleep or a locked screen, and what the owner copied since stays | `desktop/secret-clipboard.test.cjs` |
 | The camera and clipboard permission prompts are Chicory's own, so they neither relock nor conceal the app | `desktop/app-lock.test.cjs` |
 | Auto-pay is off by default and applies only to scanned Lightning invoices that name an amount | `web/chicory/src/scenes/send/autoPay.ts` rules, with the shared Send tests |
 
@@ -74,6 +75,8 @@ but a manual run that contradicts them is a bug.
 | Paste reads the clipboard after permission is allowed | | |
 | Deny clipboard permission: the message says to paste into the field, and Ctrl/Cmd+V into the field works | | |
 | Copy buttons (address, invoice, diagnostics) copy, including after a denied read | | |
+| Copy phrase: the words paste for 60 seconds, then the clipboard is empty, also after quitting or locking the screen | | |
+| Copy phrase with a clipboard manager or Universal Clipboard on: note what, if anything, kept the words | | |
 | Cancelling the permission prompt leaves no cover over the window and no hold armed | | |
 
 ### Accessibility
