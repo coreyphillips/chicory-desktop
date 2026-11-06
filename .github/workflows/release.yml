@@ -73,14 +73,7 @@ jobs:
       - if: matrix.platform == 'mac'
         name: Verify Developer ID signature and notarization
         shell: bash
-        run: |
-          app="$(find release -maxdepth 2 -name Chicory.app -type d | head -1)"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -dv "$app" 2>&1 | grep -q "Authority=Developer ID Application"
-          spctl --assess --type execute --verbose "$app"
-          # electron-builder notarizes and staples the app before packing it.
-          # The DMG itself carries no ticket, so validate the app inside it.
-          xcrun stapler validate "$app"
+        run: bash scripts/release/verify-mac.sh
       - if: matrix.platform == 'win'
         name: Package and sign with Azure Trusted Signing
         shell: bash

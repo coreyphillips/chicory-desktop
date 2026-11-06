@@ -1,5 +1,6 @@
-# Signed release builds. Only .github/workflows/release.yml uses this file.
-# Credentials come from the release environment's scoped secrets:
+# Signed release builds, used by .github/workflows/release.yml and by
+# npm run release:mac. Credentials come from the release environment's scoped
+# secrets, or from the shell for a local macOS build (see docs/releases.md):
 #   macOS: CSC_LINK, CSC_KEY_PASSWORD (Developer ID Application certificate),
 #          APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER (notarization).
 #   Windows: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET for Azure
@@ -15,4 +16,6 @@ mac:
   # electron-builder rejects the name with its trailing colon, and the
   # development config's '-' would otherwise be inherited as an ad hoc identity.
   identity: Developer ID Application
+  # Signs by that certificate's hash, because its name need not be unique.
+  sign: build/sign-mac.cjs
   notarize: true

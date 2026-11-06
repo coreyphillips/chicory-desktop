@@ -1,3 +1,8 @@
 {
-  "keys": []
+  "keys": [
+    {
+      "id": "update-2026-11",
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAk9j2iTk+r5xYihqIg/DoOoi8K4HBq6heurTMnxT9zgY=\n-----END PUBLIC KEY-----\n"
+    }
+  ]
 }

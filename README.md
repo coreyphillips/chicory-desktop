@@ -132,7 +132,8 @@ artifacts for macOS Apple Silicon, macOS Intel, Windows x64 and Linux x64 on
 their respective hosts. They are not notarized or Windows signed, and they never
 update. The [release workflow](.github/workflows/release.yml) builds signed
 releases with a verified update manifest once the owner configures signing. No
-signed release has been published yet. See [releases](docs/releases.md).
+signed release has been published yet. `npm run release:mac` builds a signed,
+notarized package on the owner's own Mac. See [releases](docs/releases.md).
 
 ## Verification
 

@@ -27,6 +27,7 @@
     "runtime:prepare": "node scripts/desktop/prepare-runtime.mjs",
     "package": "npm run build && electron-builder --config build/electron-builder.yml --dir",
     "dist": "npm run build && electron-builder --config build/electron-builder.yml --publish never",
+    "release:mac": "node scripts/release/build-mac.mjs",
     "postinstall": "node node_modules/electron/install.js"
   },
   "devDependencies": {
