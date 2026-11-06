@@ -88,6 +88,7 @@ Use VoiceOver on macOS, Narrator on Windows and Orca on Linux.
 | Recovery words are read only after a deliberate reveal, and are not left in focus after Hide | | |
 | The hold to send works with Space or Enter held, and a short press does not send | | |
 | The screen reader announces payment results and errors | | |
+| The screen reader says when a Settings row is open, a network or switch is on, a filter is active, and a control is busy or unavailable | | |
 | Text scaling (system font size or zoom at 130 percent) keeps every control reachable | | |
 | Reduce Motion: navigation and results still read clearly without animation | | |
 

@@ -1,13 +1,14 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
+import { chicoryAccessibility } from './web/platform/accessibility.vite';
 import { chicoryMotion } from './web/platform/motion.vite';
 import { chicorySvg } from './web/platform/svg.vite';
 
 const platform = (file: string) => fileURLToPath(new URL(`./web/platform/${file}`, import.meta.url));
 
 export default defineConfig({
-  plugins: [chicoryMotion(), chicorySvg(), react({ babel: { plugins: ['react-native-worklets/plugin'] } })],
+  plugins: [chicoryMotion(), chicorySvg(), chicoryAccessibility(), react({ babel: { plugins: ['react-native-worklets/plugin'] } })],
   resolve: {
     alias: [
       { find: /^react-native$/, replacement: 'react-native-web' },
