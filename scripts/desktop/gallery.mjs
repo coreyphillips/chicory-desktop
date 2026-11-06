@@ -213,6 +213,29 @@ function audit() {
     }
     return fill || stroke;
   };
+  // Painted is not seen. A later sibling on top of a glyph is deliberate, as it
+  // is on the phone, but one drawn before it should be beneath it, so a disc
+  // that covers its own glyph is a bug. Hit testing skips layers that ignore
+  // pointers, so for this they all answer.
+  const solid = el => opacityOf(el) > 0.05 && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)';
+  const hits = document.createElement('style');
+  hits.textContent = '* { pointer-events: auto !important; }';
+  document.head.append(hits);
+  for (const svg of document.querySelectorAll('svg')) {
+    // A glyph is hidden from screen readers, not from sight, so its parent says
+    // whether it is in use.
+    if (svg.ownerSVGElement || !shown(svg) || hiddenTree(svg.parentElement)) continue;
+    // The middle of a line glyph is empty, so test a point on its stroke.
+    const shape = [...svg.querySelectorAll('path, circle, rect, line, polyline, polygon, ellipse')].find(painted);
+    if (!shape) continue;
+    const { x, y } = shape.getPointAtLength(0).matrixTransform(shape.getScreenCTM());
+    const stack = document.elementsFromPoint(x, y);
+    const at = stack.findIndex(el => svg.contains(el));
+    const before = el => el.compareDocumentPosition(svg) & Node.DOCUMENT_POSITION_FOLLOWING;
+    const cover = stack.slice(0, Math.max(at, 0)).find(el => !el.contains(svg) && before(el) && solid(el));
+    if (cover) problems.push(`covered glyph in ${describe(svg.closest('[aria-label]') ?? svg)} under ${describe(cover)}`);
+  }
+  hits.remove();
   for (const control of document.querySelectorAll('button, [role="button"], a[href]')) {
     if (!live(control) || control.disabled || control.getAttribute('aria-disabled') === 'true') continue;
     // Laid out, whatever its opacity: a control whose only glyph is
