@@ -28,12 +28,18 @@ export function chicoryMotion(): Plugin {
       return `import { isCustomLayoutConfig } from ${JSON.stringify(runner)};\n` +
         code.replace(target, target + '\n  if (isCustomLayoutConfig(config)) return false;');
     }
+    if (path.endsWith('/react-native-reanimated/lib/module/component/LayoutAnimationConfig.js')) {
+      const target = '  setShouldAnimateExiting() {';
+      if (!code.includes(target)) throw new Error('The browser exit skipping integration needs review for this Reanimated version.');
+      return `import { skipExits } from ${JSON.stringify(browser)};\n` +
+        code.replace(target, target + '\n    skipExits(this._childInstance, this.props.skipExiting);');
+    }
     return null;
   };
   const dependencies: DependencyPlugin = {
     name: 'chicory-browser-motion-dependencies',
     setup(build) {
-      build.onLoad({ filter: /react-native-reanimated[/\\]lib[/\\]module[/\\]layoutReanimation[/\\]web[/\\](animationsManager|componentUtils)\.js$/ }, async ({ path }) => {
+      build.onLoad({ filter: /react-native-reanimated[/\\]lib[/\\]module[/\\](layoutReanimation[/\\]web[/\\](animationsManager|componentUtils)|component[/\\]LayoutAnimationConfig)\.js$/ }, async ({ path }) => {
         const code = await readFile(path, 'utf8');
         return { contents: rewrite(code, path) ?? code, loader: 'js' };
       });

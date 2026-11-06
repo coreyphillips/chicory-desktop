@@ -13,6 +13,8 @@ type Props = { entering?: unknown; exiting?: unknown; layout?: unknown };
 const ENTERING = 1;
 const EXITING = 2;
 const active = new WeakMap<HTMLElement, MotionController>();
+/** What a LayoutAnimationConfig let go of with its exits skipped. */
+const skipping = new WeakSet<object>();
 const UNITLESS = new Set(['opacity', 'zIndex', 'fontWeight', 'flex', 'flexGrow', 'flexShrink', 'order']);
 
 function rectOf(element: HTMLElement): Rect {
@@ -195,9 +197,25 @@ function animate(
   active.set(source, controller);
 }
 
+/**
+ * Reanimated's browser build ignores `skipExiting`, so exits play anyway, with
+ * nothing left around them. A config unmounts before its children, so it marks
+ * its view here and they find that as they go.
+ */
+export function skipExits(instance: unknown, skip?: boolean) {
+  const view = instance as { _componentDOMRef?: object } | null | undefined;
+  const element = view?._componentDOMRef ?? view;
+  if (skip && element) skipping.add(element);
+}
+function exitSkipped(element: HTMLElement) {
+  for (let at: HTMLElement | null = element; at; at = at.parentElement) if (skipping.has(at)) return true;
+  return false;
+}
+
 /** Called before Reanimated's CSS-only dispatcher in both dev and builds. */
 export function runCustomWebAnimation(props: Props, element: HTMLElement, type: number, snapshots?: Snapshots): boolean {
   if (type !== ENTERING && type !== EXITING) return false;
+  if (type === EXITING && exitSkipped(element)) return true;
   const config = type === ENTERING ? props.entering : props.exiting;
   if (!isCustomLayoutConfig(config)) return false;
   animate(config, element, type, undefined, snapshots);
