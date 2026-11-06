@@ -65,8 +65,10 @@ test('profiles must be fresh suite directories away from production data', t => 
 });
 
 test('production profile locations match the desktop defaults', () => {
-  assert.ok(productionProfiles({ platform: 'darwin', home: '/Users/a' }).includes('/Users/a/Library/Application Support/Chicory Desktop'));
-  assert.ok(productionProfiles({ platform: 'linux', home: '/home/a', env: {} }).includes('/home/a/.config/Chicory Desktop'));
+  assert.ok(productionProfiles({ platform: 'darwin', home: '/Users/a' })
+    .includes(path.join('/Users/a/Library/Application Support', 'Chicory Desktop')));
+  assert.ok(productionProfiles({ platform: 'linux', home: '/home/a', env: {} })
+    .includes(path.join('/home/a/.config', 'Chicory Desktop')));
   assert.ok(productionProfiles({ platform: 'win32', home: 'C:/Users/a', env: { APPDATA: 'C:/Users/a/AppData/Roaming' } })
     .includes(path.join('C:/Users/a/AppData/Roaming', 'Chicory Desktop')));
 });
@@ -129,9 +131,10 @@ test('dependency versions come from the lockfiles', () => {
 });
 
 test('package files resolve per platform', () => {
+  const resources = path.resolve('/A/Chicory.app/Contents/Resources');
   assert.deepEqual(packageFiles('/A/Chicory.app/Contents/MacOS/Chicory', 'darwin').slice(1, 3),
-    ['/A/Chicory.app/Contents/Resources/app.asar', '/A/Chicory.app/Contents/Resources/runtime/node/bin/node']);
-  assert.equal(packageFiles('/opt/chicory/chicory', 'linux')[1], '/opt/chicory/resources/app.asar');
+    [path.join(resources, 'app.asar'), path.join(resources, 'runtime/node/bin/node')]);
+  assert.equal(packageFiles('/opt/chicory/chicory', 'linux')[1], path.join('/opt/chicory/resources', 'app.asar'));
   assert.deepEqual(packageFiles(undefined), []);
 });
 
