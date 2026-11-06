@@ -45,9 +45,82 @@ Add `{ "id": "<CHICORY_UPDATE_KEY_ID>", "publicKey": "<PEM>" }` to
 is empty. To rotate, ship a release that pins both keys before signing with the
 new one.
 
-Keep the same Developer ID team for every macOS release. The wallet key is
-wrapped by the macOS Keychain, and a build signed by another identity cannot
-open it. Existing data is preserved, but the wallet stays closed.
+Sign every macOS release with the Ferryman Fin LLC Developer ID team
+(`344W3TSQCK`). `scripts/release/verify-mac.sh` refuses any other team. The
+wallet key is wrapped by the macOS Keychain, and a build signed by another
+identity cannot open it. Existing data is preserved, but the wallet stays
+closed. A renewed certificate from the same team keeps working, because the
+app's designated requirement names the team and bundle ID, not one certificate.
+
+## Building a macOS release locally
+
+`npm run release:mac` runs the macOS steps of `release.yml` for this Mac's
+architecture: `npm run check`, then package, sign, notarize and verify. Windows,
+Linux and the other Mac architecture still come from `release.yml`.
+
+Prepare the checkout as `release.yml` does:
+
+```sh
+npm ci
+npm --prefix server ci --omit=dev
+npm run runtime:prepare
+```
+
+The build stops before it starts unless both of these are available:
+
+- **The Developer ID certificate as a `.p12`.** In Keychain Access, open My
+  Certificates, export the Developer ID Application certificate and set a
+  password. Keep the file outside this repository. It is the same file that
+  goes into `MAC_DEVELOPER_ID_P12`. It decides which certificate signs:
+  `build/sign-mac.cjs` signs by this file's certificate hash, because `codesign`
+  refuses a certificate name that also matches an entry in the login keychain.
+- **A notary login.** Create an App Store Connect team API key with the
+  Developer role. This is the same key that goes into `APPLE_NOTARY_API_KEY`.
+  Save it once as a `notarytool` keychain profile:
+
+  ```sh
+  xcrun notarytool store-credentials chicory-notary \
+    --key <path to AuthKey .p8> --key-id <key ID> --issuer <issuer ID>
+  ```
+
+Then build:
+
+```sh
+read -rs CSC_KEY_PASSWORD && export CSC_KEY_PASSWORD
+CSC_LINK=<path to .p12> APPLE_KEYCHAIN_PROFILE=chicory-notary npm run release:mac
+```
+
+## Drafting a macOS release by hand
+
+Until the `release` environment has its secrets, that build can become a draft
+for one Mac architecture. Build from the exact commit being released, then sign
+the manifest and upload only the files named here. The signing key stays on the
+owner's machine, and `release.yml` is still the path to every other platform.
+
+```sh
+export GITHUB_SHA="$(git rev-parse HEAD)"
+export RELEASE_TAG="v$(node -p "require('./package.json').version")"
+export CHICORY_UPDATE_KEY_ID=<id from build/update-keys.json>
+node scripts/release/manifest.mjs check
+mkdir -p release/staged/parts
+node scripts/release/manifest.mjs part release release/staged/parts/part-mac-arm64.json
+CHICORY_UPDATE_SIGNING_KEY="$(cat <path to update-signing.pem>)" \
+  node scripts/release/manifest.mjs publish release/staged/parts release/staged
+(cd release && shasum -a 256 --check --strict staged/SHA256SUMS)
+```
+
+Pushing the tag starts `release.yml`, which cannot sign without the secrets, so
+cancel that run, then create the draft:
+
+```sh
+git tag "$RELEASE_TAG" && git push origin "$RELEASE_TAG"
+gh run list --workflow release.yml --limit 1
+gh run cancel <run ID>
+gh release create "$RELEASE_TAG" --draft --verify-tag --title "Chicory $RELEASE_TAG" \
+  --notes "Source revision $GITHUB_SHA. Component and storage format versions are listed in update-manifest.json." \
+  release/Chicory-*.dmg release/Chicory-*.zip \
+  release/staged/SHA256SUMS release/staged/update-manifest.json release/staged/update-manifest.json.sig
+```
 
 ## Publishing
 

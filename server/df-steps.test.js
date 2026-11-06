@@ -148,7 +148,9 @@ function printed(action, data) {
 			cb();
 		}
 	});
-	new Console({ stdout: sink, stderr: sink }).info(action, data);
+	// A daemon prints to a pipe, so never in colour. In a terminal node --test
+	// sets FORCE_COLOR, which would otherwise colour these lines.
+	new Console({ stdout: sink, stderr: sink, colorMode: false }).info(action, data);
 	return out.split('\n').map((l) => l.trim()).filter(Boolean);
 }
 

@@ -67,4 +67,19 @@ function signManifest(bytes, privateKeyPem, keyId) {
   return Buffer.from(JSON.stringify({ keyId, algorithm: 'ed25519', signature: sign(null, bytes, key).toString('base64') }) + '\n');
 }
 
-module.exports = { STORAGE_FORMATS, componentVersions, describeArtifacts, mergeManifests, checksums, signManifest };
+/**
+ * electron-builder skips notarization with only a warning when it finds no
+ * credentials, so a local build needs an explicit notary login. It also needs
+ * the certificate as a file, which build/sign-mac.cjs signs with, so that the
+ * login keychain cannot decide which certificate signs a release.
+ */
+function missingMacCredentials(env) {
+  const missing = ['CSC_LINK', 'CSC_KEY_PASSWORD'].filter(name => !env[name]);
+  const apiKey = ['APPLE_API_KEY', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER'];
+  if (!env.APPLE_KEYCHAIN_PROFILE && !apiKey.every(name => env[name])) {
+    missing.push(`APPLE_KEYCHAIN_PROFILE or all of ${apiKey.join(', ')}`);
+  }
+  return missing;
+}
+
+module.exports = { STORAGE_FORMATS, componentVersions, describeArtifacts, mergeManifests, checksums, signManifest, missingMacCredentials };

@@ -15,3 +15,6 @@ store/generated/
 /release/
 artifacts/
 *.tsbuildinfo
+*.pem
+*.p8
+*.p12

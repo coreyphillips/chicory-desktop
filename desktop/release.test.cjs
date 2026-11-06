@@ -70,6 +70,37 @@ test('storage formats match what this build writes', () => {
   assert.equal(ENVELOPE_VERSION, release.STORAGE_FORMATS.keyEnvelope);
 });
 
+test('a local macOS release needs a certificate file and a notary login', () => {
+  const certificate = { CSC_LINK: 'developer-id.p12', CSC_KEY_PASSWORD: 'password' };
+  const apiKey = { APPLE_API_KEY: 'key.p8', APPLE_API_KEY_ID: 'id', APPLE_API_ISSUER: 'issuer' };
+  assert.deepEqual(release.missingMacCredentials({ ...certificate, APPLE_KEYCHAIN_PROFILE: 'chicory-notary' }), []);
+  assert.deepEqual(release.missingMacCredentials({ ...certificate, ...apiKey }), []);
+  assert.deepEqual(release.missingMacCredentials({ ...apiKey }), ['CSC_LINK', 'CSC_KEY_PASSWORD']);
+  // electron-builder would otherwise skip notarization and still succeed.
+  assert.match(release.missingMacCredentials(certificate).join(), /APPLE_KEYCHAIN_PROFILE/);
+  assert.match(release.missingMacCredentials({ ...certificate, APPLE_API_KEY: 'key.p8' }).join(), /APPLE_API_ISSUER/);
+});
+
+test('a macOS release signs by the hash of the certificate from CSC_LINK', async (t) => {
+  const config = fs.readFileSync(path.join(root, 'build/electron-builder.release.yml'), 'utf8');
+  assert.match(config, /^  sign: build\/sign-mac\.cjs$/m);
+
+  const codeSign = require('app-builder-lib/out/codeSign/macCodeSign');
+  const signByHash = require('../build/sign-mac.cjs');
+  const found = t.mock.method(codeSign, 'findIdentity', async () => ({ name: 'a shared name', hash: 'AB12' }));
+  const signed = t.mock.method(codeSign, 'sign', async () => {});
+
+  await signByHash({ app: 'Chicory.app', keychain: 'csc-link.keychain' });
+  assert.equal(found.mock.calls[0].arguments[2], 'csc-link.keychain');
+  assert.deepEqual(signed.mock.calls[0].arguments[0], { app: 'Chicory.app', keychain: 'csc-link.keychain', identity: 'AB12' });
+
+  // Without CSC_LINK the login keychain would pick a certificate.
+  await assert.rejects(signByHash({ app: 'Chicory.app' }), /CSC_LINK/);
+  found.mock.mockImplementation(async () => null);
+  await assert.rejects(signByHash({ app: 'Chicory.app', keychain: 'empty.keychain' }), /CSC_LINK/);
+  assert.equal(signed.mock.callCount(), 1);
+});
+
 test('development packages are labelled and only the release config can drop the label', () => {
   const development = fs.readFileSync(path.join(root, 'build/electron-builder.yml'), 'utf8');
   const signed = fs.readFileSync(path.join(root, 'build/electron-builder.release.yml'), 'utf8');
