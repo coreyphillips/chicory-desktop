@@ -28,6 +28,7 @@
     "automatic-archive-discovery.patch",
     "body-retry-routing.patch",
     "v2-transport-eof.patch",
-    "backfill-archive-discovery.patch"
+    "backfill-archive-discovery.patch",
+    "header-agreement-timeout.patch"
   ]
 }
