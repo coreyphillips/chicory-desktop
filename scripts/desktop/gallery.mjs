@@ -395,6 +395,12 @@ async function interactions(names) {
   assert.doesNotMatch(balanceText, /₿\s?\d[\d,]*\b(?!.*(fee|sent|received))/i, 'Hidden balance draws no amount');
   checks.push('Hidden balance exposes no amount visibly or by accessible name');
 
+  // The disc shows which filter is on, so a screen reader has to hear it too.
+  assert.deepEqual(await reach(indexOf(names, 'activity, filtered to requests')), []);
+  await expect(page.getByRole('button', { name: 'Requests', exact: true, pressed: true })).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Sent', exact: true, pressed: false })).toBeAttached();
+  checks.push('A screen reader hears which Activity filter is on');
+
   // Leaving raises the privacy cover. Coming back, nothing of it may stay over
   // the wallet: exits skipped on the phone still run in a browser. Playwright
   // keeps a hidden window awake, so the page is told it is hidden instead.
