@@ -236,6 +236,7 @@ function audit() {
     if (cover) problems.push(`covered glyph in ${describe(svg.closest('[aria-label]') ?? svg)} under ${describe(cover)}`);
   }
   hits.remove();
+  if (document.querySelector('[accessibilitystate]')) problems.push('accessibilityState left on the page as an attribute');
   for (const control of document.querySelectorAll('button, [role="button"], a[href]')) {
     if (!live(control) || control.disabled || control.getAttribute('aria-disabled') === 'true') continue;
     // Laid out, whatever its opacity: a control whose only glyph is
@@ -400,6 +401,21 @@ async function interactions(names) {
   await expect(page.getByRole('button', { name: 'Requests', exact: true, pressed: true })).toBeAttached();
   await expect(page.getByRole('button', { name: 'Sent', exact: true, pressed: false })).toBeAttached();
   checks.push('A screen reader hears which Activity filter is on');
+
+  // The same goes for a row that is open, a choice that is made and a control
+  // waiting for something. One announced as disabled stays a real button: going
+  // native would take it out of the tab order and end a hold under way.
+  assert.deepEqual(await reach(indexOf(names, 'settings, showing the phrase')), []);
+  await expect(page.getByRole('button', { name: 'Recovery phrase', exact: true, expanded: true })).toBeAttached();
+  assert.deepEqual(await reach(indexOf(names, 'settings, proposing another network')), []);
+  await expect(page.getByRole('radio', { name: 'mainnet', exact: true, checked: true })).toBeAttached();
+  await reach(indexOf(names, 'hold, disabled'));
+  const unready = page.getByRole('button', { name: 'Send 4,200 sats', exact: true, disabled: true });
+  await expect(unready).toBeAttached();
+  await expect(unready).toHaveJSProperty('disabled', false);
+  await reach(indexOf(names, 'hold, sending'));
+  await expect(page.locator('button[aria-busy="true"]').first()).toBeAttached();
+  checks.push('A screen reader hears what is open, chosen, busy or unavailable');
 
   // Leaving raises the privacy cover. Coming back, nothing of it may stay over
   // the wallet: exits skipped on the phone still run in a browser. Playwright

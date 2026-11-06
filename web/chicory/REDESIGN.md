@@ -923,6 +923,7 @@ The hold's centre is read in window points while the payment is out (`watchCentr
 ## 9. Accessibility
 
 - **Controls.** Every glyph control sets a role, a label, and its disabled, busy or selected state. Decorative SVG is hidden.
+  - A browser drops `accessibilityState`, so `web/platform/accessibility.vite.ts` carries it to the page as ARIA once the DOM props are done. It only adds what is announced: `disabled` stays `aria-disabled` and never native `disabled`, which would take a control out of the tab order and end a hold under way. A button cannot be selected or checked, so it says it is pressed, and a role of `'none'` says nothing, since a state would make the browser expose the element.
   - A `Pressable` keeps its role while it takes no touch, and a role that comes and goes is `'none'` while it is gone, never `undefined`: React Native's iOS props keep the previous role when the prop is removed, so a mark that stops being pressable would stay a button. `test-support/a11y.ts` checks both, the second by reading the source.
   - Fabric reuses a native view for whatever it draws next, and the macOS translation `idb` reads a simulator through keeps the role it read for each view earlier. So after moving between scenes a long-running `idb_companion` reports roles the views had before (a key as a heading, Close as a plain element), while a fresh companion reads the same screen correctly. Roles are read through a companion started after the last move.
 - **Announcements.** A single `announce(text, {assertive})` helper.
