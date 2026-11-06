@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { runCustomWebAnimation, runCustomWebLayout } from './motion.browser.ts';
+import { runCustomWebAnimation, runCustomWebLayout, skipExits } from './motion.browser.ts';
+import { chicoryMotion } from './motion.vite.ts';
 import type { MotionAnimation } from './motion.ts';
 
 class Element extends EventTarget {
@@ -158,4 +160,53 @@ test('custom layout callbacks receive current and target geometry and retain fle
     assert.equal(env.source.style.width, '');
     assert.equal(env.source.style.transform, '');
   } finally { env.restore(); }
+});
+
+const fading = () => ({ initialValues: { opacity: 1 }, animations: { opacity: instant(0) } });
+
+test('a config that skips exits lets its views go at once, leaving nothing behind', () => {
+  const env = environment();
+  try {
+    skipExits(env.parent, true);
+    assert.equal(runCustomWebAnimation({ exiting: fading } as never, env.source as never, 2), true);
+    assert.equal(env.source.dummyClone, undefined);
+    assert.equal(env.parent.children.length, 1);
+    assert.equal(env.pending(), 0);
+  } finally { env.restore(); }
+});
+test('a config that keeps exits, or holds no view, skips nothing', () => {
+  const env = environment();
+  try {
+    skipExits(env.parent, false);
+    skipExits(null, true);
+    skipExits(undefined, true);
+    runCustomWebAnimation({ exiting: fading } as never, env.source as never, 2);
+    assert.ok(env.source.dummyClone);
+  } finally { env.restore(); }
+});
+test('an animated view is marked by the element it drew', () => {
+  const env = environment();
+  try {
+    skipExits({ _componentDOMRef: env.source }, true);
+    runCustomWebAnimation({ exiting: fading } as never, env.source as never, 2);
+    assert.equal(env.source.dummyClone, undefined);
+  } finally { env.restore(); }
+});
+test('skipping exits leaves an entrance alone', () => {
+  const env = environment();
+  try {
+    skipExits(env.parent, true);
+    runCustomWebAnimation({ entering: fading } as never, env.source as never, 1);
+    assert.equal(env.pending(), 1);
+  } finally { env.restore(); }
+});
+
+const config = 'node_modules/react-native-reanimated/lib/module/component/LayoutAnimationConfig.js';
+const transform = chicoryMotion().transform as unknown as (code: string, id: string) => string | null;
+
+test('the rewrite fits the installed Reanimated, and a version that no longer does stops the build', () => {
+  const code = transform(readFileSync(config, 'utf8'), `/app/${config}`);
+  assert.match(code ?? '', /setShouldAnimateExiting\(\) \{\n {4}skipExits\(this\._childInstance, this\.props\.skipExiting\);/);
+  assert.match(code ?? '', /^import \{ skipExits \} from /);
+  assert.throws(() => transform('export default 1;', `/app/${config}`), /needs review/);
 });

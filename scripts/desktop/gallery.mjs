@@ -417,9 +417,29 @@ async function interactions(names) {
   await expect(page.locator('button[aria-busy="true"]').first()).toBeAttached();
   checks.push('A screen reader hears what is open, chosen, busy or unavailable');
 
+  // Settings goes with its cover, and all of it at once: an exit of its own,
+  // played once the rest has gone, would be left lying over the canvas.
+  assert.deepEqual(await reach(indexOf(names, 'settings')), []);
+  const leftBehind = page.evaluate(() => new Promise(resolve => {
+    const scene = '[data-testid="scene-settings"]';
+    const look = () => {
+      if (document.querySelector(scene)) return requestAnimationFrame(look);
+      resolve({
+        fading: document.getAnimations().filter(motion => /Out/.test(motion.animationName ?? '')).length,
+        clones: document.querySelectorAll('[data-chicory-motion-exit]').length,
+      });
+    };
+    look();
+  }));
+  await page.getByRole('button', { name: 'Close', exact: true }).first().click();
+  assert.deepEqual(await leftBehind, { fading: 0, clones: 0 }, 'Nothing of Settings is left behind as it goes');
+  const clipped = await page.locator('[data-testid="slot-settings"]').evaluate(slot => getComputedStyle(slot).overflow);
+  assert.equal(clipped, 'hidden', 'Settings leaves under the Activity column, not over it');
+  checks.push('Settings leaves under the Activity column and leaves nothing behind');
+
   // Leaving raises the privacy cover. Coming back, nothing of it may stay over
-  // the wallet: exits skipped on the phone still run in a browser. Playwright
-  // keeps a hidden window awake, so the page is told it is hidden instead.
+  // the wallet. Playwright keeps a hidden window awake, so the page is told it
+  // is hidden instead.
   assert.deepEqual(await reach(indexOf(names, 'home')), []);
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });

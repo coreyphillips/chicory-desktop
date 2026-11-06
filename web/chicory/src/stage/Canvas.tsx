@@ -717,7 +717,7 @@ export function Canvas({
             </Pane>
             <View
               testID="slot-settings"
-              style={[styles.fill, { right: sideWidth }]}
+              style={[styles.fill, { right: sideWidth }, sideWidth > 0 && styles.clipped]}
               pointerEvents={blocking ? 'none' : 'box-none'}
             >
               {drawnSettings ? (
@@ -896,6 +896,7 @@ export function SettingsSlide({
 }
 
 const styles = StyleSheet.create({
+  clipped: { overflow: 'hidden' },
   browserHeading: { position: 'absolute', top: 0, left: 82, height: STATUS_ROW, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   browserTitle: { fontSize: 17, fontWeight: '500', color: colors.text, letterSpacing: 0.1 },
   privacy: { padding: 10, borderRadius: 12 },
