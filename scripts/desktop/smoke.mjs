@@ -76,7 +76,7 @@ try {
   assert.equal(security.origin, 'chicory-app://wallet');
   assert.equal(security.require, 'undefined');
   assert.equal(security.process, 'undefined');
-  assert.deepEqual(security.bridge, ['close', 'diagnostics', 'erase', 'fullBackup', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
+  assert.deepEqual(security.bridge, ['close', 'copySecret', 'diagnostics', 'erase', 'fullBackup', 'lock', 'minimize', 'onCommand', 'platform', 'toggleMaximize']);
   const preferences = await electron.evaluate(({ BrowserWindow }) => {
     const value = BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();
     return { sandbox: value.sandbox, contextIsolation: value.contextIsolation, nodeIntegration: value.nodeIntegration };
