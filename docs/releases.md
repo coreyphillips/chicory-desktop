@@ -1,9 +1,9 @@
 # Releases and updates
 
-No signed release has been published yet. Until the owner completes the setup
-below and a release passes the qualification list, every package is a
-development build: its file name contains `development`, the About panel says
-"development build" and the app has no update channel.
+[v0.3.0](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.0) is the first signed release. It covers macOS Apple Silicon only, was
+built on the owner's Mac, and has no recorded qualification run. Every other
+package is a development build: its file name contains `development`, the About
+panel says "development build" and the app has no update channel.
 
 ## Build types
 
