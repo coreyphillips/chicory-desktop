@@ -68,6 +68,16 @@ function swapsTopScene(from: StageState, to: StageState): boolean {
 }
 
 /**
+ * Whether `to` widens the desktop's Activity column beside Overview, or takes
+ * it back. A payment's detail changes its width too, but grows out of its row
+ * as it does, which a captured column would cover.
+ */
+function resizesActivity(from: StageState, to: StageState): boolean {
+  const names = [from.scene.name, to.scene.name];
+  return names.includes('home') && names.includes('activity');
+}
+
+/**
  * What the canvas tells the stage about its panes, while it is drawn.
  */
 export interface PaneMotion {
@@ -281,6 +291,7 @@ export function useStageStore(): StageStore {
       const before = latest.current;
       latest.current = stageReducer(before, action);
       if (swapsTopScene(before, latest.current)) swapScene(() => dispatch(action));
+      else if (resizesActivity(before, latest.current)) swapScene(() => dispatch(action), 'column');
       else dispatch(action);
       if (latest.current !== before) motion?.follow(latest.current, fling);
     };

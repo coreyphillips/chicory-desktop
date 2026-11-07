@@ -286,6 +286,26 @@ try {
   await page.waitForTimeout(1000);
   checks.push('The flight from Home and back never dims and starts from the right place after a resize');
 
+  // The Activity column slides open beside Overview in one move, rather than
+  // jumping a third of its width in a frame, and leaves the page as it was.
+  const column = () => page.locator('[data-pane="activity"]').evaluate(el => Math.round(el.getBoundingClientRect().width));
+  await scene('home').click();
+  await page.waitForTimeout(1000);
+  const narrow = await column();
+  for (const [name, wide] of [['activity', true], ['home', false]]) {
+    const frames = page.evaluate(wait => window.chicorySwitch(wait), 700);
+    await page.waitForTimeout(40);
+    await scene(name).click();
+    const seen = await frames;
+    const moving = seen.filter(frame => frame.swapping).length;
+    assert.ok(moving > 3 && moving < 30, `To ${name}: the column moved for a moment, ${moving} frames`);
+    assert.equal(seen.at(-1).swapping, false, `To ${name}: nothing is left named`);
+    assert.equal(await column() > narrow, wide, `To ${name}: the column ended at its width`);
+  }
+  await scene('send').click();
+  await page.waitForTimeout(1000);
+  checks.push('The Activity column slides open and closed beside Overview');
+
   // The dissolve is drawn over the page, out of a frame callback's sight, so
   // this reads what reached the screen. Beside the arrow the disc only ever
   // goes between its two looks: never darker or brighter than both, as a disc

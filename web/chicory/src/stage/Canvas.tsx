@@ -572,6 +572,7 @@ export function Canvas({
                 </View>
               ) : null}
               <Pane
+                name="home"
                 active={overview}
                 style={[
                   styles.home,
@@ -625,7 +626,7 @@ export function Canvas({
                 </View>
               </View>
               {desktop ? (
-                <Pane key="browser-activity" active={!state.busy && !overlay && (overview || shown === 'detail')}
+                <Pane key="browser-activity" name="activity" active={!state.busy && !overlay && (overview || shown === 'detail')}
                   style={[styles.browserActivity, { width: sideWidth }]}>
                   <View style={styles.browserActivityHeader}><Text style={styles.browserTitle}>Activity</Text><Text style={styles.historyCaption}>Payments & requests</Text></View>
                   <PrimaryFor primaries={primaries} scene="activity">
