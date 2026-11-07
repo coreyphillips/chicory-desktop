@@ -16,12 +16,13 @@ let queued: Update[] | null = null;
 let running = 0;
 
 /**
- * Runs `update`, which swaps one scene for another in a single commit, under
- * a view transition: the browser holds the last frame, the commit happens
- * behind it, and the compositor dissolves one into the other, so nothing the
- * commit or the page does can drop a frame of it, and pixels the two share
- * stay as they are. A skipped transition still runs the update, so the worst
- * it can be is a clean cut, and with no such API that is all it is.
+ * Runs `update`, which changes the page in a single commit, under a view
+ * transition: the browser holds the last frame, the commit happens behind it,
+ * and the compositor moves from one to the other, so nothing the commit or the
+ * page does can drop a frame of it. `kind` says what moves (style.css): a
+ * `scene` taking another's place, or the Activity `column` widening beside
+ * Overview. A skipped transition still runs the update, so the worst it can
+ * be is a clean cut, and with no such API that is all it is.
  *
  * The callback runs a frame later, so an update that comes in the meantime
  * waits to join it, in order, rather than overtaking it.
@@ -32,6 +33,7 @@ let running = 0;
  */
 export function swapScene(
   update: Update,
+  kind: 'scene' | 'column' = 'scene',
   page: Swapping | undefined = typeof document === 'undefined' ? undefined : document,
   commit: (run: Update) => void = flushSync,
 ): void {
@@ -39,7 +41,7 @@ export function swapScene(
   if (!page?.startViewTransition) { update(); return; }
   queued = [update];
   const marks = page.documentElement?.dataset;
-  if (marks) marks.swapping = 'true';
+  if (marks) marks.swapping = kind;
   running += 1;
   const transition = page.startViewTransition(() => {
     const updates = queued ?? [];

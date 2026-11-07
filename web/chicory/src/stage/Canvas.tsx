@@ -75,7 +75,7 @@ import {
   CornerControl,
 } from './panes/CornerControl';
 import { EdgeBack } from './panes/EdgeBack';
-import { LaunchProvider } from './panes/Launch';
+import { LandingAreaProvider, LaunchProvider } from './panes/Launch';
 import type { Launch } from './panes/Launch';
 import { SceneLeave } from './panes/Leaving';
 import { Pane, PanesProvider } from './panes/Pane';
@@ -428,7 +428,9 @@ export function Canvas({
   const [rising, setRising] = useState(false);
   if (came !== shown) {
     setCame(shown);
-    setRising(home && (came === 'send' || came === 'receive'));
+    // The desktop has no sheet to rise past, and Home left under the scene
+    // has its control fade over the circle, never crossing it.
+    setRising(!desktop && home && (came === 'send' || came === 'receive'));
   }
   useAnimatedReaction(
     () => panes.bar.get(),
@@ -521,80 +523,10 @@ export function Canvas({
     [dispatch],
   );
 
-  // The top slot draws Send or Receive, and keeps one that has gone drawn
-  // where it was, with what it last showed, while it fades out there
-  // (`SceneLeave`): under the sheet and Home as they come back, which a
-  // layout exit drew it over on the device. Out of use, it names no
-  // primary element, so a scene opened while it fades claims its own.
-  //
-  // One going straight to the other takes its place in a single commit, and
-  // plays no entrance: their controls share their pixels (`CONTROL_ROW`), so
-  // there is only ever one, whole, and no circle stands in for it. The tap
-  // that asks for it dissolves the change (`swapScene`).
   const topScene =
     scene.name === 'send' || scene.name === 'receive' ? scene : null;
-  const [drawnTop, setDrawnTop] = useState<TopScene | null>(topScene);
-  const [leaving, setLeaving] = useState<Leaving[]>([]);
-  const [swapped, setSwapped] = useState<number | null>(null);
-  if (drawnTop?.key !== topScene?.key) {
-    setDrawnTop(topScene);
-    if (drawnTop && topScene) setSwapped(topScene.key);
-    else if (drawnTop) {
-      const left = { scene: drawnTop, region };
-      setLeaving(list => [...list, left]);
-    }
-  }
-  // The circle stands in only between the row and a scene. A scene taking
-  // another's place keeps its control whole, whatever a hand-over had left
-  // undone.
-  const topKey = topScene?.key ?? null;
-  const landedKey = useRef<number | null>(null);
-  useLayoutEffect(() => {
-    const before = landedKey.current;
-    if (before === topKey) return;
-    landedKey.current = topKey;
-    if (before === null) launchOpen();
-    else if (topKey === null) launchLeave();
-    else launch.handover.set(1);
-  }, [topKey, launchOpen, launchLeave, launch]);
-  const [nowhere] = useState<Primaries>(() => new Map());
-  const letGo = useCallback(
-    (key: number) =>
-      setLeaving(list => list.filter(item => item.scene.key !== key)),
-    [],
-  );
-  const drawTop = (at: TopScene, drawn: RegionProps, gone: boolean) => (
-    <PrimaryFor
-      key={at.key}
-      primaries={gone ? nowhere : primaries}
-      scene={at.name}
-    >
-      <SceneLeave leaving={gone} onGone={() => letGo(at.key)}>
-        <LayoutAnimationConfig skipEntering={at.key === swapped}>
-          {at.name === 'send' ? (
-            <SendScene
-              {...drawn}
-              sceneKey={at.key}
-              prefill={at.prefill}
-              scanned={at.scanned === true}
-              slotHeight={height - belowStatus - MINI_STRIP}
-            />
-          ) : (
-            <ReceiveScene
-              {...drawn}
-              sceneKey={at.key}
-              slotHeight={height - belowStatus - MINI_STRIP}
-            />
-          )}
-        </LayoutAnimationConfig>
-      </SceneLeave>
-    </PrimaryFor>
-  );
-  const top: ReactNode[] = leaving.map(item =>
-    drawTop(item.scene, item.region, true),
-  );
-  if (topScene) top.push(drawTop(topScene, region, false));
 
+  const [nowhere] = useState<Primaries>(() => new Map());
   // Settings is drawn on the cover (`SettingsSlide`), so it is kept drawn
   // as it leaves, out of use, until the cover is back down, and let go
   // then. One opened again while the last leaves takes its place.
@@ -640,6 +572,7 @@ export function Canvas({
                 </View>
               ) : null}
               <Pane
+                name="home"
                 active={overview}
                 style={[
                   styles.home,
@@ -679,11 +612,21 @@ export function Canvas({
                   style={[styles.flex, desktop ? styles.browserForm : null]}
                   pointerEvents={blocking ? 'none' : 'box-none'}
                 >
-                  {top}
+                  <LandingAreaProvider value={`${mainWidth}x${height}`}>
+                    <TopSlot
+                      scene={topScene}
+                      region={region}
+                      primaries={primaries}
+                      slotHeight={height - belowStatus - MINI_STRIP}
+                      launch={launch}
+                      onOpen={launchOpen}
+                      onLeave={launchLeave}
+                    />
+                  </LandingAreaProvider>
                 </View>
               </View>
               {desktop ? (
-                <Pane key="browser-activity" active={!state.busy && !overlay && (overview || shown === 'detail')}
+                <Pane key="browser-activity" name="activity" active={!state.busy && !overlay && (overview || shown === 'detail')}
                   style={[styles.browserActivity, { width: sideWidth }]}>
                   <View style={styles.browserActivityHeader}><Text style={styles.browserTitle}>Activity</Text><Text style={styles.historyCaption}>Payments & requests</Text></View>
                   <PrimaryFor primaries={primaries} scene="activity">
@@ -817,6 +760,104 @@ type TopScene = Extract<Scene, { name: 'send' | 'receive' }>;
 interface Leaving {
   scene: TopScene;
   region: RegionProps;
+}
+
+/**
+ * What the top slot draws, Send or Receive. It keeps one that has gone drawn
+ * where it was, with what it last showed, while it fades out there
+ * (`SceneLeave`): under the sheet and Home as they come back, which a layout
+ * exit drew it over on the device. Out of use, it names no primary element,
+ * so a scene opened while it fades claims its own.
+ *
+ * One going straight to the other takes its place in a single commit, and
+ * plays no entrance: their controls share their pixels (`CONTROL_ROW`), so
+ * there is only ever one, whole, and no circle stands in for it. The tap that
+ * asks for it dissolves the change (`swapScene`).
+ *
+ * Kept apart from the canvas so that letting a scene go, which happens in the
+ * middle of the panes' move, draws only this.
+ */
+function TopSlot({
+  scene,
+  region,
+  primaries,
+  slotHeight,
+  launch,
+  onOpen,
+  onLeave,
+}: {
+  scene: TopScene | null;
+  region: RegionProps;
+  primaries: Primaries;
+  slotHeight: number;
+  launch: Launch;
+  onOpen: () => void;
+  onLeave: () => void;
+}) {
+  const [drawnTop, setDrawnTop] = useState<TopScene | null>(scene);
+  const [leaving, setLeaving] = useState<Leaving[]>([]);
+  const [swapped, setSwapped] = useState<number | null>(null);
+  if (drawnTop?.key !== scene?.key) {
+    setDrawnTop(scene);
+    if (drawnTop && scene) setSwapped(scene.key);
+    else if (drawnTop) {
+      const left = { scene: drawnTop, region };
+      setLeaving(list => [...list, left]);
+    }
+  }
+  // The circle stands in only between the row and a scene. A scene taking
+  // another's place keeps its control whole, whatever a hand-over had left
+  // undone.
+  const topKey = scene?.key ?? null;
+  const landedKey = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const before = landedKey.current;
+    if (before === topKey) return;
+    landedKey.current = topKey;
+    if (before === null) onOpen();
+    else if (topKey === null) onLeave();
+    else launch.handover.set(1);
+  }, [topKey, onOpen, onLeave, launch]);
+  const [nowhere] = useState<Primaries>(() => new Map());
+  const letGo = useCallback(
+    (key: number) =>
+      setLeaving(list => list.filter(item => item.scene.key !== key)),
+    [],
+  );
+  const drawTop = (at: TopScene, drawn: RegionProps, gone: boolean) => (
+    <PrimaryFor
+      key={at.key}
+      primaries={gone ? nowhere : primaries}
+      scene={at.name}
+    >
+      <SceneLeave leaving={gone} onGone={() => letGo(at.key)}>
+        <LayoutAnimationConfig skipEntering={at.key === swapped}>
+          {at.name === 'send' ? (
+            <SendScene
+              {...drawn}
+              sceneKey={at.key}
+              prefill={at.prefill}
+              scanned={at.scanned === true}
+              slotHeight={slotHeight}
+            />
+          ) : (
+            <ReceiveScene
+              {...drawn}
+              sceneKey={at.key}
+              slotHeight={slotHeight}
+            />
+          )}
+        </LayoutAnimationConfig>
+      </SceneLeave>
+    </PrimaryFor>
+  );
+  // One list, so a scene that starts to leave is kept, by its key, and not
+  // drawn anew.
+  const top: ReactNode[] = leaving.map(item =>
+    drawTop(item.scene, item.region, true),
+  );
+  if (scene) top.push(drawTop(scene, region, false));
+  return <>{top}</>;
 }
 
 /**

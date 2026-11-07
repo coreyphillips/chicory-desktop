@@ -307,7 +307,7 @@ export function SendScreen({
   room?: number;
 }) {
   const live = usePaneActive();
-  const launchLanding = useLaunchLanding();
+  const launchLanding = useLaunchLanding(room);
   const [request, setRequest] = useState(initialRequest);
   // A request that arrived whole shows as a chip; one being typed as text,
   // and one the parser refuses stays in the well with its cross, so it never
@@ -1877,7 +1877,7 @@ export function SendScreen({
           ) : null}
         </AmountReadout>
         </ScrollView>
-        <View style={styles.controls}>
+        <View style={styles.controls} onLayout={launchLanding.onLayout}>
           <View style={styles.side} />
           {/* Home's Send circle lands exactly on it (REDESIGN.md 7, T1),
               and it is unseen until the circle hands over, so the two are

@@ -31,10 +31,13 @@ export function Pane({
   style,
   children,
   ref,
+  name,
 }: PropsWithChildren<{
   active: boolean;
   style?: StyleProp<AnimatedStyle<StyleProp<ViewStyle>>>;
   ref?: Ref<HostInstance>;
+  /** What the page's styles know this pane by. */
+  name?: string;
 }>) {
   const live = usePaneActive() && active;
   const host = useRef<HostInstance>(null);
@@ -52,6 +55,7 @@ export function Pane({
   return (
     <Reanimated.View
       ref={attach}
+      {...(name ? { dataSet: { pane: name } } : {})}
       style={style}
       pointerEvents={live ? 'auto' : 'none'}
       accessibilityElementsHidden={!live}

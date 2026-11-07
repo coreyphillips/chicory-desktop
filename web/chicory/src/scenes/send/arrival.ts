@@ -3,7 +3,6 @@ import type { SharedValue } from 'react-native-reanimated';
 import { durations } from '../../motion/tokens';
 import { motionReduced } from '../../services/motion';
 import { PANE_SETTLE_MS } from '../../stage/layout';
-import { WATCH_FRAMES, samePlace } from '../../stage/panes/Launch';
 import { CONTROL } from './Controls';
 
 /*
@@ -115,11 +114,24 @@ export function arrivalBeats(done: boolean): ArrivalBeats {
       };
 }
 
+/** How far apart two readings of the mark may be and still agree. */
+const SETTLED_PT = 0.25;
+
+/** The most frames the mark is followed for, about 750ms. */
+const WATCH_FRAMES = 45;
+
+/** Whether two readings of the mark agree (SETTLED_PT). */
+function samePlace(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): boolean {
+  return Math.abs(a.x - b.x) <= SETTLED_PT && Math.abs(a.y - b.y) <= SETTLED_PT;
+}
+
 /**
  * Reads the centre of `node` in window points, each frame until two
  * readings agree or WATCH_FRAMES have passed, telling `onRead` each reading
- * that differs from the last, as the launch landing follows a control
- * (stage/panes/Launch). Returns a cancel, for a node that goes first.
+ * that differs from the last. Returns a cancel, for a node that goes first.
  */
 export function watchCentre(
   node: () => HostInstance | null,

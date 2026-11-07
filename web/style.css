@@ -85,15 +85,29 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outlin
 ::view-transition { pointer-events: none; }
 :root[data-swapping] { view-transition-name: none; }
 ::view-transition-group(*) { animation-duration: 200ms; }
-:root[data-swapping] [data-testid="slot-top"] { view-transition-name: scene-content; }
-:root[data-swapping] [data-desktop-heading] { view-transition-name: scene-heading; }
-:root[data-swapping] [data-big-control] { view-transition-name: big-control; }
-:root[data-swapping] [data-big-arrow] { view-transition-name: big-arrow; }
+:root[data-swapping="column"] [data-pane="home"] { view-transition-name: overview; }
+:root[data-swapping="column"] [data-pane="activity"] { view-transition-name: activity-column; }
+:root[data-swapping="scene"] [data-testid="slot-top"] { view-transition-name: scene-content; }
+:root[data-swapping="scene"] [data-desktop-heading] { view-transition-name: scene-heading; }
+:root[data-swapping="scene"] [data-big-control] { view-transition-name: big-control; }
+:root[data-swapping="scene"] [data-big-arrow] { view-transition-name: big-arrow; }
 /* A name must be unique, so what is going or out of use has none. */
-:root[data-swapping] [inert] [data-big-control], :root[data-swapping] [inert] [data-big-arrow],
-:root[data-swapping] [data-chicory-motion-exit] [data-big-control], :root[data-swapping] [data-chicory-motion-exit] [data-big-arrow] { view-transition-name: none; }
+:root[data-swapping="scene"] [inert] [data-big-control], :root[data-swapping="scene"] [inert] [data-big-arrow],
+:root[data-swapping="scene"] [data-chicory-motion-exit] [data-big-control], :root[data-swapping="scene"] [data-chicory-motion-exit] [data-big-arrow] { view-transition-name: none; }
 ::view-transition-old(scene-content), ::view-transition-old(scene-heading) { animation: 80ms ease-out both scene-clears; }
 ::view-transition-new(scene-content), ::view-transition-new(scene-heading) { animation: 110ms ease-in 60ms both scene-arrives; }
+/* The Activity column widens by sliding open over Overview, which glides to
+   its new centre. Nothing fades: each is one image, the new one, in a box that
+   moves, Overview held at the box's middle and the column at its right edge. */
+::view-transition-group(overview), ::view-transition-group(activity-column) { animation-timing-function: cubic-bezier(.4, 0, .2, 1); }
+::view-transition-old(overview), ::view-transition-old(activity-column) { display: none; }
+::view-transition-new(overview), ::view-transition-new(activity-column) { animation: none; opacity: 1; mix-blend-mode: normal; inline-size: auto; block-size: 100%; }
+::view-transition-new(overview) { inset-inline-start: 50%; translate: -50% 0; }
+::view-transition-new(activity-column) { inset-inline-start: auto; inset-inline-end: 0; }
+::view-transition-image-pair(activity-column) { overflow: clip; }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(overview), ::view-transition-group(activity-column) { animation: none; }
+}
 /* The titles differ in width. Drawn at their own, neither stretches. */
 ::view-transition-old(scene-heading), ::view-transition-new(scene-heading) { inline-size: auto; }
 @keyframes scene-clears { to { opacity: 0; } }

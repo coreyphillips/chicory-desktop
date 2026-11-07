@@ -228,6 +228,19 @@ export function HomeScreen({
   const landing = useLaunch();
   const sendRest = useWindowPlace();
   const receiveRest = useWindowPlace();
+  const readSend = sendRest.measure;
+  const readReceive = receiveRest.measure;
+  const heroHolder = useRef<HostInstance>(null);
+  // On the web a view says it was laid out only when its size changes, and
+  // a resize moves the circles and the balance without changing theirs. The
+  // pane around them does change, so it has all three read again: the circle
+  // would otherwise fly from where it used to be, and the balance would rest
+  // behind what the scene draws.
+  const readPlaces = useCallback(() => {
+    readSend();
+    readReceive();
+    heroHolder.current?.measure((_x, y, _width, height) => frame.set({ y, height }));
+  }, [readSend, readReceive, frame]);
   const test = isTestNetwork(snapshot.wallet.network);
   const { balance } = snapshot;
 
@@ -314,6 +327,11 @@ export function HomeScreen({
   // Reduce Motion keeps the circles where they are while the row fades,
   // under the veil with the balance.
   const flying: Launch = reduced ? 'none' : launching;
+  // Read again as it sets out, in case the row moved while covered.
+  useEffect(() => {
+    if (flying === 'send') readSend();
+    else if (flying === 'receive') readReceive();
+  }, [flying, readSend, readReceive]);
   // With no control to land on, no circle travels: all three go as the two
   // not tapped do.
   const travels = !landless;
@@ -515,12 +533,12 @@ export function HomeScreen({
 
   return (
     <GestureDetector gesture={pan}>
-      <View style={styles.fill}>
+      <View style={styles.fill} onLayout={readPlaces}>
         <Reanimated.View style={[styles.stack, stackStyle]}>
           <Reanimated.View style={[styles.middle, veiled]}>
+            <View ref={heroHolder} onLayout={measureHero}>
             <Reanimated.View
               testID="home-hero"
-              onLayout={measureHero}
               style={[styles.hero, { minHeight: heroHeight }, heroMotion]}
             >
               <Pressable
@@ -584,6 +602,7 @@ export function HomeScreen({
                 </Reanimated.View>
               </Pressable>
             </Reanimated.View>
+            </View>
             <Reanimated.View style={[styles.vessel, vesselStyle]}>
               <Reanimated.View
                 key={vesselEntry.key}

@@ -12,9 +12,9 @@ function page() {
 
 test('a swap with no view transitions is a plain update, at once', () => {
   let ran = 0;
-  swapScene(() => { ran += 1; }, {}, direct);
+  swapScene(() => { ran += 1; }, 'scene', {}, direct);
   assert.equal(ran, 1);
-  swapScene(() => { ran += 1; }, undefined, direct);
+  swapScene(() => { ran += 1; }, 'scene', undefined, direct);
   assert.equal(ran, 2);
 });
 
@@ -22,7 +22,7 @@ test('the update waits for the frame the transition holds, inside one commit', (
   const at = page();
   const commits: string[] = [];
   let ran = false;
-  swapScene(() => { ran = true; }, at, run => { commits.push('commit'); run(); });
+  swapScene(() => { ran = true; }, 'scene', at, run => { commits.push('commit'); run(); });
   assert.equal(ran, false, 'nothing changes before the old frame is captured');
   at.held[0]();
   assert.equal(ran, true);
@@ -32,12 +32,12 @@ test('the update waits for the frame the transition holds, inside one commit', (
 test('a swap that comes before the frame joins it in order', () => {
   const at = page();
   const order: number[] = [];
-  swapScene(() => order.push(1), at, direct);
-  swapScene(() => order.push(2), at, direct);
+  swapScene(() => order.push(1), 'scene', at, direct);
+  swapScene(() => order.push(2), 'scene', at, direct);
   assert.equal(at.held.length, 1, 'only one transition starts');
   at.held[0]();
   assert.deepEqual(order, [1, 2]);
-  swapScene(() => order.push(3), at, direct);
+  swapScene(() => order.push(3), 'scene', at, direct);
   assert.equal(at.held.length, 2, 'the next swap starts its own');
   at.held[1]();
   assert.deepEqual(order, [1, 2, 3]);
@@ -53,12 +53,12 @@ test('the page is marked only while a transition runs, however many overlap', as
       return { ready: Promise.resolve(), updateCallbackDone: Promise.resolve(), finished: new Promise<void>(end => { ends.push(end); }) };
     },
   };
-  swapScene(() => {}, at, direct);
-  swapScene(() => {}, at, direct);
-  assert.equal(dataset.swapping, 'true');
+  swapScene(() => {}, 'scene', at, direct);
+  swapScene(() => {}, 'scene', at, direct);
+  assert.equal(dataset.swapping, 'scene');
   ends[0]();
   await new Promise(done => setTimeout(done, 0));
-  assert.equal(dataset.swapping, 'true', 'the newer transition still runs');
+  assert.equal(dataset.swapping, 'scene', 'the newer transition still runs');
   ends[1]();
   await new Promise(done => setTimeout(done, 0));
   assert.equal(dataset.swapping, undefined);
@@ -73,7 +73,7 @@ test('a skipped transition still updates and raises nothing', async () => {
       return { ready: refused, updateCallbackDone: Promise.resolve(), finished: Promise.resolve() };
     },
   };
-  swapScene(() => { ran = true; }, skipped, direct);
+  swapScene(() => { ran = true; }, 'scene', skipped, direct);
   await new Promise(done => setTimeout(done, 0));
   assert.equal(ran, true);
 });
