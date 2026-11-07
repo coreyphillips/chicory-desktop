@@ -8,7 +8,7 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import type { ReactNode, Ref } from 'react';
-import { AppState, StyleSheet, Text, View } from 'react-native';
+import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { HostInstance } from 'react-native';
 import Reanimated, { useSharedValue } from 'react-native-reanimated';
 import Clipboard from '@react-native-clipboard/clipboard';
@@ -104,6 +104,7 @@ import {
   subscribeHeld,
 } from '../stage/heldRequests';
 import type { HeldOutcome } from '../stage/heldRequests';
+import { CONTROL_ROW, PRIMARY_CONTROL } from '../stage/layout';
 import { useLaunchLanding } from '../stage/panes/Launch';
 import { usePaneActive } from '../stage/panes/Pane';
 import { useFlashTint, useHoldTint } from '../stage/StageContext';
@@ -247,6 +248,7 @@ export function SendScreen({
   test = false,
   leaving = false,
   ref,
+  room,
 }: {
   client: WalletAdapter;
   /**
@@ -297,6 +299,12 @@ export function SendScreen({
    */
   leaving?: boolean;
   ref?: Ref<SendHandle>;
+  /**
+   * How tall the screen can be in its slot, in points. Compose fits it: what
+   * is entered scrolls, and the way on stays pinned at the bottom, as
+   * Receive's does and on the same pixels.
+   */
+  room?: number;
 }) {
   const live = usePaneActive();
   const launchLanding = useLaunchLanding();
@@ -1820,6 +1828,14 @@ export function SendScreen({
       .join(' ');
     content = (
       <>
+        <ScrollView
+          testID="send-entry"
+          style={styles.entry}
+          contentContainerStyle={styles.entryContent}
+          alwaysBounceVertical={false}
+          keyboardShouldPersistTaps="handled"
+          nestedScrollEnabled
+        >
         <AmountReadout
           ref={readout}
           accessibilityLabel={copy.amount.field}
@@ -1860,6 +1876,7 @@ export function SendScreen({
             </Reanimated.View>
           ) : null}
         </AmountReadout>
+        </ScrollView>
         <View style={styles.controls}>
           <View style={styles.side} />
           {/* Home's Send circle lands exactly on it (REDESIGN.md 7, T1),
@@ -1905,9 +1922,15 @@ export function SendScreen({
   }
 
   const composing = step === 'compose';
+  const fitted = composing && room !== undefined;
   return (
     <TestNetwork.Provider value={test}>
-      <View style={styles.screen}>
+      <View
+        style={[
+          styles.screen,
+          fitted ? { height: Math.max(room, PINNED_MIN) } : styles.unfitted,
+        ]}
+      >
         {/* The request stays in place from step to step, a well while it is
           composed and a chip after, so only what changes crossfades. A
           chip past compose opens back to compose: from a review to edit
@@ -1952,7 +1975,7 @@ export function SendScreen({
           layout={smooth()}
           onTouchStart={result || resolved ? touched : undefined}
           onFocus={result || resolved ? touched : undefined}
-          style={styles.step}
+          style={[styles.step, fitted && styles.fitted]}
         >
           {content}
         </Reanimated.View>
@@ -1961,9 +1984,19 @@ export function SendScreen({
   );
 }
 
+/**
+ * The least room compose is given, as Receive's amount step has: enough for
+ * what is entered to scroll above the way on. Past that the slot scrolls.
+ */
+const PINNED_MIN = PRIMARY_CONTROL * 3;
+
 const styles = StyleSheet.create({
-  screen: { flex: 1, gap: space.lg },
+  screen: { gap: space.lg },
+  unfitted: { flex: 1 },
   step: { flexGrow: 1, gap: space.lg },
+  fitted: { flexShrink: 1, flexBasis: 0 },
+  entry: { flex: 1 },
+  entryContent: { flexGrow: 1, gap: space.lg },
   body: {
     flexGrow: 1,
     alignItems: 'center',
@@ -1977,11 +2010,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: space.xs,
   },
+  // As tall as Receive's row, so the two controls share their pixels.
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: space.xs,
+    minHeight: CONTROL_ROW,
   },
   centred: { justifyContent: 'center' },
   // A side slot holds its control against the page edge, as the pencil and

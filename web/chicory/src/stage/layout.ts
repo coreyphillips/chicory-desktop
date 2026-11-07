@@ -104,6 +104,16 @@ export function heroBox(fontScale: number, ratio: number): number {
 export const PRIMARY_CONTROL = 88;
 
 /**
+ * The row a scene's big control sits in, at the bottom of every step: as tall
+ * as Receive's quote ring, so the control's centre is at one height from the
+ * amount to the quote to the request, and the thumb stays where it was (P10,
+ * where it jumped from about 750pt to 398 to 574). Send's row is the same, so
+ * Send's control and Receive's are drawn on the same pixels and a switch
+ * between the two moves nothing.
+ */
+export const CONTROL_ROW = PRIMARY_CONTROL + 16;
+
+/**
  * How the primary control a launch lands on looks as its scene opens, which
  * the tapped circle takes on as it travels, so it lands looking like what
  * it becomes (REDESIGN.md 7, T1): its fill, its ring and the ring's width,
@@ -186,7 +196,7 @@ export function launchLanding(
 ): { x: number; y: number } {
   return {
     x: insets.left + (width - insets.left - insets.right) / 2,
-    y: height - insets.bottom - SLOT_PADDING.bottom - PRIMARY_CONTROL / 2,
+    y: height - insets.bottom - SLOT_PADDING.bottom - CONTROL_ROW / 2,
   };
 }
 

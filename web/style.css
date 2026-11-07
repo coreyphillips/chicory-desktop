@@ -72,3 +72,36 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outlin
   *, *::before, *::after { scroll-behavior: auto !important; }
   .browser-sidebar nav button, .browser-sidebar kbd { transition: none; }
 }
+
+/* Send and Receive swap in one commit under a view transition (sceneSwap),
+   run by the compositor and not by the page. Only the layers named here take
+   part: the content clears before the next arrives, since the keypads sit at
+   different heights, while the control's disc crossfades whole and the arrow
+   turns. Receive's glyph is Send's rotated half way round, so the two overlap
+   at every angle and read as one arrow. The window itself is not captured, so
+   everything else stays live and in use: with it captured, Chromium sends
+   every press to the root element, whatever pointer-events says. A layer that
+   is captured takes no press either, so the form waits out the 200ms. */
+::view-transition { pointer-events: none; }
+:root[data-swapping] { view-transition-name: none; }
+::view-transition-group(*) { animation-duration: 200ms; }
+:root[data-swapping] [data-testid="slot-top"] { view-transition-name: scene-content; }
+:root[data-swapping] [data-desktop-heading] { view-transition-name: scene-heading; }
+:root[data-swapping] [data-big-control] { view-transition-name: big-control; }
+:root[data-swapping] [data-big-arrow] { view-transition-name: big-arrow; }
+/* A name must be unique, so what is going or out of use has none. */
+:root[data-swapping] [inert] [data-big-control], :root[data-swapping] [inert] [data-big-arrow],
+:root[data-swapping] [data-chicory-motion-exit] [data-big-control], :root[data-swapping] [data-chicory-motion-exit] [data-big-arrow] { view-transition-name: none; }
+::view-transition-old(scene-content), ::view-transition-old(scene-heading) { animation: 80ms ease-out both scene-clears; }
+::view-transition-new(scene-content), ::view-transition-new(scene-heading) { animation: 110ms ease-in 60ms both scene-arrives; }
+/* The titles differ in width. Drawn at their own, neither stretches. */
+::view-transition-old(scene-heading), ::view-transition-new(scene-heading) { inline-size: auto; }
+@keyframes scene-clears { to { opacity: 0; } }
+@keyframes scene-arrives { from { opacity: 0; } }
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(big-arrow), ::view-transition-new(big-arrow) { animation-timing-function: cubic-bezier(.4, 0, .2, 1); }
+  ::view-transition-old(big-arrow) { animation-name: big-arrow-leaves; }
+  ::view-transition-new(big-arrow) { animation-name: big-arrow-arrives; }
+}
+@keyframes big-arrow-leaves { from { opacity: 1; transform: rotate(0deg); } to { opacity: 0; transform: rotate(180deg); } }
+@keyframes big-arrow-arrives { from { opacity: 0; transform: rotate(-180deg); } to { opacity: 1; transform: rotate(0deg); } }

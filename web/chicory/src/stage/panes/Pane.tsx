@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useLayoutEffect, useRef } from 'react';
-import type { PropsWithChildren } from 'react';
+import React, { createContext, useCallback, useContext, useLayoutEffect, useRef } from 'react';
+import type { PropsWithChildren, Ref } from 'react';
 import { Platform } from 'react-native';
 import type { HostInstance, StyleProp, ViewStyle } from 'react-native';
 import Reanimated from 'react-native-reanimated';
@@ -22,24 +22,36 @@ export function usePaneActive(): boolean {
  * One layer of the canvas. A pane that is not in use stays drawn, so it can
  * move and fade on its way out, but it cannot be used: touches pass through
  * it, a screen reader skips it, and the controls inside drop their handlers.
- * Panes nest, and a pane is only in use while every pane around it is.
+ * Panes nest, and a pane is only in use while every pane around it is. `ref`
+ * reaches the view, which is how a LayoutAnimationConfig around a pane finds
+ * what it is letting go of: without it, its skipExiting does nothing.
  */
 export function Pane({
   active,
   style,
   children,
+  ref,
 }: PropsWithChildren<{
   active: boolean;
   style?: StyleProp<AnimatedStyle<StyleProp<ViewStyle>>>;
+  ref?: Ref<HostInstance>;
 }>) {
   const live = usePaneActive() && active;
   const host = useRef<HostInstance>(null);
+  const attach = useCallback(
+    (instance: HostInstance | null) => {
+      host.current = instance;
+      if (typeof ref === 'function') ref(instance);
+      else if (ref) ref.current = instance;
+    },
+    [ref],
+  );
   useLayoutEffect(() => {
     if (Platform.OS === 'web') setBrowserInert(host.current, !live);
   }, [live]);
   return (
     <Reanimated.View
-      ref={host}
+      ref={attach}
       style={style}
       pointerEvents={live ? 'auto' : 'none'}
       accessibilityElementsHidden={!live}

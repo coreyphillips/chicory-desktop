@@ -36,12 +36,20 @@ export function ReceiveScene({
   opening = false,
   session,
   view,
-}: RegionProps & { sceneKey: number }) {
+  slotHeight,
+}: RegionProps & {
+  sceneKey: number;
+  /**
+   * How tall the canvas says the slot will be, so the amount step is pinned
+   * in the first frame it is drawn rather than a frame after it measures.
+   */
+  slotHeight?: number;
+}) {
   const { actions } = useStage();
   const { bottom } = useSafeAreaInsets();
   // The slot's height, outside its keyboard padding, so the room stays put
   // while a keyboard is up and the slot scrolls instead.
-  const [slot, setSlot] = useState<number | null>(null);
+  const [slot, setSlot] = useState<number | null>(slotHeight ?? null);
   const measure = useCallback((event: LayoutChangeEvent) => {
     const { height } = event.nativeEvent.layout;
     setSlot(last => (last === height ? last : height));

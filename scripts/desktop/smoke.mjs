@@ -138,44 +138,155 @@ try {
   await page.waitForTimeout(800);
   checks.push('Overview balance, Send, Receive and Scan answer a click');
 
-  // Between Send and Receive the big circle glides from one control to the
-  // other and no further. It used to aim 24px below them and hop back up, as
-  // the entrances around the control held it low while it was being read.
-  const primary = label => page.getByRole('button', { name: label, exact: true }).evaluate(el => el.getBoundingClientRect().top);
-  const travel = async scene => {
-    await page.evaluate(() => {
-      const seen = (window.chicoryCircle = []);
+  // Between Send and Receive there is one control, whole, that stays where it
+  // is, however the switch is asked for and at any window size. Every frame is
+  // checked, since what went wrong here only ever lasted a frame or two: a
+  // circle stood in for the control, swapped for another, dimmed as the two
+  // crossed, and after a resize flew hundreds of points to where the control
+  // had been.
+  await page.evaluate(() => {
+    const shown = element => {
+      let opacity = 1;
+      for (let at = element; at; at = at.parentElement) {
+        const style = getComputedStyle(at);
+        if (style.display === 'none' || style.visibility === 'hidden') return 0;
+        opacity *= Number(style.opacity);
+      }
+      return opacity;
+    };
+    window.chicorySwitch = ms => new Promise(done => {
+      const frames = [];
+      const began = performance.now();
       const frame = () => {
-        if (window.chicoryCircle !== seen) return;
+        const controls = [];
         for (const el of document.querySelectorAll('button, [role="button"]')) {
           const box = el.getBoundingClientRect();
-          if (Math.abs(box.width - 88) > 1 || Math.abs(box.height - 88) > 1) continue;
-          let shown = 1;
-          for (let at = el; at; at = at.parentElement) shown *= Number(getComputedStyle(at).opacity);
-          if (shown > 0.02) seen.push(box.top);
+          if (Math.abs(box.width - 88) > 1.5 || Math.abs(box.height - 88) > 1.5) continue;
+          const opacity = shown(el);
+          if (opacity > 0.02) controls.push({ x: box.left + 44, y: box.top + 44, opacity });
         }
-        requestAnimationFrame(frame);
+        const [only] = controls;
+        const hit = only && document.elementFromPoint(only.x, only.y);
+        const nav = document.querySelector('.browser-sidebar nav').getBoundingClientRect();
+        frames.push({
+          controls,
+          reached: !!hit?.closest('[data-big-control]'),
+          navigable: !!document.elementFromPoint(nav.left + nav.width / 2, nav.top + 20)?.closest('.browser-sidebar'),
+          swapping: !!document.documentElement.dataset.swapping,
+          clones: [...document.querySelectorAll('[data-chicory-motion-exit]')].filter(el => shown(el) > 0.02).length,
+          scenes: document.querySelectorAll('[data-testid="send-entry"], [data-testid="receive-slot"]').length,
+        });
+        if (performance.now() - began < ms) requestAnimationFrame(frame); else done(frames);
       };
       requestAnimationFrame(frame);
     });
-    await page.locator(`.browser-sidebar button[data-scene="${scene}"]`).click();
-    await page.waitForTimeout(1000);
-    return page.evaluate(() => { const seen = window.chicoryCircle; window.chicoryCircle = null; return seen; });
+  });
+  assert.equal(await page.evaluate(() => typeof document.startViewTransition), 'function', 'The renderer has view transitions');
+  const scene = name => page.locator(`.browser-sidebar button[data-scene="${name}"]`);
+  const menuItem = label => electron.evaluate(({ Menu, BrowserWindow }, wanted) => {
+    const find = menu => {
+      for (const item of menu?.items || []) {
+        if (item.label === wanted) return item;
+        const nested = find(item.submenu);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    const item = find(Menu.getApplicationMenu());
+    item.click(item, BrowserWindow.getAllWindows()[0], {});
+  }, label);
+  const steady = async (name, ask, ms = 900) => {
+    const frames = page.evaluate(wait => window.chicorySwitch(wait), ms);
+    await page.waitForTimeout(40);
+    await ask();
+    const seen = await frames;
+    assert.ok(seen.length > 20, `${name}: frames were seen`);
+    const [{ controls: [rest] }] = seen;
+    // The browser leaves a layer it has captured out of hit testing, so the
+    // form takes no press for the moment it dissolves. The page around it
+    // never stops, but for the one frame that captures the layers.
+    const swapping = seen.filter(frame => frame.swapping).length;
+    assert.ok(swapping <= 26 * (name === 'Back and forth' ? 4 : 1), `${name}: the swap ends, after ${swapping} frames`);
+    const unnavigable = seen.filter(frame => !frame.navigable).length;
+    assert.ok(unnavigable <= 2 * (name === 'Back and forth' ? 4 : 1), `${name}: the sidebar stays in use, but for ${unnavigable} frames`);
+    for (const [at, frame] of seen.entries()) {
+      const where = `${name}, frame ${at}`;
+      assert.equal(frame.controls.length, 1, `${where}: one control is drawn`);
+      const [control] = frame.controls;
+      assert.ok(control.opacity >= 0.99, `${where}: it is whole, not ${control.opacity}`);
+      assert.ok(Math.hypot(control.x - rest.x, control.y - rest.y) <= 0.5, `${where}: it stays put, at ${control.x},${control.y} from ${rest.x},${rest.y}`);
+      assert.ok(frame.reached || frame.swapping, `${where}: a press reaches it`);
+      assert.equal(frame.clones, 0, `${where}: nothing that left is drawn again`);
+      assert.ok(frame.scenes <= 1, `${where}: one scene is drawn`);
+    }
   };
-  await page.locator('.browser-sidebar button[data-scene="send"]').click();
+  await scene('send').click();
   await page.waitForTimeout(1000);
-  const atSend = await primary('Review payment');
-  const toReceive = await travel('receive');
-  const atReceive = await primary('Continue');
-  const toSend = await travel('send');
-  for (const tops of [toReceive, toSend]) {
-    assert.ok(tops.length > 20, 'The circle was seen as it travelled');
-    assert.ok(Math.max(...tops) <= Math.max(atSend, atReceive) + 1, `The circle stays above the lower control: ${Math.max(...tops)}`);
-    assert.ok(Math.min(...tops) >= Math.min(atSend, atReceive) - 1, `The circle stays below the higher control: ${Math.min(...tops)}`);
-    const jump = Math.max(...tops.slice(1).map((top, at) => Math.abs(top - tops[at])));
-    assert.ok(jump <= 4, `The circle glides rather than jumps: ${jump}px in a frame`);
+  await steady('Receive from the sidebar', () => scene('receive').click());
+  await steady('Send from the sidebar', () => scene('send').click());
+  await steady('Receive from the menu', () => menuItem('Receive'));
+  await steady('Send from the menu', () => menuItem('Send'));
+  await steady('Back and forth', async () => {
+    for (const name of ['receive', 'send', 'receive', 'send']) {
+      await scene(name).click();
+      await page.waitForTimeout(40);
+    }
+  }, 1200);
+  for (const [width, height] of [[1600, 1000], [900, 640], [1320, 860]]) {
+    await electron.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(...size), [width, height]);
+    await page.waitForTimeout(700);
+    await steady(`Receive at ${width}x${height}`, () => scene('receive').click());
+    await steady(`Send at ${width}x${height}`, () => scene('send').click());
   }
-  checks.push('The big circle glides straight between Send and Receive');
+
+  // The dissolve is drawn over the page, out of a frame callback's sight, so
+  // this reads what reached the screen. Beside the arrow the disc only ever
+  // goes between its two looks: never darker or brighter than both, as a disc
+  // that blinked or was crossed with another would.
+  const disc = async name => {
+    await page.waitForTimeout(500);
+    const box = await page.locator('[data-big-control]').boundingBox();
+    return { x: box.x + 16, y: box.y + box.height / 2, shot: (await page.screenshot({ type: 'png' })).toString('base64') };
+  };
+  const luminance = (images, x, y) => page.evaluate(async ({ images, x, y }) => {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const out = [];
+    for (const { type, data } of images) {
+      const bytes = Uint8Array.from(atob(data), char => char.charCodeAt(0));
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: `image/${type}` }));
+      const scale = bitmap.width / innerWidth;
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
+      context.drawImage(bitmap, 0, 0);
+      const [r, g, b] = context.getImageData(Math.round(x * scale), Math.round(y * scale), 1, 1).data;
+      out.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
+    }
+    return out;
+  }, { images, x, y });
+  const atSend = await disc();
+  await scene('receive').click();
+  const atReceive = await disc();
+  const looks = [
+    ...await luminance([{ type: 'png', data: atSend.shot }], atSend.x, atSend.y),
+    ...await luminance([{ type: 'png', data: atReceive.shot }], atSend.x, atSend.y),
+  ];
+  const cast = await page.context().newCDPSession(page);
+  const painted = [];
+  cast.on('Page.screencastFrame', ({ data, sessionId }) => {
+    painted.push({ type: 'jpeg', data });
+    cast.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+  });
+  await cast.send('Page.startScreencast', { format: 'jpeg', quality: 90, everyNthFrame: 1 });
+  await page.waitForTimeout(100);
+  await scene('send').click();
+  await page.waitForTimeout(450);
+  await cast.send('Page.stopScreencast');
+  await cast.detach();
+  assert.ok(painted.length > 5, `The screen was seen as it changed: ${painted.length} frames`);
+  const [low, high] = [Math.min(...looks) - 8, Math.max(...looks) + 8];
+  for (const [at, level] of (await luminance(painted, atSend.x, atSend.y)).entries())
+    assert.ok(level >= low && level <= high, `Painted frame ${at}: the disc stays between its looks, ${level} in ${low} to ${high}`);
+  checks.push('One big control, whole and in place, every frame, by sidebar, menu and back and forth, at any window size');
 
   await nativeMenu('Send');
   await assertNothingSelects();

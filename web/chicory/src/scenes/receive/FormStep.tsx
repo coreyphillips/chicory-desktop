@@ -113,7 +113,7 @@ export function FormStep({
   const live = usePaneActive();
   const { bloom } = useBloom();
   const { room } = useReceiveHost();
-  const landing = useLaunchLanding();
+  const landing = useLaunchLanding(room);
   const showNote = noteOpen || note !== '';
   // A refused amount is radish until another is entered, and the way on
   // waits for that, dimmed (P10, 19-receive-refusal-pip).
@@ -224,6 +224,7 @@ export function FormStep({
             hint={stale ? copy.receive.stale : undefined}
             size={CONTROL}
             tone="primary"
+            turns
             disabled={!stale && (!ready || refusedAmount)}
             blocked={stale}
             busy={busy}

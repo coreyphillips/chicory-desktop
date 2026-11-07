@@ -91,6 +91,7 @@ export function CircleControl({
   const control = (
     <Reanimated.View style={[refusal.style, pressStyle]}>
       <Pressable
+        {...{ dataSet: { bigControl: 'true' } }}
         ref={ref}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel}
@@ -112,11 +113,13 @@ export function CircleControl({
           style={[styles.tint, refusal.tint]}
         />
         {children ?? (
-          <Glyph
-            name="send"
-            size={32}
-            color={dust ? palette.dust : palette.cream}
-          />
+          <View {...{ dataSet: { bigArrow: 'true' } }} style={styles.arrow}>
+            <Glyph
+              name="send"
+              size={32}
+              color={dust ? palette.dust : palette.cream}
+            />
+          </View>
         )}
         {busy ? (
           <View style={styles.orbit}>
@@ -207,6 +210,8 @@ const styles = StyleSheet.create({
     backgroundColor: palette.radishWash,
   },
   glyph: { position: 'absolute' },
+  // The arrow's box, the size of Receive's, for a switch to turn it in place.
+  arrow: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   // Absolute children sit inside the border, so the orbit steps out over it.
   orbit: {
     position: 'absolute',

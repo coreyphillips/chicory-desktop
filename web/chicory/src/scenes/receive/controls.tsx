@@ -48,13 +48,8 @@ export const TARGET = 48;
 /** The quote's expiry ring, just outside the way on. */
 export const RING = CONTROL + 16;
 
-/**
- * The row the way on sits in, at the bottom of every step: as tall as the
- * quote's ring, so the way on's centre is at one height from the amount to
- * the quote to the request, and the thumb stays where it was (P10, where it
- * jumped from about 750pt to 398 to 574).
- */
-export const CONTROL_ROW = RING;
+// The row the way on sits in, as tall as the quote's ring (stage/layout).
+export { CONTROL_ROW } from '../../stage/layout';
 
 /** How long refresh takes to turn once as it arrives (REDESIGN.md 4). */
 const TURN_MS = 500;
@@ -142,6 +137,7 @@ export function GlyphButton({
   expanded,
   value,
   focusRef,
+  turns = false,
   children,
 }: PropsWithChildren<{
   glyph: GlyphName;
@@ -163,6 +159,8 @@ export function GlyphButton({
   /** What the children show, as a screen reader hears it after the label. */
   value?: string;
   focusRef?: Focus;
+  /** It is the big arrow Send's control turns into, and back. */
+  turns?: boolean;
 }>) {
   const live = usePaneActive();
   const { reduced } = useMotionPrefs();
@@ -231,6 +229,7 @@ export function GlyphButton({
             </Decor>
           ) : null}
           <Pressable
+            {...(turns ? { dataSet: { bigControl: 'true' } } : {})}
             ref={focusRef}
             accessibilityRole="button"
             accessibilityLabel={label}
@@ -275,7 +274,15 @@ export function GlyphButton({
                 />
               ) : null}
               <Reanimated.View key={ink} entering={FADE_IN} exiting={FADE_OUT}>
-                {confirm === undefined ? (
+                {turns ? (
+                  <View {...{ dataSet: { bigArrow: 'true' } }} style={styles.arrow}>
+                    <Glyph
+                      name={glyph}
+                      size={Math.round(size * 0.42)}
+                      color={ink}
+                    />
+                  </View>
+                ) : confirm === undefined ? (
                   <Glyph
                     name={glyph}
                     size={Math.round(size * 0.42)}
@@ -443,6 +450,8 @@ export function WarningPips({ warnings }: { warnings: string[] }) {
 }
 
 const styles = StyleSheet.create({
+  // The arrow's box, the size of Send's, for a switch to turn it in place.
+  arrow: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   control: { alignItems: 'center', justifyContent: 'center' },
   pill: {
     flexDirection: 'row',
