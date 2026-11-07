@@ -83,6 +83,39 @@ test('desktop start responds during cold Tor bootstrap and fails without a direc
   assert.equal(manager.probes.length, 0); assert.equal(spawns().length, 0);
 });
 
+test('a failed setup tries again a few times while the daemon stays up, then waits for a new start', async t => {
+  const { manager, rec } = harness(t, { lfbw: { enabled: true, primaryUri: '02' + 'a'.repeat(64) + '@node.example:9735' } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const runtime = manager.runtimeState(rec.id);
+  runtime.proc = {};
+  let tries = 0;
+  manager.setupLfbw = async () => { tries += 1; manager._scheduleSetupRetry(rec.id); };
+  manager._scheduleSetupRetry(rec.id);
+  for (const [wait, expected] of [[5000, 1], [15000, 2], [30000, 3]]) {
+    t.mock.timers.tick(wait - 1); assert.equal(tries, expected - 1, `not before ${wait}ms`);
+    t.mock.timers.tick(1); assert.equal(tries, expected);
+  }
+  t.mock.timers.tick(120000);
+  assert.equal(tries, 3, 'it gives up rather than dialling forever');
+  runtime.proc = null;
+  t.mock.timers.reset();
+});
+
+test('stopping the wallet ends a setup retry', async t => {
+  const { manager, rec } = harness(t, { lfbw: { enabled: true, primaryUri: '02' + 'a'.repeat(64) + '@node.example:9735' } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const runtime = manager.runtimeState(rec.id);
+  runtime.proc = {};
+  let tries = 0;
+  manager.setupLfbw = async () => { tries += 1; };
+  manager._scheduleSetupRetry(rec.id);
+  manager._stopLfbwWatch(runtime);
+  t.mock.timers.tick(60000);
+  assert.equal(tries, 0);
+  runtime.proc = null;
+  t.mock.timers.reset();
+});
+
 test('missing parent IPC prevents a Tor wallet daemon from starting', async t => {
   const { manager, rec, channel, spawns } = harness(t, { networkMode: 'tor' });
   channel.connected = false;

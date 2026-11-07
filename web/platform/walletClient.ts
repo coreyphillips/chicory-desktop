@@ -98,6 +98,27 @@ export function createSameOriginWalletFetch(
   };
 }
 
+/** How a wallet's start stands, as the local service sees it (`startState`). */
+export interface StartState {
+  /** The engine answers. */
+  running: boolean;
+  /** The primary node is connected. */
+  primaryConnected: boolean;
+  /** The start failed, in these words. */
+  failed?: string;
+}
+
+/** What the local service records of a wallet, as `startState` reads it. */
+interface StartRecord {
+  status?: string;
+  healthy?: boolean;
+  lastStartError?: { message?: string } | null;
+  lfbw?: { primaryPubkey?: string };
+}
+
+/** What the engine says of a peer. */
+interface Peer { pubkey?: string; state?: string; connected?: boolean }
+
 export class UmbrelWalletClient extends WalletClient {
   // wallet-core's pinned runtime provides this transport method. Declaring its
   // existing signature lets host settings and stop actions use its response and
@@ -108,6 +129,8 @@ export class UmbrelWalletClient extends WalletClient {
     body?: unknown,
     readOnly?: boolean,
   ) => Promise<unknown>;
+  declare protected _get: (path: string) => Promise<unknown>;
+  declare protected _record: () => Promise<unknown>;
 
   private readonly pendingCreate: PendingCreate;
 
@@ -142,6 +165,25 @@ export class UmbrelWalletClient extends WalletClient {
     this.pendingCreate.seedFrom = { walletId: seedFrom.walletId, network: seedFrom.network, ...(seedFrom.nodeId ? { nodeId: seedFrom.nodeId } : {}) };
     try { return await super.createWallet(rest); }
     finally { this.pendingCreate.seedFrom = undefined; }
+  }
+
+  /**
+   * How the wallet's start stands, for a page to follow it closely: from the
+   * local service's record, with one read of the engine's peers once it
+   * answers. Much lighter than a snapshot, so it can be asked often.
+   */
+  async startState(): Promise<StartState> {
+    const record = await this._record() as StartRecord;
+    if (record.status === 'error')
+      return { running: false, primaryConnected: false, failed: record.lastStartError?.message || 'The wallet could not start.' };
+    if (!record.healthy) return { running: false, primaryConnected: false };
+    const primary = record.lfbw?.primaryPubkey;
+    const peers = primary ? await this._get('/peers').catch(() => null) : null;
+    return {
+      running: true,
+      primaryConnected: Array.isArray(peers) && peers.some((peer: Peer) => peer.pubkey === primary &&
+        (peer.state === 'connected' || peer.state === 'ready' || peer.connected === true)),
+    };
   }
 
   async stopWallet(): Promise<void> {
