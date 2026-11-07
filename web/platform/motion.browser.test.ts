@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { runCustomWebAnimation, runCustomWebLayout, skipExits } from './motion.browser.ts';
+import { restingRect, runCustomWebAnimation, runCustomWebLayout, skipExits } from './motion.browser.ts';
 import { chicoryMotion } from './motion.vite.ts';
 import type { MotionAnimation } from './motion.ts';
 
@@ -32,6 +32,7 @@ class Element extends EventTarget {
   querySelectorAll(): Element[] { return this.children.flatMap(child => [child, ...child.querySelectorAll()]); }
   cloneNode() { const copy = new Element(); copy.style = { ...this.style }; copy.rect = { ...this.rect }; copy.canvas = this.canvas; return copy; }
   getBoundingClientRect() { return { ...this.rect }; }
+  hasAttribute(name: string) { return this.attributes.has(name); }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   removeAttribute(name: string) { this.attributes.delete(name); }
   override dispatchEvent(event: Event) {
@@ -204,6 +205,60 @@ test('skipping exits leaves an entrance alone', () => {
 const config = 'node_modules/react-native-reanimated/lib/module/component/LayoutAnimationConfig.js';
 const transform = chicoryMotion().transform as unknown as (code: string, id: string) => string | null;
 
+const rise = (distance: number) => (() => ({
+  initialValues: { opacity: 0, transform: [{ translateY: distance }] },
+  animations: { opacity: instant(1), transform: [{ translateY: instant(0) }] },
+}));
+// The box follows the pose it is held in, as a browser's does.
+const posed = (element: Element, top: number, ...around: Element[]) => {
+  element.getBoundingClientRect = () => {
+    const offset = [element, ...around].reduce((sum, item) => sum + Number(/translateY\((-?\d+)/.exec(item.style.transform)?.[1] ?? 0), 0);
+    return { ...element.rect, top: top + offset };
+  };
+};
+
+test('a view is read where it comes to rest, while the entrances around it wait to start', () => {
+  const env = environment();
+  try {
+    const outer = env.source;
+    const inner = new Element(); inner.offsetParent = env.parent; inner.canvas = env.canvas; outer.appendChild(inner);
+    const control = new Element(); inner.appendChild(control);
+    runCustomWebAnimation({ entering: rise(12) }, outer as unknown as HTMLElement, 1);
+    runCustomWebAnimation({ entering: rise(12) }, inner as unknown as HTMLElement, 1);
+    posed(control, 706, inner, outer);
+    assert.equal(control.getBoundingClientRect().top, 730);
+    assert.equal(restingRect(control as unknown as HTMLElement).top, 706);
+    // Nothing painted differently: both poses are back as they were.
+    assert.equal(outer.style.transform, 'translateY(12px)');
+    assert.equal(inner.style.transform, 'translateY(12px)');
+    assert.equal(control.getBoundingClientRect().top, 730);
+  } finally { env.restore(); }
+});
+test('a view with nothing entering around it is read as it stands', () => {
+  const env = environment();
+  try {
+    // A pose that is not an entrance, such as a pane on its spring, still counts.
+    env.source.style.transform = 'translateY(40px)';
+    const control = new Element(); env.source.appendChild(control);
+    posed(control, 100, env.source);
+    assert.equal(restingRect(control as unknown as HTMLElement).top, 140);
+    assert.equal(env.source.style.transform, 'translateY(40px)');
+  } finally { env.restore(); }
+});
+test('an entrance stops counting once it ends, and if an exit takes over', () => {
+  const env = environment();
+  try {
+    const source = env.source as unknown as HTMLElement;
+    runCustomWebAnimation({ entering: rise(12) }, source, 1);
+    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), true);
+    env.frame();
+    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), false);
+
+    runCustomWebAnimation({ entering: rise(12) }, source, 1);
+    runCustomWebAnimation({ exiting: rise(12) }, source, 2);
+    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), false);
+  } finally { env.restore(); }
+});
 test('the rewrite fits the installed Reanimated, and a version that no longer does stops the build', () => {
   const code = transform(readFileSync(config, 'utf8'), `/app/${config}`);
   assert.match(code ?? '', /setShouldAnimateExiting\(\) \{\n {4}skipExits\(this\._childInstance, this\.props\.skipExiting\);/);

@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react';
 import { AccessibilityInfo } from 'react-native';
 
+export { restingRect } from '../../../platform/motion.browser';
+
 /**
  * Whether this device wants motion at all.
  *

@@ -347,8 +347,13 @@ export function Canvas({
   // and at once under Reduce Motion, where the circle fades with its row.
   // As the scene goes, it comes back up as the content leaves.
   const launchOpen = useCallback(() => {
-    launch.x.set(landingAt.x);
-    launch.y.set(landingAt.y);
+    // From one scene straight to the other the control is already drawn, so
+    // the circle sets off from it, and glides what lies between the two
+    // controls rather than jumping it.
+    if (launch.handover.get() === 0) {
+      launch.x.set(landingAt.x);
+      launch.y.set(landingAt.y);
+    }
     launch.handover.set(reduced ? 1 : 0);
     if (reduced) return;
     launch.handover.set(
