@@ -46,12 +46,7 @@ const SUBSET = [
 // Findings this gallery made that are tracked as product bugs rather than
 // fixed here. They are still audited and reported on every run, and a run
 // fails if one stops reproducing, so the list cannot go stale.
-const KNOWN = [{
-  name: 'settings, reviewing a wallet drain',
-  config: /^compact-.*-x1\.3$/,
-  problem: /^offscreen confirmation button\[Send everything\]/,
-  reason: 'Below 900 CSS px the Settings layer is wider than the window, so the drain hold is cut off to the right.',
-}];
+const KNOWN = [];
 const known = [];
 
 const configName = config => `${config.size.name}-${config.motion === 'reduce' ? 'reduced' : 'motion'}-x${config.zoom}`;
@@ -188,8 +183,10 @@ function audit() {
   }
 
   // Confirmation controls the user has to reach: on screen, or brought fully
-  // on screen by scrolling, as focusing the control does.
-  const outside = rect => rect.left < 0 || rect.top < 0 || rect.right > vw || rect.bottom > vh;
+  // on screen by scrolling, as focusing the control does. A zoomed window has
+  // a fractional height, reported rounded, and scrolling stops on a device
+  // pixel, so a pixel past the edge is arithmetic and not a clipped control.
+  const outside = rect => rect.left < -1 || rect.top < -1 || rect.right > vw + 1 || rect.bottom > vh + 1;
   for (const el of document.querySelectorAll('[data-hold-confirmation]')) {
     if (!live(el) || !outside(el.getBoundingClientRect())) continue;
     const scrolled = [];

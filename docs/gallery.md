@@ -81,6 +81,4 @@ tracked separately. Each entry is still audited and printed in the report on
 every run. If an entry stops reproducing, the run fails so the entry gets
 removed.
 
-- Below 900 CSS px (a compact window at 1.3 zoom), the Settings layer is wider
-  than the window. The wallet drain's "Send everything" hold is cut off to the
-  right and cannot be scrolled into view.
+The list is empty.
