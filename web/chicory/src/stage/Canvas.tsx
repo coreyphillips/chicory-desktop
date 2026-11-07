@@ -55,6 +55,7 @@ import type { Unit } from '../theme';
 import { ScanReveal } from './layers/ScanReveal';
 import {
   COVERED,
+  MINI_STRIP,
   PANE_SETTLE_MS,
   SCANNING,
   STATUS_ROW,
@@ -74,7 +75,7 @@ import {
   CornerControl,
 } from './panes/CornerControl';
 import { EdgeBack } from './panes/EdgeBack';
-import { LaunchProvider, Launched } from './panes/Launch';
+import { LaunchProvider } from './panes/Launch';
 import type { Launch } from './panes/Launch';
 import { SceneLeave } from './panes/Leaving';
 import { Pane, PanesProvider } from './panes/Pane';
@@ -347,13 +348,8 @@ export function Canvas({
   // and at once under Reduce Motion, where the circle fades with its row.
   // As the scene goes, it comes back up as the content leaves.
   const launchOpen = useCallback(() => {
-    // From one scene straight to the other the control is already drawn, so
-    // the circle sets off from it, and glides what lies between the two
-    // controls rather than jumping it.
-    if (launch.handover.get() === 0) {
-      launch.x.set(landingAt.x);
-      launch.y.set(landingAt.y);
-    }
+    launch.x.set(landingAt.x);
+    launch.y.set(landingAt.y);
     launch.handover.set(reduced ? 1 : 0);
     if (reduced) return;
     launch.handover.set(
@@ -530,17 +526,37 @@ export function Canvas({
   // (`SceneLeave`): under the sheet and Home as they come back, which a
   // layout exit drew it over on the device. Out of use, it names no
   // primary element, so a scene opened while it fades claims its own.
+  //
+  // One going straight to the other takes its place in a single commit, and
+  // plays no entrance: their controls share their pixels (`CONTROL_ROW`), so
+  // there is only ever one, whole, and no circle stands in for it. The tap
+  // that asks for it dissolves the change (`swapScene`).
   const topScene =
     scene.name === 'send' || scene.name === 'receive' ? scene : null;
   const [drawnTop, setDrawnTop] = useState<TopScene | null>(topScene);
   const [leaving, setLeaving] = useState<Leaving[]>([]);
+  const [swapped, setSwapped] = useState<number | null>(null);
   if (drawnTop?.key !== topScene?.key) {
     setDrawnTop(topScene);
-    if (drawnTop) {
+    if (drawnTop && topScene) setSwapped(topScene.key);
+    else if (drawnTop) {
       const left = { scene: drawnTop, region };
       setLeaving(list => [...list, left]);
     }
   }
+  // The circle stands in only between the row and a scene. A scene taking
+  // another's place keeps its control whole, whatever a hand-over had left
+  // undone.
+  const topKey = topScene?.key ?? null;
+  const landedKey = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const before = landedKey.current;
+    if (before === topKey) return;
+    landedKey.current = topKey;
+    if (before === null) launchOpen();
+    else if (topKey === null) launchLeave();
+    else launch.handover.set(1);
+  }, [topKey, launchOpen, launchLeave, launch]);
   const [nowhere] = useState<Primaries>(() => new Map());
   const letGo = useCallback(
     (key: number) =>
@@ -554,18 +570,23 @@ export function Canvas({
       scene={at.name}
     >
       <SceneLeave leaving={gone} onGone={() => letGo(at.key)}>
-        <Launched onOpen={launchOpen} onLeave={launchLeave} leaving={gone}>
+        <LayoutAnimationConfig skipEntering={at.key === swapped}>
           {at.name === 'send' ? (
             <SendScene
               {...drawn}
               sceneKey={at.key}
               prefill={at.prefill}
               scanned={at.scanned === true}
+              slotHeight={height - belowStatus - MINI_STRIP}
             />
           ) : (
-            <ReceiveScene {...drawn} sceneKey={at.key} />
+            <ReceiveScene
+              {...drawn}
+              sceneKey={at.key}
+              slotHeight={height - belowStatus - MINI_STRIP}
+            />
           )}
-        </Launched>
+        </LayoutAnimationConfig>
       </SceneLeave>
     </PrimaryFor>
   );

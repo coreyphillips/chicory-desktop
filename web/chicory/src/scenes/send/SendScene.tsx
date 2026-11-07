@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
+import type { LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Activity } from '@beignet/wallet-core';
 import { copy } from '../../design/copy';
@@ -17,6 +18,7 @@ import {
 } from '../../stage/StageContext';
 import { useScanReceiver } from '../../stage/useScanReceiver';
 import { isTestNetwork } from '../home/visual';
+import { slotRoom } from '../receive/host';
 import type { Origin } from './RequestEntry';
 
 /**
@@ -48,14 +50,27 @@ export function SendScene({
   view,
   sceneKey,
   scanned = false,
+  slotHeight,
 }: RegionProps & {
   sceneKey: number;
   prefill: string;
   /** The camera read `prefill` from home. */
   scanned?: boolean;
+  /**
+   * How tall the canvas says the slot will be, so the control is pinned in
+   * the first frame it is drawn rather than a frame after it measures.
+   */
+  slotHeight?: number;
 }) {
   const { actions, state, dispatch, felt } = useStage();
   const insets = useSafeAreaInsets();
+  // As Receive has it: the slot's height, for compose to pin its way on to
+  // the bottom of, so a short window never leaves it below the edge.
+  const [slot, setSlot] = useState<number | null>(slotHeight ?? null);
+  const measure = useCallback((event: LayoutChangeEvent) => {
+    const { height } = event.nativeEvent.layout;
+    setSlot(last => (last === height ? last : height));
+  }, []);
   const screen = useRef<SendHandle>(null);
   const current = useIsCurrentScene(sceneKey);
 
@@ -107,7 +122,7 @@ export function SendScene({
       {/* The balance rests here as the mini strip, so Send leaves it
           clear. */}
       <View style={styles.mini} />
-      <View style={styles.fill}>
+      <View style={styles.fill} onLayout={measure}>
         <SceneSlot label={copy.scene.send} offset={STATUS_ROW + MINI_STRIP}>
           <View style={[styles.fill, { paddingBottom: insets.bottom }]}>
             <SendScreen
@@ -132,6 +147,7 @@ export function SendScene({
               symbol={view.symbol}
               test={isTestNetwork(snapshot.wallet.network)}
               leaving={!current}
+              room={slot === null ? undefined : slotRoom(slot, insets.bottom)}
             />
           </View>
         </SceneSlot>

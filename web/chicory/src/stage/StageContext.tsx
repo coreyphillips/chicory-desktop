@@ -12,6 +12,7 @@ import React, {
 import type { Dispatch, PropsWithChildren, RefObject } from 'react';
 import type { Activity } from '@beignet/wallet-core';
 import type { SafetyKind } from '../motion/speech';
+import { swapScene } from '../../../platform/sceneSwap';
 import { noteRefusedTap } from '../services/perf';
 import { initialStage, scanTarget, stageReducer } from './scene';
 import type {
@@ -57,6 +58,13 @@ export interface StageActions {
   back: () => void;
   home: (fling?: Fling) => void;
   setBusy: (busy: boolean) => void;
+}
+
+/** Whether `to` takes the top slot straight from Send to Receive, or back. */
+function swapsTopScene(from: StageState, to: StageState): boolean {
+  const top = (state: StageState) =>
+    state.scene.name === 'send' || state.scene.name === 'receive';
+  return top(from) && top(to) && from.scene.key !== to.scene.key;
 }
 
 /**
@@ -272,7 +280,8 @@ export function useStageStore(): StageStore {
       }
       const before = latest.current;
       latest.current = stageReducer(before, action);
-      dispatch(action);
+      if (swapsTopScene(before, latest.current)) swapScene(() => dispatch(action));
+      else dispatch(action);
       if (latest.current !== before) motion?.follow(latest.current, fling);
     };
     // A control's handler may be called with its press event; only a

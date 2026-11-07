@@ -1,12 +1,5 @@
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-} from 'react';
-import type { PropsWithChildren } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef } from 'react';
+import { useWindowDimensions } from 'react-native';
 import type { HostInstance } from 'react-native';
 import { useAnimatedStyle, withSpring } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
@@ -62,10 +55,13 @@ export const WATCH_FRAMES = 45;
  * readings would agree on a place the control only starts from, and the
  * circle would land short of it and hop to it as they handed over. What can
  * still move it is read again each frame, the circle's landing following it,
- * until two readings agree, and for WATCH_FRAMES at most.
+ * until two readings agree, and for WATCH_FRAMES at most. A row can move without
+ * changing size, which fires no layout on the web, so it is read again whenever
+ * the window changes, or `moved` does, for a scene that pins its row itself.
  */
-export function useLaunchLanding() {
+export function useLaunchLanding(moved?: unknown) {
   const launch = useLaunch();
+  const { width, height } = useWindowDimensions();
   const style = useAnimatedStyle(
     () => ({ opacity: launch ? launch.handover.get() : 1 }),
     [launch],
@@ -103,6 +99,7 @@ export function useLaunchLanding() {
     };
     read();
   }, [launch]);
+  useEffect(onLayout, [onLayout, moved, width, height]);
   return { ref, onLayout, style };
 }
 
@@ -112,40 +109,4 @@ export function samePlace(
   b: { x: number; y: number },
 ): boolean {
   return Math.abs(a.x - b.x) <= SETTLED_PT && Math.abs(a.y - b.y) <= SETTLED_PT;
-}
-
-/**
- * A scene an action circle opens, Send or Receive, which tells the hand-over
- * as it comes and goes: `onOpen` as it opens, before anything else of it
- * runs, and `onLeave` once, as it goes: as it starts `leaving`, while the
- * canvas fades it out where it was, or else as it is taken away.
- */
-export function Launched({
-  onOpen,
-  onLeave,
-  leaving = false,
-  children,
-}: PropsWithChildren<{
-  onOpen: () => void;
-  onLeave: () => void;
-  leaving?: boolean;
-}>) {
-  const calls = useRef({ onOpen, onLeave });
-  useLayoutEffect(() => {
-    calls.current = { onOpen, onLeave };
-  });
-  const left = useRef(false);
-  useLayoutEffect(() => {
-    const { current } = calls;
-    current.onOpen();
-    return () => {
-      if (!left.current) current.onLeave();
-    };
-  }, []);
-  useLayoutEffect(() => {
-    if (!leaving || left.current) return;
-    left.current = true;
-    calls.current.onLeave();
-  }, [leaving]);
-  return <>{children}</>;
 }
