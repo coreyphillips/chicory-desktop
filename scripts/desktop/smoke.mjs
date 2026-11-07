@@ -138,6 +138,45 @@ try {
   await page.waitForTimeout(800);
   checks.push('Overview balance, Send, Receive and Scan answer a click');
 
+  // Between Send and Receive the big circle glides from one control to the
+  // other and no further. It used to aim 24px below them and hop back up, as
+  // the entrances around the control held it low while it was being read.
+  const primary = label => page.getByRole('button', { name: label, exact: true }).evaluate(el => el.getBoundingClientRect().top);
+  const travel = async scene => {
+    await page.evaluate(() => {
+      const seen = (window.chicoryCircle = []);
+      const frame = () => {
+        if (window.chicoryCircle !== seen) return;
+        for (const el of document.querySelectorAll('button, [role="button"]')) {
+          const box = el.getBoundingClientRect();
+          if (Math.abs(box.width - 88) > 1 || Math.abs(box.height - 88) > 1) continue;
+          let shown = 1;
+          for (let at = el; at; at = at.parentElement) shown *= Number(getComputedStyle(at).opacity);
+          if (shown > 0.02) seen.push(box.top);
+        }
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+    await page.locator(`.browser-sidebar button[data-scene="${scene}"]`).click();
+    await page.waitForTimeout(1000);
+    return page.evaluate(() => { const seen = window.chicoryCircle; window.chicoryCircle = null; return seen; });
+  };
+  await page.locator('.browser-sidebar button[data-scene="send"]').click();
+  await page.waitForTimeout(1000);
+  const atSend = await primary('Review payment');
+  const toReceive = await travel('receive');
+  const atReceive = await primary('Continue');
+  const toSend = await travel('send');
+  for (const tops of [toReceive, toSend]) {
+    assert.ok(tops.length > 20, 'The circle was seen as it travelled');
+    assert.ok(Math.max(...tops) <= Math.max(atSend, atReceive) + 1, `The circle stays above the lower control: ${Math.max(...tops)}`);
+    assert.ok(Math.min(...tops) >= Math.min(atSend, atReceive) - 1, `The circle stays below the higher control: ${Math.min(...tops)}`);
+    const jump = Math.max(...tops.slice(1).map((top, at) => Math.abs(top - tops[at])));
+    assert.ok(jump <= 4, `The circle glides rather than jumps: ${jump}px in a frame`);
+  }
+  checks.push('The big circle glides straight between Send and Receive');
+
   await nativeMenu('Send');
   await assertNothingSelects();
   const address = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);

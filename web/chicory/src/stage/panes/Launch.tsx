@@ -12,6 +12,7 @@ import { useAnimatedStyle, withSpring } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 import { steady } from '../../motion/steady';
 import { springs } from '../../motion/tokens';
+import { restingRect } from '../../services/motion';
 
 /**
  * The hand-over from Home's action circle to the scene it opens (REDESIGN.md
@@ -56,12 +57,12 @@ export const WATCH_FRAMES = 45;
  * hands over, so the two are never drawn apart. Off the canvas the ref and
  * the layout do nothing and the style shows the control.
  *
- * Where the control is read from the window includes whatever still moves
- * it, such as an entrance of the step it is drawn in, so one reading taken
- * as it is laid out could send the circle to where the control was on its
- * way in, several points off where it comes to rest. So the control is
- * read again each frame, the circle's landing following it, until two
- * readings agree, and for WATCH_FRAMES at most.
+ * The control is read as it will rest, without the entrances of the step it
+ * is drawn in (`restingRect`). They wait out a delay before they move, so two
+ * readings would agree on a place the control only starts from, and the
+ * circle would land short of it and hop to it as they handed over. What can
+ * still move it is read again each frame, the circle's landing following it,
+ * until two readings agree, and for WATCH_FRAMES at most.
  */
 export function useLaunchLanding() {
   const launch = useLaunch();
@@ -86,17 +87,19 @@ export function useLaunchLanding() {
     let frames = 0;
     const read = () => {
       if (watch.current !== run) return;
-      ref.current?.measureInWindow((x, y, width, height) => {
-        if (watch.current !== run || !width || !height) return;
-        const at = { x: x + width / 2, y: y + height / 2 };
-        const moved = !last || !samePlace(last, at);
-        last = at;
-        frames += 1;
-        if (!moved) return;
-        launch.x.set(steady(withSpring(at.x, springs.pane)));
-        launch.y.set(steady(withSpring(at.y, springs.pane)));
-        if (frames < WATCH_FRAMES) requestAnimationFrame(read);
-      });
+      if (!ref.current) return;
+      const { left, top, width, height } = restingRect(
+        ref.current as unknown as Element,
+      );
+      if (!width || !height) return;
+      const at = { x: left + width / 2, y: top + height / 2 };
+      const moved = !last || !samePlace(last, at);
+      last = at;
+      frames += 1;
+      if (!moved) return;
+      launch.x.set(steady(withSpring(at.x, springs.pane)));
+      launch.y.set(steady(withSpring(at.y, springs.pane)));
+      if (frames < WATCH_FRAMES) requestAnimationFrame(read);
     };
     read();
   }, [launch]);
