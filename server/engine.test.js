@@ -211,3 +211,25 @@ test('Electrum certificate verification needs the env parser and the option wiri
 	}
 	assert.equal(electrumTlsVerifyAvailable(undefined), false);
 });
+
+test('ranked primaries and the channel send are probed on the daemon module (coreyphillips/beignet#1924)', () => {
+	const { primariesAvailable, channelSendAvailable, PRIMARIES_ROUTE_MARKERS, CHANNEL_SEND_ROUTE_MARKERS } = require('./engine');
+	const { root, bin } = fakeInstall('0.38.0');
+	const dir = path.dirname(bin);
+	try {
+		assert.equal(primariesAvailable(bin), false, 'no daemon module at all');
+		assert.equal(channelSendAvailable(bin), false);
+		fs.writeFileSync(path.join(dir, 'daemon.js'), PRIMARIES_ROUTE_MARKERS.slice(0, -1).join(' '));
+		assert.equal(primariesAvailable(bin), false, 'every route, not most of them');
+		fs.writeFileSync(path.join(dir, 'daemon.js'), PRIMARIES_ROUTE_MARKERS.join(' '));
+		assert.equal(primariesAvailable(bin), true);
+		assert.equal(channelSendAvailable(bin), false, 'the two surfaces are probed apart');
+		fs.writeFileSync(path.join(dir, 'daemon.js'), [...PRIMARIES_ROUTE_MARKERS, ...CHANNEL_SEND_ROUTE_MARKERS].join(' '));
+		assert.equal(channelSendAvailable(bin), true);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+	assert.equal(primariesAvailable(undefined), false);
+	assert.equal(channelSendAvailable(undefined), false);
+});
+

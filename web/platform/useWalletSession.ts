@@ -5,6 +5,7 @@ import type {
   WalletRecord, WalletSnapshot,
 } from '@beignet/wallet-core';
 import { createHostWalletClient, UmbrelWalletClient } from './walletClient.ts';
+import { anyPrimaryConnected } from './primaries.ts';
 import {
   defaultProfile, loadNetworkPreferences, saveNetworkPreferences, validateProfile,
 } from '../chicory/src/services/networks.ts';
@@ -209,7 +210,7 @@ export function useWalletSession(
     if (read && valid(token, adapter) && selectedId.current === wallet.id && read.wallet.id === wallet.id) {
       land(wallet.id, read); setError('');
     }
-    if (valid(token, adapter) && !read?.primary.connected && adapter instanceof UmbrelWalletClient)
+    if (valid(token, adapter) && !anyPrimaryConnected(read) && adapter instanceof UmbrelWalletClient)
       void watchStart.current(adapter, wallet.id, !!read);
   }, [land, setProfile, valid]);
 
@@ -404,7 +405,7 @@ export function useWalletSession(
           const read = await readLive();
           if (!following()) return;
           if (read) { live = true; setStarting(false); }
-          if (read?.primary.connected) {
+          if (anyPrimaryConnected(read)) {
             for (const wait of CONNECT_READS_MS) {
               await pause(wait);
               if (!following()) return;

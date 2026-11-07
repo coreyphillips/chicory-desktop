@@ -102,7 +102,7 @@ export function createSameOriginWalletFetch(
 export interface StartState {
   /** The engine answers. */
   running: boolean;
-  /** The primary node is connected. */
+  /** A primary node is connected: the one primary, or any of the ranked ones. */
   primaryConnected: boolean;
   /** The start failed, in these words. */
   failed?: string;
@@ -113,7 +113,7 @@ interface StartRecord {
   status?: string;
   healthy?: boolean;
   lastStartError?: { message?: string } | null;
-  lfbw?: { primaryPubkey?: string };
+  lfbw?: { primaryPubkey?: string; primaries?: Array<{ pubkey?: string | null }> };
 }
 
 /** What the engine says of a peer. */
@@ -177,12 +177,17 @@ export class UmbrelWalletClient extends WalletClient {
     if (record.status === 'error')
       return { running: false, primaryConnected: false, failed: record.lastStartError?.message || 'The wallet could not start.' };
     if (!record.healthy) return { running: false, primaryConnected: false };
-    const primary = record.lfbw?.primaryPubkey;
-    const peers = primary ? await this._get('/peers').catch(() => null) : null;
+    // Every ranked primary counts (coreyphillips/beignet#1924); a record
+    // from an engine with one primary names that one alone.
+    const keys = (record.lfbw?.primaries ?? [])
+      .map(entry => entry?.pubkey)
+      .filter((key): key is string => typeof key === 'string' && key.length > 0);
+    if (!keys.length && record.lfbw?.primaryPubkey) keys.push(record.lfbw.primaryPubkey);
+    const peers = keys.length ? await this._get('/peers').catch(() => null) : null;
     return {
       running: true,
-      primaryConnected: Array.isArray(peers) && peers.some((peer: Peer) => peer.pubkey === primary &&
-        (peer.state === 'connected' || peer.state === 'ready' || peer.connected === true)),
+      primaryConnected: Array.isArray(peers) && peers.some((peer: Peer) => typeof peer.pubkey === 'string' &&
+        keys.includes(peer.pubkey) && (peer.state === 'connected' || peer.state === 'ready' || peer.connected === true)),
     };
   }
 

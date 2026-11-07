@@ -295,7 +295,7 @@ try {
     electrumHeader: await until('Electrum ready', () => electrumCall('blockchain.block.header', [0])), electrum,
     managers: [subjectWallets, peerWallets] });
   record.pass('regtest-only guards passed before funding or mining', { engineVersion: config.engineVersion,
-    capabilities: { offlineReceive: config.offlineReceiveAvailable, iroh: config.irohAvailable, recovery: config.recoveryAvailable, tor: config.torAvailable } });
+    capabilities: { offlineReceive: config.offlineReceiveAvailable, iroh: config.irohAvailable, recovery: config.recoveryAvailable, tor: config.torAvailable, primaries: config.primariesAvailable, channelSend: config.channelSendAvailable } });
   if ([...stages].every(stage => stage === 'preflight')) throw Object.assign(new Error('preflight only'), { done: true });
 
   // Peer: a funded primary and an independent payer, outside the desktop app.

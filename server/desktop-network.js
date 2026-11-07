@@ -14,7 +14,8 @@ function onionInUri(value) {
 function requiresTor(record) {
   if (!record) return false;
   if (record.networkMode === 'tor' || record.tor === true || isOnionHost(record.electrum?.host)) return true;
-  if ([record.primaryUri, record.lfbw?.primaryUri, record.lfbw?.primaryFallbackUri].some(onionInUri)) return true;
+  const ranked = Array.isArray(record.lfbw?.primaries) ? record.lfbw.primaries.flatMap(entry => [entry?.uri, entry?.fallbackUri]) : [];
+  if ([record.primaryUri, record.lfbw?.primaryUri, record.lfbw?.primaryFallbackUri, ...ranked].some(onionInUri)) return true;
   return (record.recovery?.guardians || []).some(guardian =>
     onionInUri(typeof guardian === 'string' ? guardian : guardian?.uri || guardian?.address));
 }

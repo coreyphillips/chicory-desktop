@@ -142,9 +142,183 @@ function httpError(status, code, message) {
  */
 const parseNodeUri = parsePrimaryUri;
 
-/** Whether a lightning-first block's primary is reached over Iroh. */
+// The most ranked primaries a wallet keeps, the engine's own cap
+// (coreyphillips/beignet#1922).
+const MAX_PRIMARIES = 32;
+
+function isIrohUri(uri) {
+	return /^[^@]+@iroh:/i.test(uri || '');
+}
+
+/** Whether any of a lightning-first block's primaries is reached over Iroh. */
 function isIrohPrimary(lf) {
-	return !!(lf && lf.enabled && lf.mode === 'external' && /^[^@]+@iroh:/i.test(lf.primaryUri || ''));
+	if (!lf || !lf.enabled) return false;
+	if (Array.isArray(lf.primaries) && lf.primaries.some((e) => e && isIrohUri(e.uri))) return true;
+	return lf.mode === 'external' && isIrohUri(lf.primaryUri);
+}
+
+/**
+ * The node keys of a block's ranked primaries (coreyphillips/beignet#1924),
+ * in rank order; a block from before the list has the one primary it named.
+ */
+function primaryPubkeys(lf) {
+	if (!lf || !lf.enabled) return [];
+	if (Array.isArray(lf.primaries)) {
+		const keys = lf.primaries.map((e) => e && e.pubkey).filter(Boolean);
+		if (keys.length) return keys;
+	}
+	return lf.primaryPubkey ? [lf.primaryPubkey] : [];
+}
+
+/**
+ * The one entry a block's scalar fields describe: the sibling wallet of an
+ * internal primary, or the URI of an external one, with the trust and the
+ * setup state the block holds. Null when the block names no primary.
+ */
+function entryFromScalars(lf) {
+	const state = {
+		trusted: lf.trusted !== false,
+		setup: lf.setup || 'pending',
+		setupError: lf.setupError || null,
+		setupAt: lf.setupAt || null
+	};
+	if (lf.mode === 'internal') {
+		if (!lf.primaryWalletId) return null;
+		return { pubkey: lf.primaryPubkey || null, walletId: lf.primaryWalletId, uri: null, fallbackUri: null, ...state };
+	}
+	if (!lf.primaryUri) return null;
+	const pubkey = lf.primaryPubkey || String(lf.primaryUri).split('@')[0] || null;
+	return { pubkey, walletId: null, uri: lf.primaryUri, fallbackUri: lf.primaryFallbackUri || null, ...state };
+}
+
+/**
+ * A block written before the ranked list, read as the one-entry list of the
+ * primary it named (coreyphillips/beignet#1924). Idempotent: a block that
+ * carries the list comes back as it is. Nothing is opened, closed or moved.
+ */
+function migratePrimaries(lf) {
+	if (!lf || !lf.enabled || Array.isArray(lf.primaries)) return lf;
+	const entry = entryFromScalars(lf);
+	return {
+		...lf,
+		primaries: entry ? [entry] : [],
+		primariesThresholdSat: lf.primariesThresholdSat ?? null,
+		primariesReceiveTarget: lf.primariesReceiveTarget ?? null,
+		// Null until the engine's list has been made to agree with the record.
+		primariesSyncedAt: null
+	};
+}
+
+/**
+ * The block's setup state over its ranked entries: ready when any primary is
+ * set up (a receive is steered past the others), failed only when every one
+ * failed, pending otherwise. The error is the first-ranked entry's when it
+ * failed, else the first failed entry's, so the dashboard names the node
+ * that needs attention even while the wallet works.
+ */
+function aggregateSetup(entries) {
+	const list = (entries || []).filter(Boolean);
+	if (!list.length) return { setup: 'pending', setupError: null };
+	const failed = list.filter((e) => e.setup === 'failed');
+	const setupError = (list[0].setup === 'failed' ? list[0] : failed[0] || {}).setupError || null;
+	if (list.some((e) => e.setup === 'ready')) return { setup: 'ready', setupError };
+	if (failed.length === list.length) return { setup: 'failed', setupError };
+	return { setup: 'pending', setupError };
+}
+
+/**
+ * The entry a deposit moves toward: the engine's receive target when the
+ * wallet keeps more than one primary and that node is set up, else the
+ * first-ranked one; null for a block without the list.
+ */
+function receiveTargetEntry(lf) {
+	const entries = Array.isArray(lf && lf.primaries) ? lf.primaries.filter(Boolean) : [];
+	if (entries.length > 1 && lf.primariesReceiveTarget) {
+		const hit = entries.find((e) => e.pubkey === lf.primariesReceiveTarget && e.setup === 'ready');
+		if (hit) return hit;
+	}
+	return entries[0] || null;
+}
+
+function rankOrder(info) {
+	return ((info && info.primaries) || []).slice().sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+}
+
+/**
+ * The engine's list as record entries, in rank order, carrying over what the
+ * record held for the same node (trust, setup state, the onion fallback of
+ * an Iroh primary, which sibling wallet an internal one is). A node the
+ * engine reaches at an address the record cannot read is kept as the engine
+ * gave it and marked failed, so the list still shows it.
+ */
+function engineToEntries(info, prior, { siblingOf = () => null } = {}) {
+	const by = new Map((prior || []).filter(Boolean).map((e) => [e.pubkey, e]));
+	return rankOrder(info).map((row) => {
+		const carry = by.get(row.pubkey) || null;
+		const walletId = (carry && carry.walletId) || siblingOf(row.pubkey) || null;
+		const raw = row.uri ?? (row.host && row.port ? `${row.pubkey}@${row.host}:${row.port}` : null);
+		let uri = walletId ? null : raw;
+		let unsupported = null;
+		if (!walletId) {
+			if (raw === null) unsupported = 'The engine holds no address for this primary node';
+			else {
+				try {
+					uri = parseNodeUri(raw).uri;
+				} catch (err) {
+					unsupported = `Unsupported primary address: ${err.message}`;
+				}
+			}
+		}
+		const sameAddress = !!carry && (walletId ? true : carry.uri === uri);
+		return {
+			pubkey: row.pubkey,
+			walletId,
+			uri,
+			fallbackUri: sameAddress ? carry.fallbackUri || null : null,
+			trusted: carry ? carry.trusted !== false : true,
+			setup: unsupported ? 'failed' : carry ? carry.setup || 'pending' : 'pending',
+			setupError: unsupported ?? (carry ? carry.setupError || null : null),
+			setupAt: carry ? carry.setupAt || null : null
+		};
+	});
+}
+
+/** Whether the engine's row reaches the node where the wanted row says. */
+function sameEngineAddress(row, want) {
+	if (want.uri !== undefined) return row.uri === want.uri;
+	if (row.host === want.host && row.port === want.port) return true;
+	return typeof row.uri === 'string' && row.uri === `${want.pubkey}@${want.host}:${want.port}`;
+}
+
+/**
+ * The engine writes, in order, that make its list equal the wanted rows
+ * (each `{pubkey, host, port}` or `{pubkey, uri}` for Iroh) at the
+ * threshold: removes first (a node whose address moved is removed and added
+ * again, since the engine changes no address in place), then adds (the
+ * engine ranks a new entry last), one reorder when the order then differs,
+ * and the threshold when it differs. Empty when the engine already agrees.
+ */
+function planPrimariesSync(info, wanted, thresholdSat) {
+	const rows = rankOrder(info);
+	const byPubkey = new Map(rows.map((row) => [row.pubkey, row]));
+	const want = (wanted || []).map((w) => w.pubkey);
+	const have = rows.map((row) => row.pubkey);
+	const moved = new Set(
+		(wanted || []).filter((w) => byPubkey.has(w.pubkey) && !sameEngineAddress(byPubkey.get(w.pubkey), w)).map((w) => w.pubkey)
+	);
+	const ops = [];
+	for (const pubkey of have) if (!want.includes(pubkey) || moved.has(pubkey)) ops.push({ op: 'remove', pubkey });
+	const added = [];
+	for (const row of wanted || [])
+		if (!have.includes(row.pubkey) || moved.has(row.pubkey)) {
+			ops.push({ op: 'add', row });
+			added.push(row.pubkey);
+		}
+	const after = [...have.filter((pubkey) => want.includes(pubkey) && !moved.has(pubkey)), ...added];
+	if (want.length > 1 && after.join(',') !== want.join(',')) ops.push({ op: 'reorder', order: want });
+	const threshold = Number.isSafeInteger(thresholdSat) && thresholdSat >= 0 ? thresholdSat : null;
+	if (((info && info.fillThresholdSat) ?? null) !== threshold) ops.push({ op: 'threshold', fillThresholdSat: threshold });
+	return ops;
 }
 
 function isLfbw(rec) {
@@ -157,7 +331,7 @@ function isLfbw(rec) {
  * (setup state, the one-time initial open) when the primary is unchanged so
  * an edit that only touches trust does not re-run a first open.
  */
-function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, existing } = {}) {
+function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, existing: existingBlock } = {}) {
 	if (!input || !input.enabled) return null;
 	if (!available) {
 		throw httpError(
@@ -166,9 +340,14 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 			'The bundled beignet predates lightning-first wallets (JIT receive and direct funding).'
 		);
 	}
+	// A block from before the ranked list is read with the one entry it named,
+	// so an edit carries that entry's state the same way as any other's.
+	const existing = existingBlock && existingBlock.enabled ? migratePrimaries(existingBlock) : existingBlock;
+	const priorEntries = existing && Array.isArray(existing.primaries) ? existing.primaries.filter(Boolean) : [];
 	const sats = parseInt(input.initialChannelSats, 10);
 	const initialChannelSats = Number.isFinite(sats) && sats > 0 ? sats : 0;
 	let block;
+	let entries;
 	if (input.primaryWalletId) {
 		const peer = getRecord ? getRecord(input.primaryWalletId) : null;
 		if (!peer) throw httpError(400, 'BAD_LFBW_PEER', 'The selected primary node does not exist');
@@ -207,32 +386,76 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 			trusted: input.trusted === undefined ? true : !!input.trusted,
 			initialChannelSats
 		};
+		const prior = priorEntries.find((e) => e.walletId === peer.id);
+		const first = {
+			pubkey: peer.nodeId || (prior && prior.pubkey) || null,
+			walletId: peer.id,
+			uri: null,
+			fallbackUri: null,
+			trusted: block.trusted,
+			...entryState(prior)
+		};
+		// The sibling takes rank 1; the other ranked entries stay as they were.
+		entries = [first, ...priorEntries.slice(1).filter((e) => e.walletId !== peer.id && (!peer.nodeId || e.pubkey !== peer.nodeId))];
 	} else {
-		let parsed;
-		let fallback;
-		try {
-			parsed = parseNodeUri(input.primaryUri);
-			// The onion an Iroh primary falls back to, for the same node key.
-			// An edit that names the same primary without a fallback keeps the
-			// one already stored; null clears it.
-			fallback = parsePrimaryFallback(
-				parsed,
-				input.primaryFallbackUri !== undefined
-					? input.primaryFallbackUri
-					: existing && parsed.uri === existing.primaryUri
-						? existing.primaryFallbackUri
-						: undefined
-			);
-		} catch (err) {
-			throw httpError(400, 'BAD_LFBW_PEER', err.message);
+		// One primary by its scalar fields, or the whole ranked list
+		// (coreyphillips/beignet#1924); each entry is a node URI with, for an
+		// Iroh node, an optional onion fallback, trusted unless declined.
+		const listed = Array.isArray(input.primaries) ? input.primaries : null;
+		if (listed && listed.length === 0) {
+			throw httpError(400, 'BAD_LFBW_PEER', 'A lightning-first wallet names at least one primary node');
 		}
-		if (parsed.transport && parsed.transport.type === 'iroh' && !irohAvailable) {
-			throw httpError(
-				400,
-				'IROH_UNSUPPORTED',
-				'The bundled engine does not support Iroh, so it cannot reach this primary node.'
-			);
+		if (listed && listed.length > MAX_PRIMARIES) {
+			throw httpError(400, 'BAD_LFBW_PEER', `A wallet keeps at most ${MAX_PRIMARIES} primary nodes`);
 		}
+		const sources = listed
+			? listed.map((e) => (e && typeof e === 'object' ? e : { uri: e }))
+			: [{ uri: input.primaryUri, fallbackUri: input.primaryFallbackUri, trusted: input.trusted }];
+		entries = [];
+		for (const source of sources) {
+			let parsed;
+			let fallback;
+			const prior = priorEntries.find((e) => e.pubkey && e.uri && String(source.uri || '').startsWith(`${e.pubkey}@`));
+			try {
+				parsed = parseNodeUri(source.uri);
+				// The onion an Iroh primary falls back to, for the same node key.
+				// An edit that names the same primary without a fallback keeps the
+				// one already stored; null clears it.
+				fallback = parsePrimaryFallback(
+					parsed,
+					source.fallbackUri !== undefined
+						? source.fallbackUri
+						: prior && parsed.uri === prior.uri
+							? prior.fallbackUri
+							: undefined
+				);
+			} catch (err) {
+				throw httpError(400, 'BAD_LFBW_PEER', err.message);
+			}
+			if (parsed.transport && parsed.transport.type === 'iroh' && !irohAvailable) {
+				throw httpError(
+					400,
+					'IROH_UNSUPPORTED',
+					'The bundled engine does not support Iroh, so it cannot reach this primary node.'
+				);
+			}
+			if (entries.some((e) => e.pubkey === parsed.pubkey)) {
+				throw httpError(400, 'BAD_LFBW_PEER', 'The same primary node is listed twice');
+			}
+			entries.push({
+				pubkey: parsed.pubkey,
+				walletId: null,
+				uri: parsed.uri,
+				fallbackUri: fallback ? fallback.uri : null,
+				trusted: source.trusted === undefined ? (input.trusted === undefined ? true : !!input.trusted) : !!source.trusted,
+				// The state carries over only for the same node at the same address.
+				...entryState(prior && prior.uri === parsed.uri ? prior : null)
+			});
+		}
+		// A scalar edit replaces the first-ranked entry and keeps the others.
+		if (!listed) entries.push(...priorEntries.slice(1).filter((e) => e.pubkey !== entries[0].pubkey));
+		const parsed = { uri: entries[0].uri, pubkey: entries[0].pubkey };
+		const fallback = entries[0].fallbackUri ? { uri: entries[0].fallbackUri } : null;
 		block = {
 			enabled: true,
 			mode: 'external',
@@ -246,7 +469,7 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 			// time (its open is refused as untrusted), only deposits and
 			// direct funding work, and they confirm first. On by default in
 			// both modes; the external node's trust toward us is its own.
-			trusted: input.trusted === undefined ? true : !!input.trusted,
+			trusted: entries[0].trusted,
 			// A starting channel is opened FROM the primary, which we cannot
 			// command on an external node.
 			initialChannelSats: 0
@@ -258,13 +481,34 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 		existing.mode === block.mode &&
 		existing.primaryWalletId === block.primaryWalletId &&
 		existing.primaryUri === block.primaryUri;
+	// The ranked list (coreyphillips/beignet#1924): the engine's copy is made
+	// to agree with the record at the next setup when the list changed.
+	const listKey = (list) => list.map((e) => `${e.walletId || e.uri}`).join('\n');
+	const sameList = existing && existing.enabled && listKey(priorEntries) === listKey(entries);
+	const threshold = input.primariesThresholdSat;
 	return {
 		...block,
 		initialChannelOpened: samePrimary ? !!existing.initialChannelOpened : false,
 		setup: samePrimary ? existing.setup || 'pending' : 'pending',
 		setupError: samePrimary ? existing.setupError || null : null,
 		setupAt: samePrimary ? existing.setupAt || null : null,
-		previousPrimary: previousPrimaryAfterEdit(existing, block, samePrimary)
+		previousPrimary: previousPrimaryAfterEdit(existing, block, samePrimary),
+		primaries: entries,
+		primariesThresholdSat:
+			threshold === null || (Number.isSafeInteger(threshold) && threshold >= 0)
+				? threshold
+				: (existing && existing.primariesThresholdSat) ?? null,
+		primariesReceiveTarget: sameList ? (existing && existing.primariesReceiveTarget) || null : null,
+		primariesSyncedAt: sameList && threshold === undefined ? (existing && existing.primariesSyncedAt) || null : null
+	};
+}
+
+/** The carried setup state of a prior entry, or a fresh one. */
+function entryState(prior) {
+	return {
+		setup: (prior && prior.setup) || 'pending',
+		setupError: (prior && prior.setupError) || null,
+		setupAt: (prior && prior.setupAt) || null
 	};
 }
 
@@ -305,15 +549,15 @@ function previousPrimaryChannels(previousPrimary, channels) {
 	return (channels || []).filter((c) => c.peerPubkey === previousPrimary.pubkey && isLive(c));
 }
 
-/** The lightning-first wallets whose internal primary is `rec`. */
+/** The lightning-first wallets that keep `rec` as a primary, at any rank. */
 function dependentsOf(rec, records) {
 	if (!rec) return [];
 	return (records || []).filter(
 		(r) =>
 			r.id !== rec.id &&
 			isLfbw(r) &&
-			r.lfbw.mode === 'internal' &&
-			r.lfbw.primaryWalletId === rec.id
+			((r.lfbw.mode === 'internal' && r.lfbw.primaryWalletId === rec.id) ||
+				(Array.isArray(r.lfbw.primaries) && r.lfbw.primaries.some((e) => e && e.walletId === rec.id)))
 	);
 }
 
@@ -674,11 +918,18 @@ module.exports = {
 	normalizeSwaps,
 	swapsEnv,
 	OPERATOR_PASSTHROUGH,
+	MAX_PRIMARIES,
 	parseNodeUri,
 	parsePrimaryFallback,
 	isIrohPrimary,
 	isLfbw,
 	normalizeLfbw,
+	migratePrimaries,
+	primaryPubkeys,
+	aggregateSetup,
+	receiveTargetEntry,
+	engineToEntries,
+	planPrimariesSync,
 	previousPrimaryAfterEdit,
 	previousPrimaryDone,
 	previousPrimaryChannels,

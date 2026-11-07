@@ -57,6 +57,16 @@ and onion Electrum servers. Its bootstrap must succeed before wallet connections
 use that route, and onion failures never fall back to a direct connection.
 Clearnet peers continue to connect directly; this is not an all-traffic VPN.
 
+A wallet can keep several ranked primary nodes (coreyphillips/beignet#1924,
+Beignet 0.37.0 or later). The dashboard's Settings > Primary nodes lists them
+in rank order, adds, moves and removes them and sets a soft fill target; those
+edits go to the wallet's engine, and the local manager follows each one: the
+new node is trusted and dialed, the record mirrors the list, and direct
+funding names whichever node is ranked first. A wallet from before the list
+is read as one entry and behaves as it did; with one primary every engine
+call is as before. A deposit moves toward the node the next receive goes to.
+Emptying the wallet still needs its channels to sit at one node.
+
 To explore the interface without creating a wallet or installing the wallet
 runtime:
 

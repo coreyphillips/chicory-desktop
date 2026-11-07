@@ -17,6 +17,7 @@
  */
 
 const crypto = require('crypto');
+const lfbw = require('./lfbw');
 const path = require('path');
 const express = require('express');
 const { address: bitcoinAddress, networks, Transaction } = require('bitcoinjs-lib');
@@ -166,7 +167,7 @@ function createDesktopDrains(manager, { atomicSave, electrum = electrumRequests,
 			write: (next) => journal.write(next),
 			node: () => (running() && manager.drainAvailable() ? engine : null),
 			refresh,
-			primary: () => manager.registry.get(id)?.lfbw?.primaryPubkey,
+			primaries: () => lfbw.primaryPubkeys(manager.registry.get(id)?.lfbw),
 			ready: () => {
 				const record = manager.registry.get(id);
 				if (!running() || !rt().healthy || record?.lfbw?.setup !== 'ready')

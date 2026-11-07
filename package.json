@@ -32,20 +32,17 @@
   },
   "devDependencies": {
     "@babel/core": "^7.28.5",
+    "@beignet/wallet-core": "github:coreyphillips/beignet-wallet-core#90273846381bbc6775bc5a9a1d27409a18ee0744",
+    "@playwright/test": "1.64.1",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/react-test-renderer": "^19.3.0",
     "@vitejs/plugin-react": "^5.1.1",
-    "react-test-renderer": "^19.2.3",
-    "typescript": "^6.0.3",
-    "vite": "^7.2.2",
-    "electron": "45.2.1",
-    "electron-builder": "26.18.0",
-    "@playwright/test": "1.64.1",
-    "@beignet/wallet-core": "github:coreyphillips/beignet-wallet-core#d1d83e2e173623fcbb5c44190ad265b9f13221e4",
     "@zxing/browser": "^0.1.5",
     "buffer": "^6.0.3",
+    "electron": "45.2.1",
+    "electron-builder": "26.18.0",
     "qrcode": "^1.5.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -57,7 +54,10 @@
     "react-native-svg": "15.15.5",
     "react-native-url-polyfill": "^2.0.0",
     "react-native-web": "^0.21.4",
-    "react-native-worklets": "0.13.0"
+    "react-native-worklets": "0.13.0",
+    "react-test-renderer": "^19.2.3",
+    "typescript": "^6.0.3",
+    "vite": "^7.2.2"
   },
   "engines": {
     "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
