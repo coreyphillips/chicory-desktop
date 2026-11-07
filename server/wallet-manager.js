@@ -70,7 +70,7 @@ const ffor = require('./ffor');
 const netmode = require('./network-mode');
 
 const HEALTH_TIMEOUT_MS = 45000;
-const HEALTH_POLL_MS = 500;
+const HEALTH_POLL_MS = 100;
 // How long an edit to a lightning-first wallet's primary waits, before it
 // answers, for the restarted daemon to be linked with its primary again.
 // The phone's engine reconnects before it answers, and the app reads the
@@ -109,6 +109,10 @@ const WINDOWS_KILL_GRACE_MS = 35000;
 // connections, and restart a daemon whose chain view is stuck.
 const ELECTRUM_PROBE_TIMEOUT_MS = 3000;
 const ELECTRUM_WAIT_POLL_MS = 5000;
+// When a failed lightning-first setup tries again, as the phone does. The
+// engine backs off on its own after a failed dial, but only this brings the
+// setup back from failed, and a first dial over Tor often misses.
+const SETUP_RETRY_MS = [5000, 15000, 30000];
 const CHAIN_WATCH_POLL_MS = 30000;
 const CHAIN_STALL_POLLS = 3;
 const CHAIN_STALL_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
@@ -463,6 +467,8 @@ class WalletManager {
 				// event-driven debounce timer, and the in-flight/backoff guards.
 				lfbwWatch: null,
 				lfbwTimer: null,
+				setupRetry: null,
+				setupRetries: 0,
 				lfbwBusy: false,
 				lfbwRetryAt: 0,
 				// What the last channelize pass decided (why a deposit waits).
@@ -1710,9 +1716,13 @@ class WalletManager {
 			clearTimeout(rt.electrumWait);
 			rt.electrumWait = null;
 		}
+		rt.startBegan = Date.now();
+		rt.startMarks = new Set();
+		rt.setupRetries = 0;
 
 		if (desktopNetwork.enabled() && desktopNetwork.requiresTor(rec)) {
 			await desktopNetwork.ensureTor();
+			this._markStart(id, rt, 'tor ready');
 			if (rt.stopping || this.shuttingDown) return;
 		}
 		if (rec.pendingChainGuard) {
@@ -1724,6 +1734,7 @@ class WalletManager {
 		const runtimeElectrum = await desktopNetwork.resolveElectrum(rec.electrum);
 		if (rt.stopping || this.shuttingDown) return;
 		const reachable = await this._probeElectrum(runtimeElectrum);
+		this._markStart(id, rt, 'electrum probed');
 		// A stop that arrived while the probe was out wins: stopWallet found
 		// no child to kill and wrote running=false, so spawning now would
 		// leave a daemon up that the record and the dashboard say is stopped.
@@ -1794,6 +1805,7 @@ class WalletManager {
 		rt.proc = proc;
 		rt.spawnedEnv = env;
 		rt.startedAt = Date.now();
+		this._markStart(id, rt, 'daemon spawned');
 
 		const emit = (line) => {
 			if (!line.trim()) return;
@@ -1873,10 +1885,25 @@ class WalletManager {
 		this._pollHealth(id).catch(() => {});
 	}
 
+	/**
+	 * One line in the wallet's log, the first time a start reaches `step`,
+	 * with how far into the start it came: what a slow launch spent its time
+	 * on, in Logs and in the Diagnostics report.
+	 */
+	_markStart(id, rt, step) {
+		if (!rt.startMarks || rt.startMarks.has(step)) return;
+		rt.startMarks.add(step);
+		this._log(id, `start: ${step} at ${Date.now() - rt.startBegan}ms`);
+	}
+
 	_stopLfbwWatch(rt) {
 		if (rt.lfbwWatch) {
 			clearInterval(rt.lfbwWatch);
 			rt.lfbwWatch = null;
+		}
+		if (rt.setupRetry) {
+			clearTimeout(rt.setupRetry);
+			rt.setupRetry = null;
 		}
 		if (rt.lfbwTimer) {
 			clearTimeout(rt.lfbwTimer);
@@ -1993,6 +2020,7 @@ class WalletManager {
 			onConnect: () => this._fforReturn(id, { concurrentOnly: true }),
 			onEvent: (name, data) => {
 				if (name === 'peer:connect') {
+					if (data?.pubkey && data.pubkey === rec.lfbw?.primaryPubkey) this._markStart(id, rt, 'primary connected');
 					void this._fforReturn(id, { concurrentOnly: true, peer: data?.pubkey }).catch(err => this._log(id, `Receipt refresh failed: ${err.message}`));
 				}
 				// Channel lifecycle events (and errors naming a channel) go to the
@@ -2304,6 +2332,7 @@ class WalletManager {
 					id,
 					rt.status === 'restore-required' ? 'healthy (restore finished, node running)' : 'healthy'
 				);
+				this._markStart(id, rt, 'healthy');
 				rt.status = 'running';
 				this._runPostStart(id, rt);
 				return;
@@ -3420,16 +3449,34 @@ class WalletManager {
 			lf.setupAt = nowIso();
 			this.registry.upsert(rec);
 			this._log(id, 'lightning-first: setup complete');
+			const rt = this.runtimeState(id);
+			rt.setupRetries = 0;
+			this._markStart(id, rt, 'setup complete');
 			this._scheduleChannelize(id);
 		} catch (err) {
 			lf.setup = 'failed';
 			lf.setupError = err.message;
 			this.registry.upsert(rec);
 			this._log(id, `lightning-first: setup failed: ${err.message}`);
+			this._scheduleSetupRetry(id);
 		} finally {
 			this.lfbwSetupRunning.delete(id);
 		}
 		return this.publicRecord(id);
+	}
+
+	/** Tries a failed setup again, a few times, while the daemon stays up. */
+	_scheduleSetupRetry(id) {
+		const rt = this.runtimeState(id);
+		const wait = SETUP_RETRY_MS[rt.setupRetries || 0];
+		if (wait === undefined || rt.setupRetry || !rt.proc || rt.stopping || this.shuttingDown) return;
+		rt.setupRetries = (rt.setupRetries || 0) + 1;
+		rt.setupRetry = setTimeout(() => {
+			rt.setupRetry = null;
+			if (!rt.proc || rt.stopping || this.shuttingDown) return;
+			this.setupLfbw(id).catch(() => {});
+		}, wait);
+		rt.setupRetry.unref();
 	}
 
 	// Re-apply every lightning-first link a daemon is part of once it is up:

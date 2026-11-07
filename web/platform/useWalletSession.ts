@@ -15,6 +15,16 @@ import { loadCachedSnapshot, saveCachedSnapshot } from '../chicory/src/services/
 export type Tab = 'Wallet' | 'Activity' | 'Settings';
 export const STALE_AFTER_MS = 45000;
 export const RECOVERY_DEADLINE_MS = 60000;
+/** How often a wallet's start is looked at while it comes up, in ms. */
+export const START_WATCH_MS = 300;
+/** How long a start is followed, past Tor's own two minutes, in ms. */
+export const START_WATCH_LIMIT_MS = 150000;
+/**
+ * The reads after the primary connects, in ms from the one that shows it, as
+ * the phone has them: the handshake is done but the channel only counts as
+ * spendable once it has been reestablished, a moment later.
+ */
+const CONNECT_READS_MS = [1500, 4500];
 export const errorMessage = (error: unknown): string => error instanceof Error
   ? error.message : 'The wallet could not complete this action.';
 export function primaryPubkey(snapshot: WalletSnapshot | null | undefined): string {
@@ -37,6 +47,11 @@ type Remembered = {
   prepared?: boolean; backupPending?: boolean;
 };
 type Action = { generation: number };
+/** What the local service answers while a wallet's engine is on its way. */
+const stillStarting = (cause: unknown) => cause instanceof WalletError &&
+  (cause.code === 'NOT_RUNNING' || cause.code === 'PROXY_ERROR');
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 const KEY = 'chicory:host-selection';
 const BACKUP = 'chicory:backup-pending:';
 const factories: SessionDependencies = {
@@ -112,6 +127,10 @@ export function useWalletSession(
   const action = useRef<Action | null>(null);
   const reading = useRef<object | null>(null);
   const locks = useRef(0);
+  // The start being followed (`watchStart`), a newer one taking over.
+  const watching = useRef<object | null>(null);
+  const watchStart = useRef<(adapter: UmbrelWalletClient, id: string, alreadyLive: boolean) => Promise<void>>(async () => {});
+  const [starting, setStarting] = useState(false);
 
   const setProfile = useCallback((value: NetworkProfile) => {
     profile.current = value; setActiveProfile(value);
@@ -180,10 +199,18 @@ export function useWalletSession(
     }
     await adapter.startWallet();
     if (!valid(token, adapter)) return;
-    const read = await adapter.snapshot();
-    if (valid(token, adapter) && selectedId.current === wallet.id && read.wallet.id === wallet.id) {
+    // A start returns before the engine exists, while Tor and the daemon come
+    // up, so a first read can lose the race. That is a wallet still opening,
+    // not a failure: it stays on its loading page or cached view, and the
+    // start is followed from here instead of waiting for the next poll.
+    let read: WalletSnapshot | null = null;
+    try { read = await adapter.snapshot(); }
+    catch (cause) { if (!stillStarting(cause)) throw cause; }
+    if (read && valid(token, adapter) && selectedId.current === wallet.id && read.wallet.id === wallet.id) {
       land(wallet.id, read); setError('');
     }
+    if (valid(token, adapter) && !read?.primary.connected && adapter instanceof UmbrelWalletClient)
+      void watchStart.current(adapter, wallet.id, !!read);
   }, [land, setProfile, valid]);
 
   const wrapClient = useCallback((raw: WalletClientInterface): WalletClientInterface => {
@@ -329,10 +356,11 @@ export function useWalletSession(
   ) => connect(input, options), [connect]);
   const openDevice = openWallet;
 
-  const refresh = useCallback(async () => {
+  /** One read of the wallet, onto the page, which it returns if it landed. */
+  const readLive = useCallback(async (): Promise<WalletSnapshot | null> => {
     const adapter = current.current;
     const id = selectedId.current;
-    if (!adapter || !id || adapter.connection.walletId !== id || reading.current || action.current) return;
+    if (!adapter || !id || adapter.connection.walletId !== id || reading.current || action.current) return null;
     const at = generation.current;
     const token = {};
     reading.current = token;
@@ -343,10 +371,54 @@ export function useWalletSession(
       const read = await adapter.snapshot();
       if (stillCurrent() && read.wallet.id === id) {
         land(id, read); setError('');
+        return read;
       }
-    } catch (cause) { if (stillCurrent()) setError(errorMessage(cause)); }
-    finally { if (reading.current === token) reading.current = null; }
+    } catch (cause) {
+      // While a start is followed, an engine not up yet is no news.
+      if (stillCurrent() && !(watching.current && stillStarting(cause))) setError(errorMessage(cause));
+    } finally { if (reading.current === token) reading.current = null; }
+    return null;
   }, [land]);
+  const refresh = useCallback(async () => { await readLive(); }, [readLive]);
+  /**
+   * Follows a wallet's start, so the page goes live and the dot turns green
+   * as they happen rather than on the next 12 second poll. It holds nothing:
+   * a lock, a switch or a refresh goes ahead, and ends it if the wallet goes.
+   * A read that an action held back is tried again, and the poll stays as the
+   * backstop for one that outlasts it.
+   */
+  watchStart.current = async (adapter, id, alreadyLive) => {
+    const run = {};
+    watching.current = run;
+    const following = () => mounted.current && watching.current === run &&
+      current.current === adapter && selectedId.current === id && adapter.connection.walletId === id;
+    const deadline = Date.now() + START_WATCH_LIMIT_MS;
+    let live = alreadyLive;
+    setStarting(!live);
+    try {
+      while (following() && Date.now() < deadline) {
+        const state = await adapter.startState().catch(() => null);
+        if (!following()) return;
+        if (state?.failed) { setError(state.failed); return; }
+        if (state?.running && (!live || state.primaryConnected)) {
+          const read = await readLive();
+          if (!following()) return;
+          if (read) { live = true; setStarting(false); }
+          if (read?.primary.connected) {
+            for (const wait of CONNECT_READS_MS) {
+              await pause(wait);
+              if (!following()) return;
+              await readLive();
+            }
+            return;
+          }
+        }
+        await pause(START_WATCH_MS);
+      }
+    } finally {
+      if (watching.current === run) { watching.current = null; if (mounted.current) setStarting(false); }
+    }
+  };
   useEffect(() => {
     if (!client || !walletId) return;
     const wake = () => { if (document.visibilityState === 'visible') void refresh(); };
@@ -518,7 +590,7 @@ export function useWalletSession(
 
   return {
     client, wallets, walletId, snapshot, activeProfile, rememberedSession, deviceHint,
-    initializing, connecting, selecting, refreshing, closing, erasing,
+    initializing, connecting: connecting || starting, selecting, refreshing, closing, erasing,
     switching, switchTarget, switchError, networkEditor, deviceVisible, error,
     setError, setSwitchError, setNetworkEditor, setDeviceVisible, refresh, manualRefresh,
     retrySetup, selectWallet, openDevice, openWallet, createDefaultWallet,

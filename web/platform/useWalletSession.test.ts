@@ -4,11 +4,12 @@ import { registerHooks } from 'node:module';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import type { ReactTestRenderer } from 'react-test-renderer';
-import { DemoWalletClient, DEFAULT_PRIMARY_URI } from '@beignet/wallet-core';
+import { DemoWalletClient, DEFAULT_PRIMARY_URI, WalletError } from '@beignet/wallet-core';
 import type {
   CreatedWallet, CreateWalletInput, HostConfig, WalletRecord, WalletSnapshot,
 } from '@beignet/wallet-core';
 import { UmbrelWalletClient } from './walletClient.ts';
+import type { StartState } from './walletClient.ts';
 import type { SessionDependencies } from './useWalletSession.ts';
 
 registerHooks({
@@ -97,6 +98,8 @@ class Host extends UmbrelWalletClient {
     return created;
   }
   override async updateWalletSettings() { this.events.push('settings'); }
+  state: (() => Promise<StartState>) = async () => ({ running: true, primaryConnected: true });
+  override async startState() { this.events.push('state'); return this.state(); }
 }
 /** The desktop wallet service's encrypted store, in memory. */
 let secureDelay: Promise<unknown> | null = null;
@@ -617,4 +620,86 @@ test('a launch paused for the app lock keeps its opening wait and opens once res
   await act(async () => { resume(); });
   assert.equal(session.walletId, record.id);
   assert.equal(session.initializing, false);
+});
+
+const settle = (ms: number) => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
+const notRunning = () => { throw new WalletError('Wallet is not running', 'NOT_RUNNING', 503); };
+
+test('a start that outruns its first read is no failure, and the wallet goes live the moment it can', async () => {
+  const host = new Host();
+  let up = false;
+  let connected = false;
+  host.read = async () => up
+    ? { ...snapshot(record), primary: { ...snapshot(record).primary, connected } }
+    : notRunning();
+  host.state = async () => ({ running: up, primaryConnected: connected });
+  const app = await mount(host);
+  await settle(50);
+  assert.equal(app.session.error, '', 'the failed first read is not reported');
+  assert.equal(app.session.snapshot, null);
+  assert.equal(app.session.connecting, true, 'it reads as opening, not as stopped');
+  up = true;
+  await settle(450);
+  assert.equal(app.session.snapshot?.primary.connected, false, 'it goes live as soon as the engine answers');
+  assert.equal(app.session.connecting, false);
+  connected = true;
+  await settle(450);
+  assert.equal(app.session.snapshot?.primary.connected, true, 'and green as soon as the primary connects, not on a 12 second poll');
+});
+
+test('a read that fails for any other reason is still reported', async () => {
+  const host = new Host();
+  host.read = async () => { throw new WalletError('The disk is full.', 'HOST_ERROR', 500); };
+  const app = await mount(host);
+  await settle(50);
+  assert.equal(app.session.error, 'The disk is full.');
+});
+
+test('a start that fails says why, and stops being followed', async () => {
+  const host = new Host();
+  host.read = async () => notRunning();
+  host.state = async () => ({ running: false, primaryConnected: false, failed: 'Tor could not connect.' });
+  const app = await mount(host);
+  await settle(50);
+  assert.equal(app.session.error, 'Tor could not connect.');
+  assert.equal(app.session.connecting, false);
+  const asked = host.events.filter(event => event === 'state').length;
+  await settle(700);
+  assert.equal(host.events.filter(event => event === 'state').length, asked, 'nothing more is asked');
+});
+
+test('a lock during a start ends the watch and holds up nothing', async () => {
+  const host = new Host();
+  host.read = async () => notRunning();
+  host.state = async () => ({ running: false, primaryConnected: false });
+  const app = await mount(host);
+  await settle(50);
+  await act(async () => { await app.session.disconnect(); });
+  assert.equal(app.session.client, null, 'the lock went straight through');
+  await settle(400);
+  const asked = host.events.filter(event => event === 'state').length;
+  await settle(700);
+  assert.equal(host.events.filter(event => event === 'state').length, asked, 'nothing more is asked');
+  assert.equal(app.session.connecting, false);
+});
+
+test('the start state comes from the service, and reads the engine only once it answers', async () => {
+  const peers = [{ pubkey: 'p1', state: 'ready' }];
+  const asked: string[] = [];
+  let record: Record<string, unknown> = { status: 'starting', healthy: false, lfbw: { enabled: true, primaryPubkey: 'p1' } };
+  const client = new UmbrelWalletClient({
+    walletId: 'w1',
+    fetch: (async (path: string) => {
+      asked.push(String(path));
+      return new Response(JSON.stringify({ ok: true, result: /peers$/.test(String(path)) ? peers : record }));
+    }) as typeof fetch,
+  });
+  assert.deepEqual(await client.startState(), { running: false, primaryConnected: false });
+  assert.deepEqual(asked, ['/api/wallets/w1'], 'a wallet still starting is not asked for peers');
+  record = { status: 'running', healthy: true, lfbw: { enabled: true, primaryPubkey: 'p1' } };
+  assert.deepEqual(await client.startState(), { running: true, primaryConnected: true });
+  peers[0].state = 'disconnected';
+  assert.deepEqual(await client.startState(), { running: true, primaryConnected: false });
+  record = { status: 'error', healthy: false, lastStartError: { message: 'Port taken.' }, lfbw: { enabled: true } };
+  assert.deepEqual(await client.startState(), { running: false, primaryConnected: false, failed: 'Port taken.' });
 });
