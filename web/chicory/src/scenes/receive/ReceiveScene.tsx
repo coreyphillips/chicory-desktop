@@ -4,7 +4,7 @@ import type { LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { copy } from '../../design/copy';
 import { ReceiveScreen } from '../../screens/Receive';
-import { isTestNetwork } from '../home/visual';
+import { isTestNetwork, receiveTargetOfflineAvailable } from '../home/visual';
 import type { RegionProps } from '../../stage/Canvas';
 import { MINI_STRIP, STATUS_ROW } from '../../stage/layout';
 import { Arriving } from '../../stage/panes/Arriving';
@@ -79,8 +79,9 @@ export function ReceiveScene({
                 offlineReceivableSats={snapshot.balance.offlineReceivableSats}
                 walletId={snapshot.wallet.id}
                 primaryOfflineAvailable={
-                  snapshot.primary?.offlineReceiveAvailable
+                  receiveTargetOfflineAvailable(snapshot)
                 }
+                primaries={snapshot.primaries}
                 disabled={stale && !opening}
                 opening={opening}
                 hidden={view.hidden}

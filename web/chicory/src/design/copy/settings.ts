@@ -26,6 +26,9 @@ export const settings = {
     summary: (name: string, network: string) => `${name}, ${network}.`,
     connected: 'Primary connected',
     connecting: 'Primary connecting',
+    /** The card's status with several primaries: how many answer. */
+    count: (connected: number, total: number) =>
+      `${connected} of ${total} primaries connected`,
   },
 
   wallet: {
@@ -98,6 +101,52 @@ export const settings = {
     notReconnected:
       'Primary node saved. Your wallet has not reconnected to it yet; existing channels remain available.',
     retried: 'Connection setup requested. Your wallet will update shortly.',
+  },
+
+  /**
+   * The Primary node row when the wallet ranks several primaries
+   * (coreyphillips/beignet#1924): the list, each node's state, what moves
+   * one up or down, what removes one, the soft fill target, and the way to
+   * add another. The add form keeps the one-primary panel's control names,
+   * which the suites look up.
+   */
+  primaries: {
+    heading: 'Primary nodes',
+    count: (connected: number, total: number) =>
+      `${connected} of ${total} connected`,
+    intro:
+      'A receive goes to the first node in rank order that is below the fill target, else to the one holding the least. Existing channels stay whatever the order.',
+    rank: (rank: number) => `Rank ${rank}`,
+    receiveTarget: 'Next receive goes here',
+    balance: 'Balance',
+    channels: (count: number) =>
+      count === 1 ? '1 channel' : `${count} channels`,
+    noChannel: 'No channel yet',
+    moveUp: (rank: number) => `Move rank ${rank} up`,
+    moveDown: (rank: number) => `Move rank ${rank} down`,
+    remove: (rank: number) => `Remove rank ${rank}`,
+    removeKeeps:
+      'Existing channels and funds with this node stay in your wallet. It is no longer used for new receives.',
+    confirmRemove: 'Remove this primary node',
+    add: 'Add a primary node',
+    addHint:
+      'The new node is trusted for instant funding and ranked last. Rank it higher afterwards if you want receives to go there first.',
+    threshold: 'Soft fill target',
+    thresholdHint:
+      'Sats of balance a node is filled to before receives move on to the next. Leave it empty to turn the target off: the first node then takes every receive.',
+    thresholdOff: 'Off',
+    saveThreshold: 'Save fill target',
+    retryAll: 'Retry connections',
+    adding: 'Adding your primary node…',
+    added: 'Primary node added.',
+    addedNotConnected:
+      'Primary node added. Your wallet has not connected to it yet.',
+    removing: 'Removing the primary node…',
+    removed: 'Primary node removed. Its channels and funds stay.',
+    reordering: 'Saving the order…',
+    reordered: 'Primary order saved.',
+    savingThreshold: 'Saving the fill target…',
+    thresholdSaved: 'Fill target saved.',
   },
 
   /** The group of what moves money out of this wallet, or this wallet away. */

@@ -37,6 +37,7 @@ import { durations, springs } from '../motion/tokens';
 import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { unlockGlyph } from '../scenes/phases/visual';
 import { EmptyWallet } from '../scenes/settings/EmptyWallet';
+import { PrimariesPanel } from '../scenes/settings/PrimariesPanel';
 import { DiagnosticsPanel } from '../scenes/settings/Diagnostics';
 import { useFieldScan } from '../scenes/settings/fieldScan';
 import { AutoPayGlyph, HapticsGlyph } from '../scenes/settings/glyphMotion';
@@ -62,6 +63,7 @@ import {
   useDip,
   useRevealOnOpen,
 } from '../scenes/settings/hub';
+import { anyPrimaryConnected } from '../scenes/home/visual';
 import {
   answering,
   cardBloom,
@@ -72,6 +74,7 @@ import {
   hubItems,
   networkWords,
   nextOpen,
+  primariesWords,
   primaryWords,
 } from '../scenes/settings/hubModel';
 import type {
@@ -1216,6 +1219,9 @@ export function SettingsScreen({
   // null while the wallet is being asked; '' when it reports no version.
   const [engineVersion, setEngineVersion] = useState<string | null>(null);
   const [drainAvailable, setDrainAvailable] = useState(false);
+  // The engine ranks several primaries (coreyphillips/beignet#1924): the
+  // Primary node row then lists them. Off, the one-primary panel is unchanged.
+  const [primariesAvailable, setPrimariesAvailable] = useState(false);
   const { outcome, run, busy } = useSettingsOutcome();
   useOutcomeFeedback(outcome);
 
@@ -1247,6 +1253,7 @@ export function SettingsScreen({
         if (active) {
           setEngineVersion(config?.engineVersion || '');
           setDrainAvailable(config?.drainAvailable === true);
+          setPrimariesAvailable(config?.primariesAvailable === true);
         }
       })
       .catch(() => {});
@@ -1310,6 +1317,65 @@ export function SettingsScreen({
     });
   }
 
+  // The ranked primaries' edits (coreyphillips/beignet#1924). Each asks the
+  // engine, then reads the wallet again, so the list on screen is the
+  // engine's; whether a new node has connected is answered by a fresh read,
+  // as a primary change's is.
+  async function addPrimaryEntry(
+    uri: string,
+    done: () => void,
+    fallbackUri?: string,
+  ) {
+    await run(words.primaries.adding, async () => {
+      const policy = await client.addPrimary(
+        fallbackUri === undefined ? { uri } : { uri, fallbackUri },
+      );
+      done();
+      onRefresh();
+      const added = policy.primaries.find(entry => uri.startsWith(entry.pubkey));
+      return added?.connected
+        ? { phase: 'success' as const, message: words.primaries.added }
+        : {
+            phase: 'warning' as const,
+            message: words.primaries.addedNotConnected,
+          };
+    });
+  }
+  async function removePrimaryEntry(pubkey: string) {
+    await run(words.primaries.removing, async () => {
+      await client.removePrimary(pubkey);
+      onRefresh();
+      return { phase: 'success' as const, message: words.primaries.removed };
+    });
+  }
+  async function movePrimary(pubkey: string, direction: 'up' | 'down') {
+    await run(words.primaries.reordering, async () => {
+      const order = (snapshot.primaries ?? [])
+        .slice()
+        .sort((a, b) => a.rank - b.rank)
+        .map(entry => entry.pubkey);
+      const at = order.indexOf(pubkey);
+      const to = direction === 'up' ? at - 1 : at + 1;
+      if (at >= 0 && to >= 0 && to < order.length) {
+        order.splice(at, 1);
+        order.splice(to, 0, pubkey);
+        await client.reorderPrimaries(order);
+        onRefresh();
+      }
+      return { phase: 'success' as const, message: words.primaries.reordered };
+    });
+  }
+  async function saveThreshold(sats: number | null) {
+    await run(words.primaries.savingThreshold, async () => {
+      await client.setPrimariesThreshold(sats);
+      onRefresh();
+      return {
+        phase: 'success' as const,
+        message: words.primaries.thresholdSaved,
+      };
+    });
+  }
+
   const lead = backupPending && !!onBackupSaved;
   const erasable = !!onErase;
   const backupFile = fullBackupAvailable();
@@ -1326,13 +1392,17 @@ export function SettingsScreen({
     backupPending,
   });
   const status = cardStatus(snapshot, live);
-  const primary = primaryWords(snapshot, live);
+  const primary = primariesAvailable
+    ? primariesWords(snapshot, live)
+    : primaryWords(snapshot, live);
   const network = networkWords(snapshot.wallet.network);
   const draining = drainWords(drain);
-  // Emptying needs the primary node, so the row waits for it, unless a
-  // drain is already shown in it or it is open to be closed.
-  const emptyHeld =
-    (busy || !snapshot.primary.connected) && !drain && open !== 'empty';
+  // Emptying needs a primary node connected, so the row waits for one,
+  // unless a drain is already shown in it or it is open to be closed.
+  const primaryUp = primariesAvailable
+    ? anyPrimaryConnected(snapshot)
+    : snapshot.primary.connected;
+  const emptyHeld = (busy || !primaryUp) && !drain && open !== 'empty';
 
   const drawRow = (item: HubEntry): ReactNode => {
     const at = { edge: item.edge, step: item.step };
@@ -1357,7 +1427,11 @@ export function SettingsScreen({
             id="primary"
             {...at}
             glyph="bolt"
-            label={words.primary.heading}
+            label={
+              primariesAvailable
+                ? words.primaries.heading
+                : words.primary.heading
+            }
             value={primary.words}
             look={primary.look}
             attention={primary.attention}
@@ -1368,13 +1442,28 @@ export function SettingsScreen({
             onToggle={toggle}
           >
             {open === 'primary' ? (
-              <PrimaryPanel
-                snapshot={snapshot}
-                outcome={outcome}
-                busy={busy}
-                onSave={savePrimary}
-                onRetry={retry}
-              />
+              primariesAvailable ? (
+                <PrimariesPanel
+                  snapshot={snapshot}
+                  feedback={<Outcome outcome={outcome} />}
+                  busy={busy}
+                  unit={unit}
+                  symbol={symbol}
+                  onAdd={addPrimaryEntry}
+                  onRemove={removePrimaryEntry}
+                  onMove={movePrimary}
+                  onThreshold={saveThreshold}
+                  onRetry={retry}
+                />
+              ) : (
+                <PrimaryPanel
+                  snapshot={snapshot}
+                  outcome={outcome}
+                  busy={busy}
+                  onSave={savePrimary}
+                  onRetry={retry}
+                />
+              )
             ) : null}
           </DisclosureRow>
         );
@@ -1442,7 +1531,7 @@ export function SettingsScreen({
                 key={snapshot.wallet.id}
                 client={client}
                 snapshot={snapshot}
-                disabled={busy || !snapshot.primary.connected}
+                disabled={busy || !primaryUp}
                 onRead={onRead ?? onRefresh}
                 unit={unit}
                 symbol={symbol}

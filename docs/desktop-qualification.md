@@ -34,7 +34,7 @@ CHICORY_ELECTRON_EXECUTABLE="release/mac-arm64/Chicory.app/Contents/MacOS/Chicor
 Without `CHICORY_ELECTRON_EXECUTABLE` the source checkout runs instead, which
 does not qualify a package. `CHICORY_QUALIFY_STAGES` selects stages:
 `preflight`, `payments`, `restart`, `crash`, `persistence`, `offline`, `max`,
-`drain`, `recovery`, `transport`, `backup`. Results go to
+`drain`, `primaries`, `recovery`, `transport`, `backup`. Results go to
 `artifacts/qualification/report.json` with host details, lockfile dependency
 versions, and a digest of the whole application plus each part that carries
 code under test (`app.asar`, `dist`, `server` and every `runtime/*` component,
@@ -67,6 +67,7 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | offline | An offline request to a primary that does not settle must be refused rather than issued as an online request. Where the engine supports offline receive, the primary enables settlement. It also opens a channel to the wallet with nothing on the wallet's side, because the engine carries an offline receive only on such a channel unless concurrent receive is negotiated. The capacity the wallet reports for an offline receive is quoted in full and refused one sat over. Then: an offline request, saved with its offline flag, a full app quit, the peer pays, two reopenings, one credit and one row |
 | max | A new wallet in the same app, funded only by a Lightning receive, so the primary opens its one channel just in time and waives its reserve. Send max over Lightning to an invoice with no amount keeps nothing back, the payee is credited and the wallet reaches zero |
 | drain | A new wallet in the same app with that one home channel and a coin below the channelize floor, confirmed in the wallet's own engine. A send-max quote, then, where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain (cooperative close and sweep, each confirmed on chain), the destination credited exactly the drained amount, the later deposit retained |
+| primaries | A second primary node on the peer manager, funded and providing liquidity, is added through the wallet client as the app's Settings > Primary nodes does (coreyphillips/beignet#1924). The engine lists both in rank order and the local manager's record follows with both set up. A soft fill target below the home channel's balance makes the second node the receive target; a Lightning receive quoted without naming a node is taken by it, paid by the payer, and opens the wallet's channel with it. The target is cleared and the second node removed: the list is one node again and the channel with the removed node still counts in the total |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
 | transport | Records whether the bundled engine advertises Iroh |
 | backup | Full backup exported from the funded wallet, then made stale by a later payment. With the original app closed, it is restored into a fresh profile with its own keys. A wrong passphrase and a changed byte are refused and leave nothing. The restored wallet keeps its identity and history, every open channel is held (`restoreRecencyUnproven`), and a payment over it does not complete. Runs last, because the peer may close the channel when it meets the stale copy |

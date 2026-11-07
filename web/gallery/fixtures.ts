@@ -10,6 +10,8 @@
 import type {
   Activity,
   PaymentStatus,
+  PrimariesPolicy,
+  PrimaryStatus,
   ReceiveRequestDetails,
   ReceiveStatus,
   WalletRecord,
@@ -60,18 +62,33 @@ export function snapshotOf({
   primary,
   wallet,
   lfbw,
+  primaries,
+  primariesThresholdSat,
 }: {
   balance?: Partial<WalletSnapshot['balance']>;
   activity?: Activity[];
   primary?: Partial<WalletSnapshot['primary']>;
   wallet?: Partial<WalletRecord>;
   lfbw?: Partial<Lfbw>;
+  /** The ranked primaries, when the engine ranks several; absent otherwise. */
+  primaries?: PrimaryStatus[];
+  primariesThresholdSat?: number | null;
 } = {}): WalletSnapshot {
   const record = walletOf(wallet);
   return {
     wallet: lfbw
       ? { ...record, lfbw: { enabled: true, ...record.lfbw, ...lfbw } }
       : record,
+    // Spread only when given, so a one-primary snapshot is the same object
+    // it always was.
+    ...(primaries
+      ? {
+          primaries,
+          primariesThresholdSat: primariesThresholdSat ?? null,
+          primariesReceiveTarget:
+            primaries.find(entry => entry.isReceiveTarget)?.pubkey ?? null,
+        }
+      : {}),
     balance: {
       totalSats: 261_500,
       availableSats: 250_000,
@@ -90,6 +107,47 @@ export function snapshotOf({
     notes: [],
     updatedAt: NOW,
     demo: false,
+  };
+}
+
+/**
+ * One ranked primary, at `rank`, connected and ready with a channel, the
+ * first the receive target. `over` sets what a state needs.
+ */
+export function primaryOf(
+  rank: number,
+  over: Partial<PrimaryStatus> = {},
+): PrimaryStatus {
+  const pubkey = `02${hex(rank, 64)}`;
+  return {
+    pubkey,
+    rank,
+    uri: `${pubkey}@127.0.0.1:${19846 + rank - 1}`,
+    fallbackUri: null,
+    connected: true,
+    setup: 'ready',
+    trusted: true,
+    balanceSat: 100_000 * rank,
+    channelCount: 1,
+    belowThreshold: true,
+    isReceiveTarget: rank === 1,
+    selectionOrder: rank,
+    offlineReceiveAvailable: true,
+    offlineReceiveReason: null,
+    ...over,
+  };
+}
+
+/** The ranked primaries as a policy, the first receive target. */
+export function policyOf(
+  primaries: PrimaryStatus[],
+  thresholdSat: number | null = null,
+): PrimariesPolicy {
+  return {
+    thresholdSat,
+    receiveTarget:
+      primaries.find(entry => entry.isReceiveTarget)?.pubkey ?? null,
+    primaries,
   };
 }
 

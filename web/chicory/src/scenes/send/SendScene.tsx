@@ -17,7 +17,7 @@ import {
   useStage,
 } from '../../stage/StageContext';
 import { useScanReceiver } from '../../stage/useScanReceiver';
-import { isTestNetwork } from '../home/visual';
+import { anyPrimaryConnected, isTestNetwork } from '../home/visual';
 import { slotRoom } from '../receive/host';
 import type { Origin } from './RequestEntry';
 
@@ -132,7 +132,7 @@ export function SendScene({
               scanned={scanned}
               disabled={gated}
               opening={opening}
-              primaryConnected={snapshot.primary.connected}
+              primaryConnected={anyPrimaryConnected(snapshot)}
               quoteRevision={snapshot.updatedAt}
               balance={snapshot.balance}
               activity={snapshot.activity}

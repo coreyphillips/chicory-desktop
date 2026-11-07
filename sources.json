@@ -1,14 +1,14 @@
 {
   "chicory": {
     "repository": "https://github.com/coreyphillips/chicory",
-    "commit": "fe250a6e4b46497a6a230cc18c8d35b6e132f06b",
+    "commit": "3e2f8bd677c1ae8d267ebfd636c5cc89cd7e8638",
     "destination": "web/chicory",
     "license": "MIT",
     "notes": "Production UI snapshot with browser adapters, static imports and public network defaults. Tests and native platform projects are excluded."
   },
   "chicory-gallery": {
     "repository": "https://github.com/coreyphillips/chicory",
-    "commit": "fe250a6e4b46497a6a230cc18c8d35b6e132f06b",
+    "commit": "3e2f8bd677c1ae8d267ebfd636c5cc89cd7e8638",
     "destination": "web/gallery",
     "license": "MIT",
     "notes": "native-tests/gallery and test-support/fixtures.ts, adapted for host sessions, browser holds and aliased sealed stand-ins. Built only by vite.gallery.config.ts."
