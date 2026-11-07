@@ -46,6 +46,13 @@ export const receive = {
   fee: (value: number) => `Receive fee, ${sats(value)}`,
   net: (value: number) => `You receive, ${sats(value)}`,
   justInTime: 'Provisioned by your primary node just in time.',
+  /** With several primaries, which one takes this receive. */
+  through: (name: string) => `Through ${name}.`,
+  /** None of the ranked primaries could take the receive; the engine's reasons follow. */
+  noPrimary: 'None of your primary nodes can take this request right now.',
+  /** A saved offline request names a node that is no longer a primary. */
+  draftPeerGone:
+    'The saved offline request belongs to a node that is no longer one of your primaries. Stop retrying it to start over.',
   offlineOn:
     'Payable while this wallet is closed. Your primary node prepares it and settles the payment for you.',
   editAmount: 'Edit amount',

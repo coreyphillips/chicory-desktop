@@ -28,7 +28,7 @@ const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
 // backup runs last: restoring a stale copy of the node may lead its peer to
 // close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
+const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'primaries', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
 for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
@@ -578,6 +578,72 @@ try {
       assert.equal(receivedSats, drain.amountSats, 'The destination received what the drain reports');
       state.drain = drain;
       record.pass('two-leg drain completed, later deposit excluded', { drain, lateDeposit: late.txid, loose: loose.txid, receivedSats, remainingSats: after.balance.totalSats });
+    }
+  }
+
+  if (stages.has('primaries')) {
+    // Several ranked primary nodes (coreyphillips/beignet#1924): a second node
+    // on the peer manager, added through the wallet client as Settings >
+    // Primary nodes does, takes a steered receive once the fill target puts it
+    // first, and is removed with its channel kept.
+    const current = await subject.api('/config');
+    if (current.primariesAvailable !== true) {
+      record.unsupported('several ranked primary nodes', `Bundled engine ${current.engineVersion} does not advertise ranked primaries`);
+    } else {
+      const second = (await peer.api('/wallets', { name: `qualify second primary ${run}`, network: 'regtest', networkMode: 'clearnet', publicHost: '127.0.0.1', announce: true })).record;
+      await healthy(peer.api, second.id, false);
+      // The second node provides liquidity (a just-in-time channel on a receive
+      // it cannot otherwise take), as the first does for its dependents.
+      await peer.api(`/wallets/${second.id}`, { liquidityProvider: true }, 'PATCH');
+      await healthy(peer.api, second.id, false);
+      gate.fund(await peer.address(second.id), 5_000_000);
+      gate.mine(1);
+      const secondRecord = await until('second primary funded', () => peer.api(`/wallets/${second.id}`), value => value.healthy && value.nodeId && value.listenPort && value.liquidityProvider === true);
+      const secondUri = `${secondRecord.nodeId}@127.0.0.1:${secondRecord.listenPort}`;
+      const before = await wallet().listPrimaries();
+      assert.equal(before.primaries.length, 1, 'the wallet starts with its one primary');
+      assert.equal(before.primaries[0].pubkey, primaryRecord.nodeId);
+      const totalBefore = (await wallet().snapshot()).balance.totalSats;
+      const added = await wallet().addPrimary({ uri: secondUri });
+      assert.deepEqual(added.primaries.map(entry => [entry.rank, entry.pubkey]), [[1, primaryRecord.nodeId], [2, secondRecord.nodeId]], 'the engine ranks the new node last');
+      const followed = await until('manager record follows the add', () => subject.api(`/wallets/${state.walletId}`),
+        value => value.lfbw?.primaries?.length === 2 && value.lfbw.primaries.every(entry => entry.setup === 'ready') && !!value.lfbw.primariesSyncedAt);
+      // A fill target under the home channel's balance puts the second node
+      // first for the next receive that needs a channel.
+      const steered = await wallet().setPrimariesThreshold(1000);
+      assert.equal(steered.receiveTarget, secondRecord.nodeId, 'the second node is the receive target');
+      await until('receive target mirrored', () => subject.api(`/wallets/${state.walletId}`), value => value.lfbw?.primariesReceiveTarget === secondRecord.nodeId);
+      // A receive the home channel cannot take asks for a just-in-time channel;
+      // the quote names no node, and the engine steers it to the second one. An
+      // amount the home channel can take is a plain invoice either node can be
+      // paid through, which names no node, as before.
+      const room = (await wallet().snapshot()).balance.receivableSats;
+      const plain = await wallet().quoteReceive({ amountSats: 1000, description: 'qualify plain' });
+      const quote = await until('receive quoted at the second node', () => wallet().quoteReceive({ amountSats: room + 20000, description: 'qualify steered' }).catch(error => ({ refused: error.code ?? error.message })),
+        value => value.peer === secondRecord.nodeId);
+      // The second node opens the wallet's channel with it, zero-conf since the
+      // wallet trusts every primary it keeps, and pays a request over it.
+      const subjectRecord = await subject.api(`/wallets/${state.walletId}`);
+      await peer.call(`/wallets/${second.id}/api/channel/connect-and-open`, { pubkey: subjectRecord.nodeId, host: '127.0.0.1', port: subjectRecord.listenPort, amountSats: 300000, trusted: true });
+      const listed = await until('channel with the second node listed', mining(() => wallet().listPrimaries()), policy => policy.primaries[1]?.channelCount >= 1);
+      const incoming = await wallet().receive(await wallet().quoteReceive({ amountSats: 30000, description: 'qualify second node' }));
+      await peer.call(`/wallets/${second.id}/api/invoice/pay`, { bolt11: incoming.bolt11 });
+      await until('steered receive settled', () => wallet().getReceiveStatus(incoming), status => status.phase === 'completed');
+      const credited = await until('second node holds the receive', () => wallet().listPrimaries(), policy => policy.primaries[1]?.balanceSat >= 29000);
+      // Cleared and removed: one primary again, the channel and its funds still the wallet's.
+      await wallet().setPrimariesThreshold(null);
+      const removed = await wallet().removePrimary(secondRecord.nodeId);
+      assert.deepEqual(removed.primaries.map(entry => entry.pubkey), [primaryRecord.nodeId]);
+      await until('manager record follows the remove', () => subject.api(`/wallets/${state.walletId}`), value => value.lfbw?.primaries?.length === 1 && value.lfbw.primaryPubkey === primaryRecord.nodeId);
+      const after = await wallet().snapshot();
+      assert.ok(after.balance.totalSats >= totalBefore + 29000, `the channel with the removed node still counts: ${after.balance.totalSats} against ${totalBefore} before`);
+      record.pass('a second ranked primary added through the wallet client takes a steered receive and is removed with its channel kept', {
+        primaries: listed.primaries.map(entry => ({ rank: entry.rank, pubkey: entry.pubkey, channelCount: entry.channelCount })),
+        receiveTarget: steered.receiveTarget, steeredQuote: { peer: quote.peer, mode: quote.mode, amountSats: room + 20000, homeRoomSats: room }, plainQuoteNamesNoNode: plain.peer === undefined,
+        paymentHash: incoming.paymentHash,
+        secondBalanceSat: credited.primaries[1].balanceSat, managerEntries: followed.lfbw.primaries.map(entry => ({ pubkey: entry.pubkey, setup: entry.setup })),
+        totalBefore, totalAfter: after.balance.totalSats });
+      state.primaries = { second: secondRecord.nodeId };
     }
   }
 

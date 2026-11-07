@@ -65,6 +65,7 @@ export function QuoteStep({
   quote,
   quotedAt,
   offline,
+  peerLabel,
   receivableSats,
   expired,
   busy,
@@ -82,6 +83,8 @@ export function QuoteStep({
   quote: ReceiveQuote;
   quotedAt: number;
   offline: boolean;
+  /** With several primaries, which one takes this receive, as it is said. */
+  peerLabel?: string;
   receivableSats: number;
   expired: boolean;
   busy: boolean;
@@ -111,12 +114,17 @@ export function QuoteStep({
     amountSats: quote.amountSats,
     receivableSats,
   });
-  const how =
+  const how = [
     glyph === 'moon'
       ? copy.receive.offlineOn
       : glyph === 'sprout'
       ? copy.receive.justInTime
-      : '';
+      : '',
+    // Said, never drawn: which primary takes it (REDESIGN.md rule 2).
+    peerLabel && glyph !== 'bolt' ? copy.receive.through(peerLabel) : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   const net = quote.amountSats && quote.netSats !== null ? quote.netSats : null;
   // What the fee's glyph says, heard and whispered.
   const feeWords = [copy.receive.fee(quote.feeSats), how]

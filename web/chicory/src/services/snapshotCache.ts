@@ -87,6 +87,16 @@ export async function loadCachedSnapshot(
     return {
       ...value.snapshot,
       primary: { ...value.snapshot.primary, connected: false },
+      ...(Array.isArray(value.snapshot.primaries)
+        ? {
+            primaries: value.snapshot.primaries.map(
+              (primary: NonNullable<WalletSnapshot['primaries']>[number]) => ({
+                ...primary,
+                connected: false,
+              }),
+            ),
+          }
+        : {}),
     };
   } catch {
     return null;

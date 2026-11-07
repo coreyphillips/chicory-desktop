@@ -4,6 +4,13 @@ export interface OfflineReceiveDraft {
   id: string;
   amountSats: number;
   description: string;
+  /** The mode the request was quoted in; a saved draft is always offline. */
+  mode?: 'offline';
+  /**
+   * The primary the request was quoted at (coreyphillips/beignet#1924), so
+   * a resumed draft is quoted at the same node, never steered to another.
+   */
+  peer?: string;
 }
 const PREFIX = 'com.beignet.wallet.offline-request.';
 const serviceFor = (walletId: string) =>
@@ -39,7 +46,9 @@ export async function loadOfflineReceiveDraft(
     !/^[a-zA-Z0-9_-]{16,160}$/.test(draft.id) ||
     !Number.isSafeInteger(draft.amountSats) ||
     draft.amountSats <= 0 ||
-    typeof draft.description !== 'string'
+    typeof draft.description !== 'string' ||
+    (draft.mode !== undefined && draft.mode !== 'offline') ||
+    (draft.peer !== undefined && !/^0[23][0-9a-f]{64}$/i.test(draft.peer))
   )
     throw Error(
       'The saved payment request could not be read. Check Activity before creating another.',

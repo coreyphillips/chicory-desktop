@@ -221,6 +221,10 @@ export function receiveRefusal(
   if (cap) {
     return { said: copy.receive.providerCap(Number(cap[1])), amount: true };
   }
+  // None of the ranked primaries took it: Receive's words first, then the
+  // engine's reason for each.
+  if (code === 'NO_PRIMARY_AVAILABLE')
+    return { said: `${copy.receive.noPrimary} ${message}`.trim(), amount: false };
   return { said: message, amount: !!code && AMOUNT_REFUSED.has(code) };
 }
 
@@ -239,7 +243,9 @@ export interface RefusalLook {
 }
 
 export function refusalLook(code: string | undefined): RefusalLook {
-  return code === 'PRIMARY_DOWN'
+  // Every primary away, or none able to take the receive, is the same
+  // passing state as the one primary away.
+  return code === 'PRIMARY_DOWN' || code === 'NO_PRIMARY_AVAILABLE'
     ? { tone: 'honey', glyph: 'unplug', haptic: 'warning', shake: false }
     : { tone: 'radish', glyph: 'bang', haptic: 'error', shake: true };
 }

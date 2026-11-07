@@ -527,6 +527,8 @@ export function shownBy(snapshot: WalletSnapshot): string {
     primary.connected,
     primary.setup,
     primary.setupError ?? null,
+    // Another ranked primary coming or going redraws too.
+    snapshot.primaries?.map(entry => [entry.pubkey, entry.connected, entry.setup, entry.isReceiveTarget]) ?? null,
     lfbw ? [lfbw.enabled, lfbw.setup ?? null, lfbw.setupError ?? null] : null,
     activity.map(item => [
       item.id,

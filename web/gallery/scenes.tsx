@@ -14,11 +14,14 @@ import {
   activityOf,
   everyActivity,
   hex,
+  primaryOf,
   requestOf,
   walletOf,
 } from './fixtures';
 import {
   ADDRESS,
+  clientOf,
+  configOf,
   decided,
   drainActivityOf,
   fresh,
@@ -324,6 +327,29 @@ const settingsShots: Shot[] = [
   })),
   settings('the primary node open', () => ({
     steps: [press(words.primary.heading)],
+  })),
+  // Several ranked primaries (coreyphillips/beignet#1924): the row lists
+  // them when the engine ranks primaries.
+  settings('the primary nodes open', () => ({
+    snapshot: onMainnet({
+      primaries: [
+        primaryOf(1),
+        primaryOf(2, { connected: false, isReceiveTarget: false }),
+        primaryOf(3, { isReceiveTarget: false, channelCount: 0, balanceSat: 0 }),
+      ],
+      primariesThresholdSat: 250_000,
+    }),
+    client: clientOf({
+      getConfig: async () => configOf({ primariesAvailable: true, drainAvailable: true }),
+    }),
+    steps: [press(words.primaries.heading)],
+  })),
+  settings('adding a primary node', () => ({
+    snapshot: onMainnet({ primaries: [primaryOf(1), primaryOf(2, { isReceiveTarget: false })] }),
+    client: clientOf({
+      getConfig: async () => configOf({ primariesAvailable: true, drainAvailable: true }),
+    }),
+    steps: [press(words.primaries.heading), press(words.primaries.add)],
   })),
   settings('changing the primary node', () => ({
     steps: [press(words.primary.heading), press(words.primary.change)],

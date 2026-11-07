@@ -84,6 +84,9 @@ export const health = {
     `Could not refresh. Showing the last known state. ${error}`,
   stale: 'Balance not confirmed recently.',
   staleAction: 'Balance not confirmed recently. Refreshing now.',
+  /** With several primaries, how many of them answer. */
+  primariesCount: (connected: number, total: number) =>
+    `${connected} of ${total} primaries connected.`,
   cached: 'Showing the last saved balance until the wallet answers.',
   setupPending: 'Lightning setup is in progress.',
   setupReady: 'Lightning is ready.',

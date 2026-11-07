@@ -4,6 +4,7 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import Reanimated from 'react-native-reanimated';
 import { parseSats } from '@beignet/wallet-core';
 import type {
+  PrimaryStatus,
   ReceiveQuote,
   ReceiveRequest,
   ReceiveStatus,
@@ -59,6 +60,7 @@ export function ReceiveScreen({
   offlineReceivableSats,
   walletId,
   primaryOfflineAvailable,
+  primaries,
   disabled = false,
   opening = false,
   hidden = false,
@@ -79,6 +81,11 @@ export function ReceiveScreen({
   offlineReceivableSats?: number;
   walletId?: string;
   primaryOfflineAvailable?: boolean | null;
+  /**
+   * The ranked primaries, when the engine ranks several: a quote then names
+   * the one that took it, and a saved offline request is quoted at its own.
+   */
+  primaries?: PrimaryStatus[];
   /** Set when the wallet's balance is too old to quote against. */
   disabled?: boolean;
   /**
@@ -111,6 +118,15 @@ export function ReceiveScreen({
   const live = usePaneActive();
   const { width } = useWindowDimensions();
   const [capacityChanged, setCapacityChanged] = useState(false);
+  // With several primaries, the one a quote names, said by rank: a screen
+  // reader hears which node takes the receive, and Settings draws the names.
+  const peerLabel = (pubkey: string | undefined): string | undefined => {
+    if (!pubkey || !primaries || primaries.length <= 1) return undefined;
+    const entry = primaries.find(candidate => candidate.pubkey === pubkey);
+    return entry
+      ? copy.settings.primaries.rank(entry.rank)
+      : `${pubkey.slice(0, 8)}…`;
+  };
   // Receiving offline is an opt-in, never the default: the ordinary request
   // is paid over the home channel or provisioned by the primary just in
   // time. The switch is offered only when the engine advertises offline
@@ -337,6 +353,19 @@ export function ReceiveScreen({
         throw Error(
           'Resume the saved offline request with its original amount and note. Check Activity before creating another.',
         );
+      // A saved request is quoted at the node it was quoted at; one whose
+      // node is no longer a primary cannot be, and says so (the way out is
+      // Stop retrying, which forgets it).
+      if (
+        offline &&
+        pending?.peer &&
+        primaries &&
+        primaries.length > 0 &&
+        !primaries.some(entry => entry.pubkey === pending.peer)
+      )
+        throw Object.assign(new Error(copy.receive.draftPeerGone), {
+          code: 'OFFLINE_PEER_REMOVED',
+        });
       const next = await client.quoteReceive({
         amountSats: amount.trim() ? parseSats(amount) : undefined,
         description: description.trim(),
@@ -346,6 +375,7 @@ export function ReceiveScreen({
               requestId:
                 pending?.id ??
                 (quote?.mode === 'offline' ? quote.id : undefined),
+              ...(pending?.peer ? { peer: pending.peer } : {}),
             }
           : {}),
       });
@@ -377,10 +407,13 @@ export function ReceiveScreen({
     setError(null);
     try {
       if (offline && walletId) {
-        const draft = {
+        const draft: OfflineReceiveDraft = {
           id: quote.id,
           amountSats: quote.amountSats!,
           description: quote.description,
+          mode: 'offline',
+          // The node the quote was priced at, so a resumed draft returns to it.
+          ...(quote.peer ? { peer: quote.peer } : {}),
         };
         await saveOfflineReceiveDraft(walletId, draft);
         pendingOffline.current = draft;
@@ -567,6 +600,7 @@ export function ReceiveScreen({
               quote={quote}
               quotedAt={quotedAt}
               offline={offline}
+              peerLabel={peerLabel(quote.peer)}
               receivableSats={receivableSats}
               expired={quoteExpired}
               busy={busy}

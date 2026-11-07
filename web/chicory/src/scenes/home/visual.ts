@@ -209,7 +209,85 @@ export function vesselVisual(
   return plain;
 }
 
-type Snapshot = Pick<WalletSnapshot, 'wallet' | 'primary' | 'activity'>;
+type Snapshot = Pick<WalletSnapshot, 'wallet' | 'primary' | 'activity'> &
+  Pick<Partial<WalletSnapshot>, 'primaries'>;
+
+/**
+ * The ranked primaries a snapshot carries, rank 1 first, or none when the
+ * engine keeps one primary (`snapshot.primary` alone then speaks for it).
+ */
+export const primariesOf = (
+  snapshot: Pick<Partial<WalletSnapshot>, 'primaries'>,
+): NonNullable<WalletSnapshot['primaries']> => snapshot.primaries ?? [];
+
+/**
+ * The primary a receive that names no peer goes to, as the row and the mark
+ * read its connection: the one the engine marks as the receive target, else
+ * `snapshot.primary`, which is rank 1 and, with one primary, the only one.
+ */
+export function receiveTargetOf(
+  snapshot: Pick<Snapshot, 'primary' | 'primaries'>,
+): Pick<WalletSnapshot['primary'], 'connected' | 'setup' | 'setupError'> {
+  return (
+    primariesOf(snapshot).find(primary => primary.isReceiveTarget) ??
+    snapshot.primary
+  );
+}
+
+/**
+ * Whether the primary a receive would go to settles offline receives, as it
+ * last answered: the receive target's answer, else the one primary's.
+ */
+export const receiveTargetOfflineAvailable = (
+  snapshot: Pick<Snapshot, 'primary' | 'primaries'>,
+): boolean | null | undefined =>
+  primariesOf(snapshot).find(primary => primary.isReceiveTarget)
+    ?.offlineReceiveAvailable ?? snapshot.primary?.offlineReceiveAvailable;
+
+/** Whether any ranked primary is connected; with one primary, whether it is. */
+export const anyPrimaryConnected = (
+  snapshot: Pick<Snapshot, 'primary' | 'primaries'>,
+): boolean => {
+  const ranked = primariesOf(snapshot);
+  return ranked.length > 0
+    ? ranked.some(primary => primary.connected)
+    : snapshot.primary.connected;
+};
+
+/** How many ranked primaries are connected, of how many; total 0 with no list. */
+export function primariesConnected(
+  snapshot: Pick<Partial<WalletSnapshot>, 'primaries'>,
+): { connected: number; total: number } {
+  const ranked = primariesOf(snapshot);
+  return {
+    connected: ranked.filter(primary => primary.connected).length,
+    total: ranked.length,
+  };
+}
+
+/** A compressed public key, as the engine names a peer. */
+const NODE_ID = /^0[23][0-9a-f]{64}$/i;
+
+/**
+ * The primaries' public keys, lower case, as `snapshot` knows them: every
+ * ranked primary's, else the wallet record's own `primaryPubkey`, else the
+ * key before the `@` of the primary's URI. Empty when none is a public key,
+ * as before a wallet's first read, which leaves the primary unknown.
+ */
+export function primaryPubkeys(
+  snapshot: Partial<WalletSnapshot> | null | undefined,
+): Set<string> {
+  const ranked = primariesOf(snapshot ?? {})
+    .map(primary => primary.pubkey)
+    .filter(key => NODE_ID.test(key))
+    .map(key => key.toLowerCase());
+  if (ranked.length > 0) return new Set(ranked);
+  const named = snapshot?.wallet?.lfbw?.primaryPubkey ?? '';
+  if (NODE_ID.test(named)) return new Set([named.toLowerCase()]);
+  const uri = snapshot?.primary?.uri ?? '';
+  const front = uri.slice(0, Math.max(0, uri.indexOf('@')));
+  return NODE_ID.test(front) ? new Set([front.toLowerCase()]) : new Set();
+}
 
 /** Anything off mainnet: play money, drawn in slate so it never passes for real. */
 export const isTestNetwork = (network: string) => network !== 'mainnet';
@@ -232,7 +310,7 @@ export function setupOf(snapshot: Pick<Snapshot, 'wallet' | 'primary'>): Setup {
 
 /** The state of the wallet the status row reads, beyond the snapshot. */
 export interface HealthInput {
-  snapshot: Pick<Snapshot, 'wallet' | 'primary'>;
+  snapshot: Pick<Snapshot, 'wallet' | 'primary' | 'primaries'>;
   /** The balance is too old to spend against. */
   stale: boolean;
   /** A refresh is under way. */
@@ -287,7 +365,7 @@ export const answering = ({
   stale,
   connecting,
 }: Pick<HealthInput, 'snapshot' | 'stale' | 'connecting'>) =>
-  snapshot.primary.connected && !stale && !connecting;
+  receiveTargetOf(snapshot).connected && !stale && !connecting;
 
 export function markVisual(input: HealthInput): MarkVisual {
   const { snapshot, stale, refreshing, connecting, error } = input;
@@ -323,12 +401,16 @@ export function healthText(input: HealthInput): string {
   const { snapshot, stale, refreshing, connecting, error } = input;
   const setup = setupOf(snapshot);
   const { network } = snapshot.wallet;
+  const ranked = primariesConnected(snapshot);
   return [
     error
       ? copy.health.refreshFailedDetail(error)
       : answering(input)
       ? copy.health.fresh
       : copy.health.reconnecting,
+    ranked.total > 1
+      ? copy.health.primariesCount(ranked.connected, ranked.total)
+      : '',
     stale
       ? connecting || refreshing
         ? copy.health.cached

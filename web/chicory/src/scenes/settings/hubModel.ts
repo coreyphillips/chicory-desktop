@@ -2,7 +2,13 @@ import type { WalletSnapshot } from '@beignet/wallet-core';
 import { copy } from '../../design/copy';
 import type { BloomBreath, BloomTone } from '../../glyphs/Bloom';
 import { durations, overlap } from '../../motion/tokens';
-import { answering, isTestNetwork, markVisual, setupOf } from '../home/visual';
+import {
+  answering,
+  isTestNetwork,
+  markVisual,
+  primariesConnected,
+  setupOf,
+} from '../home/visual';
 import type { Setup } from '../home/visual';
 
 /*
@@ -206,7 +212,8 @@ export const nextOpen = (open: HubRow | null, id: HubRow): HubRow | null =>
 
 /** What the card's bloom and its status read of the wallet and the session. */
 export interface CardInput {
-  snapshot: Pick<WalletSnapshot, 'wallet' | 'primary'>;
+  snapshot: Pick<WalletSnapshot, 'wallet' | 'primary'> &
+    Pick<Partial<WalletSnapshot>, 'primaries'>;
   /** A refresh is under way. */
   refreshing: boolean;
   /** The engine is still starting, so the figures are the saved ones. */
@@ -281,7 +288,8 @@ const s = copy.settings;
  * that there is none.
  */
 export function cardStatus(
-  snapshot: Pick<WalletSnapshot, 'primary'>,
+  snapshot: Pick<WalletSnapshot, 'primary'> &
+    Pick<Partial<WalletSnapshot>, 'primaries'>,
   live: boolean,
 ): StatusWords {
   if (!snapshot.primary.uri) {
@@ -292,7 +300,15 @@ export function cardStatus(
       said: s.primary.none,
     };
   }
-  const words = live ? s.card.connected : s.card.connecting;
+  // Several primaries: how many answer, with the mark reading the one a
+  // receive would go to, as the card's bloom does.
+  const ranked = primariesConnected(snapshot);
+  const words =
+    ranked.total > 1
+      ? s.card.count(ranked.connected, ranked.total)
+      : live
+      ? s.card.connected
+      : s.card.connecting;
   return {
     words,
     look: live ? 'live' : 'seeking',
@@ -317,7 +333,8 @@ export function cardWords({
   snapshot,
   live,
 }: {
-  snapshot: Pick<WalletSnapshot, 'wallet' | 'primary'>;
+  snapshot: Pick<WalletSnapshot, 'wallet' | 'primary'> &
+    Pick<Partial<WalletSnapshot>, 'primaries'>;
   live: boolean;
 }): string {
   const { name, network } = snapshot.wallet;
@@ -361,6 +378,39 @@ export function primaryWords(
     look: live ? 'live' : 'seeking',
     attention: false,
     said: connection,
+  };
+}
+
+/**
+ * The Primary nodes row's value when the wallet ranks several: how many of
+ * them answer, with the mark reading the receive target's connection, in
+ * honey with Setup failed once every node's setup has stopped short. With
+ * one or none it is `primaryWords`, unchanged.
+ */
+export function primariesWords(
+  snapshot: Pick<WalletSnapshot, 'wallet' | 'primary'> &
+    Pick<Partial<WalletSnapshot>, 'primaries'>,
+  live: boolean,
+): StatusWords {
+  const ranked = primariesConnected(snapshot);
+  if (ranked.total <= 1) return primaryWords(snapshot, live);
+  const count = s.primaries.count(ranked.connected, ranked.total);
+  const allFailed = (snapshot.primaries ?? []).every(
+    primary => primary.setup === 'failed' || !!primary.setupError,
+  );
+  if (allFailed) {
+    return {
+      words: s.primary.setupFailedValue,
+      look: 'stopped',
+      attention: true,
+      said: `${count}. ${s.primary.setupFailedValue}`,
+    };
+  }
+  return {
+    words: count,
+    look: live ? 'live' : 'seeking',
+    attention: false,
+    said: count,
   };
 }
 

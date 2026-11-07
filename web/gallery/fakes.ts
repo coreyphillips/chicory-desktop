@@ -8,7 +8,6 @@ import type {
   DrainProgress,
   FeeRates,
   HostConfig,
-  PrimariesPolicy,
   ReceiveInput,
   ReceiveQuote,
   ReceiveRequest,
@@ -24,6 +23,8 @@ import type { WalletAdapter } from '../chicory/src/services/wallet';
 import {
   NOW,
   hex,
+  policyOf,
+  primaryOf,
   receiptOf,
   requestOf,
   snapshotOf,
@@ -414,31 +415,18 @@ export function clientOf(over: Partial<WalletAdapter> = {}): WalletAdapter {
     getReceiveStatus: async () => receiptOf('waiting'),
     importReceiveRequest: async () => requestFor(quoteOf()),
     updatePrimary: async () => wallet,
-    // The ranked primaries (coreyphillips/beignet#1924): the one node the
-    // fixtures name, as the engine would list it.
-    listPrimaries: async () => policyFor(wallet),
-    addPrimary: async () => policyFor(wallet),
-    removePrimary: async () => policyFor(wallet),
-    reorderPrimaries: async () => policyFor(wallet),
-    setPrimariesThreshold: async () => policyFor(wallet),
+    // Ranked primaries (coreyphillips/beignet#1924): the preview answers the
+    // same policy to every edit; a state sets `snapshot.primaries` itself.
+    listPrimaries: async () => policyOf([primaryOf(1), primaryOf(2)]),
+    addPrimary: async () => policyOf([primaryOf(1), primaryOf(2), primaryOf(3)]),
+    removePrimary: async () => policyOf([primaryOf(1)]),
+    reorderPrimaries: async () => policyOf([primaryOf(1), primaryOf(2)]),
+    setPrimariesThreshold: async () => policyOf([primaryOf(1), primaryOf(2)]),
     startWallet: async () => {},
     refreshWallet: async () => {},
     retrySetup: async () => {},
     diagnostics: async () => diagnostics(),
     ...over,
-  };
-}
-
-/** The engine's ranked list for a wallet with one primary: that node at rank 1. */
-function policyFor(wallet: ReturnType<typeof walletOf>): PrimariesPolicy {
-  const uri = wallet.lfbw?.primaryUri ?? '';
-  const pubkey = wallet.lfbw?.primaryPubkey ?? uri.split('@')[0] ?? '';
-  return {
-    thresholdSat: null,
-    receiveTarget: pubkey || null,
-    primaries: pubkey
-      ? [{ pubkey, rank: 1, uri, fallbackUri: null, connected: true, setup: 'ready', balanceSat: 0, channelCount: 1, isReceiveTarget: true, selectionOrder: 1 }]
-      : [],
   };
 }
 
