@@ -407,3 +407,27 @@ test("the manager's tip probe still reads a height through the shared socket cod
 	assert.equal(await m._electrumTip({ host: silent.host, port: silent.port, tls: false }), null);
 	assert.ok(Date.now() - started < 4000);
 });
+
+test('an onion probe verifies the destination over the owned TCP bridge', async t => {
+  const { EventEmitter } = require('node:events');
+  const { configureDesktopNetwork } = require('./desktop-network');
+  const previous = process.env.DESKTOP_TOR_MANAGED;
+  process.env.DESKTOP_TOR_MANAGED = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.DESKTOP_TOR_MANAGED;
+    else process.env.DESKTOP_TOR_MANAGED = previous;
+  });
+  const remote = await fakeElectrum(t, { tls: true });
+  const endpoint = { host: remote.host, port: remote.port };
+  const host = 'a'.repeat(56) + '.onion';
+  const channel = Object.assign(new EventEmitter(), { connected: true, send(message) {
+    assert.equal(message.host, host);
+    queueMicrotask(() => channel.emit('message', { type: 'tor:result', requestId: message.requestId, result: endpoint }));
+  } });
+  const desktop = configureDesktopNetwork({ transport: channel });
+  t.after(() => desktop.close());
+  const config = { host, port: 50002, tls: true, tlsVerify: true };
+  assert.equal((await probeElectrum({ ...config, tlsFingerprints: [OTHER] })).error, 'tls-rejected');
+  assert.deepEqual(remote.state.lines, []);
+  assert.equal((await probeElectrum({ ...config, tlsFingerprints: [PIN] })).chain, 'mainnet');
+});

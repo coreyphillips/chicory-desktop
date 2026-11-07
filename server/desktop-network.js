@@ -24,6 +24,7 @@ class DesktopNetwork {
     this.transport = transport;
     this.timeoutMs = timeoutMs;
     this.pending = new Map();
+    this.bridges = new Map();
     this.state = { phase: 'stopped', progress: 0, error: null };
     this.response = message => {
       if (message?.type === 'tor:status') {
@@ -70,7 +71,21 @@ class DesktopNetwork {
       catch (cause) { failed(cause); }
     });
   }
+  bridge(host, port) {
+    // One fixed SOCKS destination per listener. TLS and certificate settings
+    // belong to each wallet socket using the tunnel.
+    const key = host + ':' + port;
+    if (!this.bridges.has(key)) {
+      const open = this.request('tor:bridge', { host, port }).catch(cause => {
+        this.bridges.delete(key);
+        throw cause;
+      });
+      this.bridges.set(key, open);
+    }
+    return this.bridges.get(key);
+  }
   rejectAll(message) {
+    this.bridges.clear();
     for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(torError(message)); }
     this.pending.clear();
   }
@@ -100,10 +115,10 @@ async function resolveElectrum(server) {
   if (!validOnionHost(host) || !Number.isInteger(server.port) || server.port < 1 || server.port > 65535)
     throw torError('Choose a valid onion Electrum server and port.');
   if (!enabled()) throw torError('This onion Electrum server requires the bundled desktop Tor service.');
-  const endpoint = await network().request('tor:bridge', { host, port: server.port });
-  // The onion address authenticates this route. Match the mobile transport:
-  // do not send local TLS server-name or DNS lookups to the onion endpoint.
-  return { ...server, ...endpoint, tls: false, tlsVerify: false, onionHost: host };
+  const endpoint = await network().bridge(host, server.port);
+  // The bridge forwards bytes. The wallet and probes negotiate the selected
+  // transport end to end and use the onion name for certificate checks.
+  return { ...server, ...endpoint, onionHost: host };
 }
 
 module.exports = { DesktopNetwork, configureDesktopNetwork, ensureTor, resolveElectrum, requiresTor, isOnionHost, validOnionHost, enabled, torStatus };

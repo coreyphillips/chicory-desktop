@@ -1,0 +1,450 @@
+diff --git a/crates/floresta-node/src/florestad.rs b/crates/floresta-node/src/florestad.rs
+--- a/crates/floresta-node/src/florestad.rs
++++ b/crates/floresta-node/src/florestad.rs
+@@ -548,2 +548,3 @@
+             electrum_server.restrict_to_chain_health();
++            let wallet_offers = chain_provider.get_handle().fixture_broadcast_available();
+             let historical = historical.expect("managed status constructed with managed config");
+@@ -566,2 +567,3 @@
+                         "transactionProtocol": "chicory.tx/1", "confirmedReadsProtocol": "chicory.confirmed/1",
++                        "walletOfferProtocol": wallet_offers.then_some("chicory.offer/1"),
+                         "pendingProtocol": "chicory.pending/1", "pendingTransactionProtocol": "chicory.pending-tx/1",
+diff --git a/crates/floresta-node/src/managed_watch.rs b/crates/floresta-node/src/managed_watch.rs
+--- a/crates/floresta-node/src/managed_watch.rs
++++ b/crates/floresta-node/src/managed_watch.rs
+@@ -4,6 +4,7 @@
+ //! No Electrum client can register a watch or read this index.
+ 
+ mod confirmed;
++mod offer;
+ mod pending;
+ 
+ use std::collections::{BTreeMap, BTreeSet, HashSet};
+@@ -56,6 +57,8 @@
+     query: Option<confirmed::Query>,
+     #[serde(default)]
+     pending: Option<pending::Query>,
++    #[serde(default)]
++    offer: Option<offer::Request>,
+ }
+ 
+ #[derive(Clone, Default, Serialize, Deserialize)]
+@@ -687,6 +690,7 @@
+     pending::start(pending_pool, peer.clone(), network, chain.clone(), stop.clone())?;
+     let control = registry.clone();
+     let reader_chain = chain.clone();
++    let sender_peer = peer.clone();
+     let owner_lifetime = stop.clone();
+     std::thread::spawn(move || {
+         let mut input = io::stdin().lock();
+@@ -701,15 +705,21 @@
+             {
+                 break;
+             }
+-            let Ok(command) = serde_json::from_slice::<Command>(&line) else {
++            let Ok(mut command) = serde_json::from_slice::<Command>(&line) else {
+                 break;
+             };
+             let id = command.id;
+-            let reply = match control
+-                .lock()
+-                .map_err(storage)
+-                .and_then(|mut r| r.command(command, network, &*reader_chain))
+-            {
++            let result = if let Some(offer) = command.offer.take() {
++                if command.action != "broadcast" || !owner_id(&command.owner) || !command.scripts.is_empty() ||
++                    !command.descriptors.is_empty() || !command.outpoints.is_empty() || command.offset.is_some() ||
++                    command.query.is_some() || command.pending.is_some() { Err("Invalid wallet offer.") }
++                else if let Some(txid) = command.txid {
++                    offer::submit(&control, &reader_chain, &sender_peer, network, command.owner, txid, offer)
++                } else { Err("Missing wallet transaction id.") }
++            } else {
++                control.lock().map_err(storage).and_then(|mut r| r.command(command, network, &*reader_chain))
++            };
++            let reply = match result {
+                 Ok(result) => json!({ "protocol":"chicory.watch/1", "id":id, "result":result }),
+                 Err(error) => json!({ "protocol":"chicory.watch/1", "id":id, "error":error }),
+             };
+diff --git a/crates/floresta-node/src/managed_watch/offer.rs b/crates/floresta-node/src/managed_watch/offer.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/floresta-node/src/managed_watch/offer.rs
+@@ -0,0 +1,194 @@
++// SPDX-License-Identifier: MIT OR Apache-2.0
++//! A regtest-only wallet send. Authorize every input against the active owner's
++//! confirmed UTXOs, then hand one transaction to its exact connected proof peer.
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++
++use bitcoin::consensus::deserialize;
++use bitcoin::hashes::Hash;
++use bitcoin::hex::FromHex;
++use bitcoin::{BlockHash, Network, OutPoint, Transaction, Txid};
++use floresta_chain::pruned_utreexo::consensus::Consensus;
++use floresta_chain::{BlockchainInterface, ChainParams, UtxoData};
++use floresta_wire::node_interface::NodeInterface;
++use serde::Deserialize;
++use serde_json::{Value, json};
++
++use super::{Cursor, Owner, PAGE_BYTES, ProofRecord, Registry, Result, pending, storage};
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(super) struct Request {
++    tip: BlockHash,
++    hex: String,
++}
++
++fn active(owner: &Owner, chain: &impl BlockchainInterface, tip: Cursor) -> bool {
++    owner.cursor == Some(tip)
++        && !owner.unavailable
++        && chain.get_best_block().ok() == Some(tip)
++        && !chain.is_in_ibd()
++        && chain.get_validation_index().ok() == Some(tip.0)
++}
++
++fn coin(
++    owner: &Owner,
++    chain: &impl BlockchainInterface,
++    prev: OutPoint,
++    budget: &mut u32,
++) -> Result<UtxoData> {
++    if !owner
++        .tree
++        .contains_key(format!("coin/{prev}"))
++        .map_err(storage)?
++    {
++        return Err("Input is not a confirmed owner UTXO.");
++    }
++    let bytes = owner
++        .tree
++        .get(format!("proof/{}", prev.txid))
++        .map_err(storage)?
++        .ok_or("Missing input metadata.")?;
++    let m: ProofRecord = serde_json::from_slice(&bytes).map_err(storage)?;
++    *budget = budget
++        .checked_sub(m.size)
++        .ok_or("Parent data exceeds the regtest qualification bound.")?;
++    if m.height == 0
++        || m.size == 0
++        || chain.get_block_hash(m.height).ok() != Some(m.block)
++        || m.proof.target != prev.txid
++    {
++        return Err("Input is not on the active chain.");
++    }
++    let header = chain.get_block_header(&m.block).map_err(storage)?;
++    if header.block_hash() != m.block
++        || !m
++            .proof
++            .verify(header.merkle_root.to_raw_hash())
++            .map_err(storage)?
++    {
++        return Err("Invalid input proof.");
++    }
++    let mut raw = Vec::with_capacity(m.size as usize);
++    for page in 0..m.size.div_ceil(PAGE_BYTES) {
++        let bytes = owner
++            .tree
++            .get(format!("raw/{}/{page}", prev.txid))
++            .map_err(storage)?
++            .ok_or("Missing input bytes.")?;
++        if bytes.len() != (m.size - page * PAGE_BYTES).min(PAGE_BYTES) as usize {
++            return Err("Invalid input page.");
++        }
++        raw.extend_from_slice(&bytes);
++    }
++    let tx: Transaction = deserialize(&raw).map_err(storage)?;
++    if tx.compute_txid() != prev.txid || tx.compute_wtxid() != m.wtxid {
++        return Err("Invalid input identity.");
++    }
++    let out = tx
++        .output
++        .get(prev.vout as usize)
++        .ok_or("Invalid input index.")?;
++    if !owner.watches.scripts.contains(&out.script_pubkey) {
++        return Err("Input is outside the owner registration.");
++    }
++    Ok(UtxoData {
++        txout: out.clone(),
++        creation_height: m.height,
++        creation_time: pending::mtp(chain, m.height - 1)?,
++        is_coinbase: tx.is_coinbase(),
++    })
++}
++
++pub(super) fn submit<C: BlockchainInterface + Send + Sync + 'static>(
++    registry: &Arc<Mutex<Registry>>,
++    chain: &Arc<C>,
++    peer: &NodeInterface,
++    network: Network,
++    owner_id: String,
++    txid: Txid,
++    request: Request,
++) -> Result<Value> {
++    if network != Network::Regtest
++        || !peer.fixture_broadcast_available()
++        || request.hex.len() > 60000
++    {
++        return Err("Wallet broadcast is unavailable.");
++    }
++    let tx: Transaction =
++        deserialize(&Vec::from_hex(&request.hex).map_err(storage)?).map_err(storage)?;
++    if tx.compute_txid() != txid
++        || tx.is_coinbase()
++        || tx.input.is_empty()
++        || tx.input.len() > 32
++        || tx.output.is_empty()
++    {
++        return Err("Invalid wallet transaction.");
++    }
++    Consensus::check_transaction_context_free(&tx).map_err(storage)?;
++    let tip = chain.get_best_block().map_err(storage)?;
++    if request.tip != tip.1 {
++        return Err("Wallet tip changed.");
++    }
++    {
++        let registry = registry.lock().map_err(storage)?;
++        let owner = registry
++            .owners
++            .get(&owner_id)
++            .ok_or("Unknown wallet owner.")?;
++        if !active(owner, &**chain, tip)
++            || owner.has_missing_parents()?
++            || registry.pool.lock().map_err(storage)?.spends_any(&tx)
++        {
++            return Err("Wallet inputs are unavailable.");
++        }
++        let next = tip.0.checked_add(1).ok_or("Invalid height.")?;
++        let mut coins = Vec::with_capacity(tx.input.len());
++        let mut inputs = HashMap::new();
++        let mut budget = 2_000_000;
++        for input in &tx.input {
++            let prev = input.previous_output;
++            let coin = coin(owner, &**chain, prev, &mut budget)?;
++            if inputs.insert(prev, coin.clone()).is_some() {
++                return Err("Repeated wallet input.");
++            }
++            coins.push(coin);
++        }
++        if !pending::final_at(&tx, &coins, next, pending::mtp(&**chain, tip.0)?) {
++            return Err("Wallet transaction is timelocked.");
++        }
++        let flags =
++            ChainParams::from(network).get_validation_flags(u32::MAX, BlockHash::all_zeros());
++        Consensus::verify_transaction(&tx, &mut inputs, next, true, flags)
++            .map_err(|_| "Invalid wallet signatures or values.")?;
++    }
++    let registry = registry.clone();
++    let chain = chain.clone();
++    let check_tx = tx.clone();
++    let allowed = Arc::new(move || {
++        let Ok(registry) = registry.lock() else {
++            return false;
++        };
++        let Some(owner) = registry.owners.get(&owner_id) else {
++            return false;
++        };
++        active(owner, &*chain, tip)
++            && owner.has_missing_parents() == Ok(false)
++            && check_tx.input.iter().all(|i| {
++                owner
++                    .tree
++                    .contains_key(format!("coin/{}", i.previous_output))
++                    .ok()
++                    == Some(true)
++            })
++            && registry.pool.lock().is_ok_and(|p| !p.spends_any(&check_tx))
++    });
++    let receipt = peer
++        .offer_fixture_transaction(tip.1, tx, allowed)
++        .ok_or("A wallet offer is unavailable at this tip.")?;
++    receipt
++        .recv_timeout(Duration::from_secs(8))
++        .map_err(|_| "Wallet delivery is uncertain.")?;
++    Ok(json!({"phase":"relayed", "txid":txid, "tipHash":tip.1}))
++}
+diff --git a/crates/floresta-node/src/managed_watch/pending.rs b/crates/floresta-node/src/managed_watch/pending.rs
+--- a/crates/floresta-node/src/managed_watch/pending.rs
++++ b/crates/floresta-node/src/managed_watch/pending.rs
+@@ -56,7 +56,7 @@
+         && chain.get_best_block().ok() == Some(tip)
+ }
+ 
+-fn mtp(chain: &impl BlockchainInterface, height: u32) -> Result<u32> {
++pub(super) fn mtp(chain: &impl BlockchainInterface, height: u32) -> Result<u32> {
+     let mut hash = chain.get_block_hash(height).map_err(storage)?;
+     let mut times = Vec::with_capacity(11);
+     for _ in 0..height.saturating_add(1).min(11) {
+@@ -86,7 +86,7 @@
+     Ok(())
+ }
+ 
+-fn final_at(tx: &Transaction, coins: &[UtxoData], height: u32, time: u32) -> bool {
++pub(super) fn final_at(tx: &Transaction, coins: &[UtxoData], height: u32, time: u32) -> bool {
+     let lock = tx.lock_time.to_consensus_u32();
+     let reached = lock == 0 || lock < if lock < 500_000_000 { height } else { time };
+     if !reached && tx.input.iter().any(|i| i.sequence.0 != u32::MAX) {
+@@ -117,6 +117,10 @@
+         self.bytes = 0;
+         self.anchor = anchor;
+         self.revision += 1;
++    }
++
++    pub(super) fn spends_any(&self, tx: &Transaction) -> bool {
++        tx.input.iter().any(|input| self.spent.contains_key(&input.previous_output))
+     }
+ 
+     pub(super) fn reconcile(&mut self, chain: &impl BlockchainInterface) {
+diff --git a/crates/floresta-wire/src/p2p_wire/node_interface.rs b/crates/floresta-wire/src/p2p_wire/node_interface.rs
+--- a/crates/floresta-wire/src/p2p_wire/node_interface.rs
++++ b/crates/floresta-wire/src/p2p_wire/node_interface.rs
+@@ -178,6 +178,13 @@
+         }
+     }
+ 
++    pub fn fixture_broadcast_available(&self) -> bool { self.managed_relay.is_some() }
++
++    pub fn offer_fixture_transaction(&self, tip: bitcoin::BlockHash, tx: Transaction,
++        allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) -> Option<std::sync::mpsc::Receiver<()>> {
++        self.managed_relay.as_ref()?.offer(tip, tx, allowed)
++    }
++
+     /// Take bounded, untrusted wire candidates. The caller must verify the complete
+     /// accumulator proof and script policy at its still-active validated tip.
+     pub fn drain_proven_transactions(&self) -> Vec<crate::proven_tx::Candidate> {
+diff --git a/crates/floresta-wire/src/p2p_wire/peer.rs b/crates/floresta-wire/src/p2p_wire/peer.rs
+--- a/crates/floresta-wire/src/p2p_wire/peer.rs
++++ b/crates/floresta-wire/src/p2p_wire/peer.rs
+@@ -318,6 +318,13 @@
+                 return Ok(());
+             }
+ 
++            if self.state == State::Connected {
++                if let Some(id) = self.managed_relay.as_ref().and_then(|r| r.permitted())
++                    .and_then(|r| r.announcement(self.id)) {
++                    self.write(NetworkMessage::Inv(vec![Inventory::Transaction(id)])).await?;
++                }
++            }
++
+             // utreexod serves MEMPOOL only to filter-capable clients. A peer snapshot is
+             // bounded and has no completion marker. Refresh independent of wallet watches.
+             if self.state == State::Connected
+@@ -718,6 +725,14 @@
+     }
+ 
+     pub async fn handle_get_data(&mut self, inv: Inventory) -> Result<()> {
++        if let Inventory::Transaction(id) | Inventory::WitnessTransaction(id) = inv {
++            if let Some((tx, sent)) = self.managed_relay.as_ref().and_then(|r| r.permitted())
++                .and_then(|r| r.fulfill(self.id, id)) {
++                self.write(NetworkMessage::Tx(tx)).await?;
++                let _ = sent.try_send(());
++                return Ok(());
++            }
++        }
+         match inv {
+             Inventory::WitnessTransaction(txid) => {
+                 let tx = self.mempool.lock().await.get_from_mempool(&txid).cloned();
+diff --git a/crates/floresta-wire/src/p2p_wire/proven_tx.rs b/crates/floresta-wire/src/p2p_wire/proven_tx.rs
+--- a/crates/floresta-wire/src/p2p_wire/proven_tx.rs
++++ b/crates/floresta-wire/src/p2p_wire/proven_tx.rs
+@@ -49,10 +49,21 @@
+     hashes: usize,
+     needs_hint: bool,
+     since: Instant,
++}
++
++struct Offer {
++    tx: Transaction,
++    id: Txid,
++    owner_peer: Option<u32>,
++    deadline: Instant,
++    allowed: Arc<dyn Fn() -> bool + Send + Sync>,
++    sent: std::sync::mpsc::SyncSender<()>,
+ }
+ 
+ #[derive(Default)]
+ struct State {
++    offered: bool,
++    outbound: Option<Offer>,
+     tip: Option<Tip>,
+     pending: HashMap<Txid, Request>,
+     seen: HashMap<Txid, Instant>,
+@@ -314,6 +325,38 @@
+         }
+     }
+ 
++    // One authorized outgoing offer per distinct active tip. A lost reply or
++    // timeout never retries it. Its bytes never enter a shared peer mempool.
++    pub(crate) fn offer(&self, tip: BlockHash, tx: Transaction, allowed: Arc<dyn Fn() -> bool + Send + Sync>)
++        -> Option<std::sync::mpsc::Receiver<()>> {
++        let mut state = self.0.lock().ok()?;
++        if state.tip?.hash != tip || state.offered { return None; }
++        let (sent, receipt) = std::sync::mpsc::sync_channel(1);
++        state.offered = true;
++        state.outbound = Some(Offer { id: tx.compute_txid(), tx, allowed, sent, owner_peer: None,
++            deadline: Instant::now() + Duration::from_secs(7) });
++        Some(receipt)
++    }
++
++    pub(crate) fn announcement(&self, peer: u32) -> Option<Txid> {
++        let mut state = self.0.lock().ok()?;
++        let offer = state.outbound.as_mut()?;
++        if offer.owner_peer.is_some() || Instant::now() > offer.deadline { return None; }
++        offer.owner_peer = Some(peer);
++        let (id, allowed) = (offer.id, offer.allowed.clone());
++        drop(state);
++        allowed().then_some(id)
++    }
++
++    pub(crate) fn fulfill(&self, peer: u32, id: Txid) -> Option<(Transaction, std::sync::mpsc::SyncSender<()>)> {
++        let mut state = self.0.lock().ok()?;
++        let offer = state.outbound.as_ref()?;
++        if offer.owner_peer != Some(peer) || offer.id != id || Instant::now() > offer.deadline { return None; }
++        let offer = state.outbound.take()?;
++        drop(state);
++        (offer.allowed)().then_some((offer.tx, offer.sent))
++    }
++
+     pub(crate) fn active_tip(&self) -> Option<BlockHash> {
+         self.0.lock().unwrap().tip.map(|tip| tip.hash)
+     }
+@@ -464,6 +507,38 @@
+     use super::*;
+     use bitcoin::hex::FromHex;
+ 
++    #[test]
++    fn wallet_offers_are_one_use_and_private_to_the_exact_connected_fixture_peer_and_tip() {
++        let relay = test_relay();
++        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
++        let tip = genesis.block_hash();
++        let tx = genesis.txdata[0].clone();
++        let id = tx.compute_txid();
++        relay.tip(Some((101, tip, 101)));
++        assert!(relay.bind(bitcoin::Network::Regtest, Some("127.0.0.1:18445".parse().unwrap())).is_none());
++        assert!(relay.bind(bitcoin::Network::Bitcoin, Some("127.0.0.1:18444".parse().unwrap())).is_none());
++        let receipt = relay.offer(tip, tx.clone(), Arc::new(|| true)).unwrap();
++        assert!(relay.fulfill(1, id).is_none());
++        assert_eq!(relay.announcement(1), Some(id));
++        assert!(relay.announcement(2).is_none());
++        assert!(relay.fulfill(2, id).is_none());
++        let (delivered, ack) = relay.fulfill(1, id).unwrap();
++        assert_eq!(delivered, tx);
++        ack.try_send(()).unwrap();
++        assert!(receipt.try_recv().is_ok());
++        assert!(relay.offer(tip, tx.clone(), Arc::new(|| true)).is_none());
++        let other = BlockHash::all_zeros();
++        relay.tip(Some((102, other, 102)));
++        assert!(relay.offer(tip, tx.clone(), Arc::new(|| true)).is_none());
++        let permitted = Arc::new(std::sync::atomic::AtomicBool::new(true));
++        let live = permitted.clone();
++        let receipt = relay.offer(other, tx, Arc::new(move || live.load(std::sync::atomic::Ordering::Acquire))).unwrap();
++        assert_eq!(relay.announcement(1), Some(id));
++        permitted.store(false, std::sync::atomic::Ordering::Release);
++        assert!(relay.fulfill(1,id).is_none());
++        assert!(receipt.try_recv().is_err());
++    }
++
+     fn test_relay() -> Relay {
+         Relay::for_config(
+             true,

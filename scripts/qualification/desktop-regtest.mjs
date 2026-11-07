@@ -5,6 +5,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync, fork } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import watchCollection from '../../desktop/floresta-wallet-sync.cjs';
+import { captureRestoredFunding } from './floresta-funding-export.mjs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -13,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
 import electronPath from 'electron';
 import { createHostWalletClient } from '../../web/platform/walletClient.ts';
-import { PROFILE_PREFIX, RegtestGate, assertDisposableProfile, assertLoopback, assertRegtestWallets } from './guards.mjs';
+import { PROFILE_PREFIX, RegtestGate, assertDisposableProfile, assertLoopback, assertRegtestWallets, qualificationStages } from './guards.mjs';
 import { Recorder, dependencyVersions, hostEvidence, packageEvidence, resourcesDirectory } from './evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -26,12 +28,15 @@ const bitcoin = process.env.REGTEST_BITCOIN_CONTAINER ?? 'chicory-browser-regtes
 const electrum = { host: '127.0.0.1', port: Number(process.env.REGTEST_ELECTRUM_PORT ?? '62401'), tls: false };
 const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
-// backup runs last: restoring a stale copy of the node may lead its peer to
-// close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
-const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
-for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
+const { stages, recoveryStage } = qualificationStages(process.env.CHICORY_QUALIFY_STAGES);
+const fixtureDirectory = process.env.CHICORY_QUALIFY_FLORESTA_FIXTURE;
+if (fixtureDirectory) {
+  assert.ok(stages.size === 1 && (stages.has('direct-funding') || stages.has('forceclose-sweep') ||
+    stages.has('breach-justice') || stages.has('incoming-preimage') || recoveryStage), 'A cold funding export needs its own funding, close or remote recovery run');
+  assertDisposableProfile(fixtureDirectory);
+  await fs.chmod(fixtureDirectory, 0o700);
+}
 const record = new Recorder();
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const profiles = [];
@@ -213,15 +218,16 @@ class DesktopApp {
   }
 }
 
-async function startPeer() {
+async function startPeer(portBase = peerPort, privateSession = false) {
+  const token = privateSession ? randomBytes(32).toString('hex') : null;
   const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   const data = await profile('peer');
   // The bundled engine opens only encrypted storage, so the peer starts the way
   // the desktop app starts its manager: through the bootstrap, keyed over IPC.
   const child = fork(path.join(root, 'server/desktop-bootstrap.js'), [], { execPath: node, stdio: ['ignore', 'ignore', 'inherit', 'ipc'], env: {
-    PATH: process.env.PATH, HOME: process.env.HOME, DATA_DIR: data, PORT: String(peerPort), DEFAULT_NETWORK: 'regtest',
+    PATH: process.env.PATH, HOME: process.env.HOME, DATA_DIR: data, PORT: String(portBase), ...(token && { DESKTOP_SESSION_TOKEN: token }), DEFAULT_NETWORK: 'regtest',
     DEFAULT_ELECTRUM_HOST: electrum.host, DEFAULT_ELECTRUM_PORT: String(electrum.port), DEFAULT_ELECTRUM_TLS: 'false',
-    CHILD_PORT_BASE: String(peerPort + 1), CHILD_PORT_MAX: String(peerPort + 50), CHICORY_ENCRYPTED_STORAGE: '1',
+    CHILD_PORT_BASE: String(portBase + 1), CHILD_PORT_MAX: String(portBase + 50), CHICORY_ENCRYPTED_STORAGE: '1',
     BEIGNET_BIN: path.join(runtime, 'engine/node_modules/beignet/dist/cli/cli.js'),
   } });
   // Readiness comes only from this child, so another manager already on the
@@ -236,7 +242,13 @@ async function startPeer() {
     child.send({ type: 'initialize-storage', key: randomBytes(32).toString('hex') });
   });
   const url = `http://127.0.0.1:${port}`;
-  const fetchPeer = (input, init) => fetch(new URL(String(input), url), init);
+  const fetchPeer = (input, init = {}) => {
+    const target = new URL(String(input), url);
+    assert.equal(target.origin, url);
+    const headers = new Headers(init.headers);
+    if (token) headers.set('x-chicory-session', token);
+    return fetch(target, { ...init, headers, redirect: 'error' });
+  };
   const call = async (route, body, method = 'POST') => {
     const response = await fetchPeer(route, body === undefined ? {} : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const packet = await response.json();
@@ -289,7 +301,11 @@ try {
   const config = await subject.api('/config');
   const subjectWallets = await subject.api('/wallets');
   assert.deepEqual(subjectWallets, [], 'A fresh profile starts with zero wallets');
-  peer = await startPeer();
+  const incoming = stages.has('incoming-preimage');
+  const forceClose = incoming || stages.has('forceclose-sweep');
+  const breach = stages.has('breach-justice');
+  peer = await startPeer(peerPort, Boolean(fixtureDirectory || recoveryStage || forceClose || breach));
+  if (fixtureDirectory || forceClose || breach) watchCollection.setWatchCollection(peer.child, 'regtest', true);
   const peerWallets = await peer.api('/wallets');
   gate.verify({ chain: rpc('getblockchaininfo').chain, genesis: rpc('getblockhash', 0),
     electrumHeader: await until('Electrum ready', () => electrumCall('blockchain.block.header', [0])), electrum,
@@ -306,6 +322,11 @@ try {
   gate.mine(1);
   const primaryRecord = await until('primary funded', () => peer.api(`/wallets/${primary.id}`), value => value.healthy && value.nodeId && value.listenPort);
   const primaryUri = `${primaryRecord.nodeId}@127.0.0.1:${primaryRecord.listenPort}`;
+  if (breach) {
+    const { qualifyBreach } = await import('./floresta-breach-lab.mjs');
+    record.pass('breach-justice', await qualifyBreach({ peer, primaryId: primary.id, primaryUri, gate, rpc, electrum, runtime, fixtureDirectory }));
+    throw Object.assign(new Error('funded breach justice complete'), { done: true });
+  }
   const payerId = (await peer.api('/wallets', { name: `qualify payer ${run}`, network: 'regtest', lfbw: { enabled: true, primaryWalletId: primary.id, initialChannelSats: 300000 } })).record.id;
   await healthy(peer.api, payerId);
   const payer = peer.client(payerId);
@@ -313,6 +334,18 @@ try {
   // The primary opens the payer's channel with nothing on the payer's side.
   await fundWallet(payer, 200000);
   await until('payer spendable', mining(() => payer.snapshot()), snap => snap.balance.availableSats >= 150000);
+  if (forceClose) {
+    const { qualifyForceClose } = await import('./floresta-forceclose-lab.mjs');
+    record.pass(incoming ? 'incoming-preimage' : 'forceclose-sweep', await qualifyForceClose({ peer, primaryId: primary.id, payerId, gate, rpc, fixtureDirectory, incoming }));
+    throw Object.assign(new Error('funded force close complete'), { done: true });
+  }
+  if (recoveryStage) {
+    const { qualifyRemoteRecovery } = await import('./floresta-guardian-lab.mjs');
+    const evidence = await qualifyRemoteRecovery({ mode: recoveryStage === 'guardian-recovery' ? 'quorum' : 'peer-storage',
+      peer, primary, primaryUri, payer, gate, rpc, fixtureDirectory, startReplacement: () => startPeer(peerPort + 100, true) });
+    record.pass(recoveryStage, evidence);
+    throw Object.assign(new Error('remote recovery complete'), { done: true });
+  }
 
   // Subject: created through the app's own wallet client, as onboarding does.
   const created = await subject.client().createWallet({ name: `Qualify ${run}`, network: 'regtest', primaryUri, electrum });
@@ -321,6 +354,12 @@ try {
   await subject.activate(created.id);
   wallet = () => subject.client(created.id);
   state = { walletId: created.id, primaryUri, payerId };
+  const channelsOf = async id => (await (await subject.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;
+  let stopPreview;
+  if (stages.has('floresta-preview')) {
+    const { startPreviewMonitor } = await import('./floresta-preview-stage.mjs');
+    stopPreview = await startPreviewMonitor(subject);
+  }
 
   if (stages.has('payments')) {
     const deposit = await fundWallet(wallet(), 400000, false);
@@ -328,7 +367,6 @@ try {
     gate.mine(1);
     const funded = await until('deposit channelized', mining(() => wallet().snapshot()), snap => snap.balance.availableSats >= 350000);
     record.pass('on-chain receive channelized into the home channel', { txid: deposit.txid, availableSats: funded.balance.availableSats });
-    record.skip('direct funding', 'No payer here holds a confirmed coin outside its channel, so no send uses the request\'s funding envelope.');
 
     const incoming = await wallet().receive(await wallet().quoteReceive({ amountSats: 15000, description: 'qualify incoming' }));
     const paying = checkSent('payer Lightning send', await payer.send(await payer.prepareSend({ request: incoming.bolt11 })));
@@ -358,6 +396,71 @@ try {
     record.pass('on-chain send with adjustable fee rate confirmed', { ...broadcast, reviewedFeeSats: faster.feeSats, slowFeeSats: review.feeSats, feeRates: rates });
     state.history = (await wallet().snapshot()).activity.map(item => ({ id: item.id, amountSats: item.amountSats, status: item.status }));
   }
+
+  if (stages.has('direct-funding') || stages.has('payments')) {
+    // Give the receiver a home channel and the other payer just one confirmed
+    // coin. Sending the complete request must select the signed funding offer.
+    if (!stages.has('payments')) {
+      await fundWallet(wallet(), 400000);
+      await until('receiver home channel funded', mining(() => wallet().snapshot()), snap => snap.balance.availableSats >= 350000);
+    }
+    const payerRecord = (await peer.api('/wallets', { name: `qualify confirmed coin ${run}`, network: 'regtest',
+      networkMode: 'clearnet', publicHost: '127.0.0.1', announce: true,
+      lfbw: { enabled: true, primaryWalletId: primary.id, initialChannelSats: 0 } })).record;
+    assertRegtestWallets(await peer.api('/wallets'));
+    await healthy(peer.api, payerRecord.id);
+    const amountSats = 20000;
+    // Below the manager's channelize floor, this coin stays in the payer.
+    const coinSats = 22000;
+    const address = await peer.address(payerRecord.id);
+    const txid = gate.fund(address, coinSats);
+    gate.mine(1);
+    const coin = rpc('getrawtransaction', txid, true).vout.find(out => out.scriptPubKey.address === address);
+    assert.ok(coin, 'Core must confirm the payer coin at its requested address');
+    await until('confirmed funding coin in payer engine', () => peer.call(`/wallets/${payerRecord.id}/api/utxos`),
+      coins => coins.some(row => row.txid === txid && row.height > 0 && row.valueSats === coinSats));
+    // A prior payment can leave a splice waiting for depth. The receiver
+    // accepts a new funding offer only after the last splice locks.
+    const channels = await until('receiver ready for a new channel funding', mining(() => channelsOf(created.id)),
+      rows => rows.some(row => row.state === 'NORMAL') && rows.every(row => row.state !== 'SPLICING' && !row.pendingSpliceTxid));
+    const receiver = wallet();
+    const sender = peer.client(payerRecord.id);
+    const request = await receiver.receive(await receiver.quoteReceive({ amountSats, description: 'qualify direct funding' }));
+    const review = await sender.prepareSend({ request: request.uri });
+    assert.equal(review.method, 'direct-funding', 'The payer must review the signed funding offer');
+    assert.equal(review.amountSats, amountSats);
+    const result = checkSent('confirmed-coin direct funding', await sender.send(review));
+    const fundingTxid = await until('direct funding spends the payer coin in the Core mempool', async () =>
+      rpc('getrawmempool').find(id => rpc('getrawtransaction', id, true).vin.some(input => input.txid === txid && input.vout === coin.n)));
+    if (result.txid) assert.equal(result.txid, fundingTxid);
+    const inputs = rpc('getrawtransaction', fundingTxid, true).vin;
+    assert.ok(channels.some(channel => inputs.some(input => input.txid === channel.fundingTxid && input.vout === channel.fundingOutputIndex)),
+      'The funding transaction must also spend the receiver channel outpoint');
+    const receipt = await until('receiver locks the direct-funded channel transaction', mining(() => receiver.getReceiveStatus(request)),
+      item => item.phase === 'completed' && item.method === 'direct-funding');
+    assert.equal(receipt.fundingTxid, fundingTxid);
+    assert.equal(receipt.receivedSats, amountSats);
+    assert.equal(receipt.confirmedSats, amountSats);
+    const confirmations = rpc('getrawtransaction', fundingTxid, true).confirmations;
+    assert.ok(confirmations > 0);
+    record.pass('signed direct funding from a confirmed coin locks into the recipient channel', {
+      inputTxid: txid, inputVout: coin.n, coinSats, amountSats, fundingTxid, confirmations,
+    });
+    if (fixtureDirectory) {
+      const previous = channels.find(row => inputs.some(input => input.txid === row.fundingTxid && input.vout === row.fundingOutputIndex));
+      const current = await until('recipient channel after confirmed splice', async () =>
+        (await channelsOf(created.id)).find(row => row.fundingTxid === fundingTxid && Number.isInteger(row.fundingOutputIndex)));
+      const evidence = await captureRestoredFunding({ directory: fixtureDirectory, rpc, until, peer, primaryId: primary.id,
+        subject, recipientId: created.id, payer, wallet: wallet(), passphrase: BACKUP_PASSPHRASE,
+        stopSubject: async () => { await subject.quit(); subject = null; },
+        startRestored: () => startPeer(peerPort + 60, true),
+        funding: { priorFunding: previous.fundingTxid + ':' + previous.fundingOutputIndex,
+          currentFunding: fundingTxid + ':' + current.fundingOutputIndex, payerCoin: txid + ':' + coin.n } });
+      record.pass('exported independent regtest chain and public watches after restoring a funded wallet', evidence);
+    }
+  }
+
+  if (stopPreview) record.pass('packaged preview Settings starts and stops the independent regtest monitor', await stopPreview());
 
   if (stages.has('restart')) {
     const before = await wallet().snapshot();
@@ -520,7 +623,6 @@ try {
   // funded only by a Lightning receive as a new wallet usually is: one home
   // channel, opened by the primary. The subject's channels after payments (one
   // it opened itself, one just-in-time) are not a shape either stage is about.
-  const channelsOf = async id => (await (await subject.fetch(`/wallets/${encodeURIComponent(id)}/api/channels`)).json()).result;
   const freshWallet = async label => {
     const made = await subject.client().createWallet({ name: `Qualify ${label} ${run}`, network: 'regtest', primaryUri, electrum });
     assertRegtestWallets(await subject.api('/wallets'));

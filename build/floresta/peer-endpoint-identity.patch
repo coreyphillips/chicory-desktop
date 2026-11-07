@@ -1,0 +1,810 @@
+diff --git a/crates/floresta-wire/src/p2p_wire/address_man.rs b/crates/floresta-wire/src/p2p_wire/address_man.rs
+index 96eeb11..8d0ce8c 100644
+--- a/crates/floresta-wire/src/p2p_wire/address_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/address_man.rs
+@@ -398,6 +398,12 @@ impl AddressMan {
+ 
+     /// Add a new address to our list of known address
+     pub fn push_addresses(&mut self, addresses: &[LocalAddress]) {
++        self.insert_addresses(addresses, false);
++    }
++
++    // Gossip cannot create additional identities by cycling through ports. Only fixed seeds,
++    // explicit user endpoints, and entries restored from our own store may share a host.
++    fn insert_addresses(&mut self, addresses: &[LocalAddress], local: bool) {
+         for address in addresses {
+             let id = address.id;
+             // don't add addresses that don't have the minimum required services
+@@ -418,11 +424,16 @@ impl AddressMan {
+             if self
+                 .addresses
+                 .values()
+-                .any(|x| x.address == address.address)
++                .any(|x| x.address == address.address && (!local || x.port == address.port))
+             {
+                 continue;
+             }
+ 
++            let mut address = address.clone();
++            if let Some(until) = self.banned_until(&address.address) {
++                address.state = AddressState::Banned(until);
++            }
++            let address = &address;
+             if let std::collections::hash_map::Entry::Vacant(e) = self.addresses.entry(id) {
+                 e.insert(address.clone());
+                 if address.is_good_address() {
+@@ -441,6 +452,44 @@ impl AddressMan {
+         self.prune_addresses();
+     }
+ 
++    // Explicit loopback/private peers remain usable without advertising them to the network.
++    pub(crate) fn manual_endpoint(&mut self, host: AddrV2, port: u16) -> LocalAddress {
++        let mut endpoint = LocalAddress::from(host);
++        endpoint.set_port(port);
++        endpoint.set_services(ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS);
++        self.remember_local_endpoint(endpoint)
++    }
++
++    pub(crate) fn remember_local_endpoint(&mut self, mut endpoint: LocalAddress) -> LocalAddress {
++        if let Some(known) = self
++            .addresses
++            .values()
++            .find(|a| a.address == endpoint.address && a.port == endpoint.port)
++        {
++            return known.clone();
++        }
++        while self.addresses.contains_key(&endpoint.id) {
++            endpoint.id = rand::random();
++        }
++        self.insert_addresses(std::slice::from_ref(&endpoint), true);
++        self.addresses
++            .get(&endpoint.id)
++            .cloned()
++            .unwrap_or(endpoint)
++    }
++
++    pub(crate) fn banned_until(&self, host: &AddrV2) -> Option<u64> {
++        let now = Self::time_since_unix();
++        self.addresses
++            .values()
++            .filter(|addr| &addr.address == host)
++            .filter_map(|addr| match addr.state {
++                AddressState::Banned(until) if until > now => Some(until),
++                _ => None,
++            })
++            .max()
++    }
++
+     /// Check if we can reach this address based on our reachable networks
+     fn is_net_reachable(&self, address: &LocalAddress) -> bool {
+         match address.address {
+@@ -773,7 +822,7 @@ impl AddressMan {
+                 .map(Into::<LocalAddress>::into)
+                 .collect::<Vec<_>>();
+ 
+-            self.push_addresses(&peers);
++            self.insert_addresses(&peers, true);
+         }
+ 
+         let anchors = read_to_string(format!("{datadir}/anchors.json")).and_then(|anchors| {
+@@ -874,9 +923,31 @@ impl AddressMan {
+         Some((*peer, self.addresses.get(peer)?.to_owned()))
+     }
+ 
++    // A host ban applies across every known port, including a newly restored seed.
++    pub(crate) fn ban_host(&mut self, id: usize, duration: u64) {
++        let Some(host) = self.addresses.get(&id).map(|a| a.address.clone()) else {
++            return;
++        };
++        let until = Self::time_since_unix().saturating_add(duration);
++        let mut banned = HashSet::new();
++        for address in self.addresses.values_mut().filter(|a| a.address == host) {
++            address.state = AddressState::Banned(until);
++            banned.insert(address.id);
++        }
++        self.good_addresses.retain(|id| !banned.contains(id));
++        for peers in self.good_peers_by_service.values_mut() {
++            peers.retain(|id| !banned.contains(id));
++        }
++    }
++
+     /// Updates the state of an address
+     pub fn update_set_state(&mut self, idx: usize, state: AddressState) -> &mut Self {
+         if let Some(address) = self.addresses.get_mut(&idx) {
++            if matches!(address.state, AddressState::Banned(until) if until > Self::time_since_unix())
++            {
++                // A late disconnect or handshake cannot cancel a host ban.
++                return self;
++            }
+             address.state = state;
+         }
+ 
+@@ -1006,7 +1077,7 @@ impl AddressMan {
+             .map(Into::<LocalAddress>::into)
+             .collect::<Vec<_>>();
+ 
+-        self.push_addresses(&peers);
++        self.insert_addresses(&peers, true);
+     }
+ }
+ 
+@@ -1235,6 +1306,80 @@ mod test {
+         }
+     }
+ 
++    #[test]
++    fn fixed_endpoints_survive_gossip_and_restart_without_extra_host_identities() {
++        let mut peers = AddressMan::new(None, SUPPORTED_NETWORKS);
++        let host = AddrV2::Ipv4("195.26.240.213".parse().unwrap());
++        peers.add_fixed_addresses(Network::Bitcoin);
++        let ports = |manager: &AddressMan| {
++            let mut ports: Vec<_> = manager
++                .addresses
++                .values()
++                .filter(|a| a.address == host)
++                .map(|a| a.port)
++                .collect();
++            ports.sort();
++            ports
++        };
++        assert_eq!(ports(&peers), [8333, 8433]);
++
++        let core = peers.manual_endpoint(host.clone(), 8333);
++        let bridge = peers.manual_endpoint(host.clone(), 8433);
++        assert_ne!(core.id, bridge.id);
++        peers.update_set_service_flag(
++            core.id,
++            ServiceFlags::NETWORK | ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
++        );
++        peers.update_set_service_flag(
++            bridge.id,
++            ServiceFlags::WITNESS | service_flags::UTREEXO.into(),
++        );
++        let candidates = &peers.peers_by_service[&service_flags::UTREEXO.into()];
++        assert!(candidates.contains(&bridge.id));
++        assert!(!candidates.contains(&core.id));
++
++        let adverts: Vec<_> = (8400..8500)
++            .map(|port| {
++                let mut a = bridge.clone();
++                a.id = rand::random();
++                a.set_port(port);
++                a
++            })
++            .collect();
++        peers.push_addresses(&adverts);
++        peers.add_fixed_addresses(Network::Bitcoin);
++        assert_eq!(ports(&peers), [8333, 8433]);
++        assert_eq!(peers.manual_endpoint(host.clone(), 8433).id, bridge.id);
++
++        let dir =
++            std::env::temp_dir().join(format!("floresta-endpoints-{}", rand::random::<u64>()));
++        std::fs::create_dir(&dir).unwrap();
++        let path = dir.to_str().unwrap();
++        peers.dump_peers(path).unwrap();
++        let mut restored = AddressMan::new(None, SUPPORTED_NETWORKS);
++        restored.start_addr_man(path.to_string());
++        assert_eq!(ports(&restored), [8333, 8433]);
++        assert_eq!(restored.manual_endpoint(host.clone(), 8433).id, bridge.id);
++        restored.ban_host(bridge.id, 86400);
++        let until = restored.banned_until(&host).unwrap();
++        assert!(until >= AddressMan::time_since_unix() + 86399);
++        restored.update_set_state(core.id, AddressState::Tried(0));
++        restored.add_fixed_addresses(Network::Bitcoin);
++        assert!(matches!(
++            restored.manual_endpoint(host.clone(), 8333).state,
++            AddressState::Banned(_)
++        ));
++        assert!(matches!(
++            restored.manual_endpoint(host.clone(), 8434).state,
++            AddressState::Banned(_)
++        ));
++        restored.dump_peers(path).unwrap();
++        peers = AddressMan::new(None, SUPPORTED_NETWORKS);
++        peers.start_addr_man(path.to_string());
++        assert_eq!(peers.banned_until(&host), Some(until));
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
+     fn load_addresses_from_json(file_path: &str) -> io::Result<Vec<LocalAddress>> {
+         let mut contents = String::new();
+         File::open(file_path)?.read_to_string(&mut contents)?;
+diff --git a/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
+index dd325cf..11d398b 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/chain_selector_ctx.rs
+@@ -71,7 +71,6 @@ use tracing::error;
+ use tracing::info;
+ use tracing::warn;
+ 
+-use crate::address_man::AddressState;
+ use crate::block_proof::Bitmap;
+ use crate::node::periodic_job;
+ use crate::node::try_and_log;
+@@ -183,12 +182,6 @@ where
+                 error!("Error while downloading headers from peer={peer} err={e}");
+ 
+                 self.disconnect_and_ban(peer)?;
+-
+-                let peer = self.peers.get(&peer).unwrap();
+-                self.common.address_man.update_set_state(
+-                    peer.address_id as usize,
+-                    AddressState::Banned(ChainSelector::BAN_TIME),
+-                );
+             }
+         }
+ 
+@@ -704,10 +697,6 @@ where
+     fn ban_peers_on_tip(&mut self, tip: BlockHash) -> Result<(), WireError> {
+         for peer in self.common.peers.clone() {
+             if self.context.tip_cache.get(&peer.0).copied().eq(&Some(tip)) {
+-                self.address_man.update_set_state(
+-                    peer.1.address_id as usize,
+-                    AddressState::Banned(ChainSelector::BAN_TIME),
+-                );
+                 self.disconnect_and_ban(peer.0)?;
+             }
+         }
+@@ -821,7 +810,7 @@ where
+ 
+     /// Whether we have enough peers to start downloading headers
+     fn can_start_headers_sync(&self) -> bool {
+-        let connected_peers = self.connected_peers();
++        let connected_peers = self.connected_hosts();
+         if self.network == Network::Regtest && connected_peers >= 1 {
+             return true;
+         }
+@@ -915,6 +904,7 @@ where
+         }
+ 
+         let mut peer_accs = Vec::new();
++        let mut responding_hosts = HashSet::new();
+         loop {
+             // wait for all peers to respond or timeout after 1 minute
+             if self.inflight.is_empty() {
+@@ -929,7 +919,18 @@ where
+ 
+                     NodeNotification::FromPeer(peer, message, _) => {
+                         if let PeerMessages::UtreexoState(state) = message {
+-                            self.inflight.remove(&InflightRequests::UtreexoState(peer));
++                            // Only one solicited accumulator response per peer and per host.
++                            if self
++                                .inflight
++                                .remove(&InflightRequests::UtreexoState(peer))
++                                .is_none()
++                                || !self
++                                    .peers
++                                    .get(&peer)
++                                    .is_some_and(|p| responding_hosts.insert(p.address))
++                            {
++                                continue;
++                            }
+                             info!("got state {state:?}");
+                             peer_accs.push((peer, state));
+                         }
+diff --git a/crates/floresta-wire/src/p2p_wire/node/conn.rs b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+index 926c327..e4a9b3c 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/conn.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+@@ -84,21 +84,17 @@ where
+             _ => ServiceFlags::NONE,
+         };
+ 
+-        // Get the fixed peer's `peer_id` and `LocalAddress` if set,
+-        // or fetch a new address from the address manager.
+-        let candidate_peer = self
+-            .fixed_peer
+-            .as_ref()
+-            .map(|addr| (0, addr.clone()))
+-            .or_else(|| {
+-                self.address_man.get_address_to_connect(
++        let candidate_peer = self.fixed_peer.clone().or_else(|| {
++            self.address_man
++                .get_address_to_connect(
+                     required_services,
+                     matches!(conn_kind, ConnectionKind::Feeler),
+                 )
+-            });
++                .map(|(_, address)| address)
++        });
+ 
+         // Load hardcoded addresses to the address manager if no fixed or manual peers exist.
+-        let Some((peer_id, peer_address)) = candidate_peer else {
++        let Some(peer_address) = candidate_peer else {
+             if !matches!(conn_kind, ConnectionKind::Manual) {
+                 let net = self.network;
+                 self.address_man.add_fixed_addresses(net);
+@@ -108,34 +104,13 @@ where
+ 
+         debug!("Attempting connection with address={peer_address:?} kind={conn_kind:?}",);
+ 
+-        let now = SystemTime::now()
+-            .duration_since(UNIX_EPOCH)
+-            .unwrap()
+-            .as_secs();
+-
+-        // Defaults to failed, if the connection is successful, we'll update the state
+-        self.address_man
+-            .update_set_state(peer_id, AddressState::Failed(now));
+-
+-        // Don't open duplicate connections to the same peer.
+-        let is_peer_connected = |(_, old_peer): (_, &LocalPeerView)| {
+-            peer_address.get_net_address() == old_peer.address
+-                && peer_address.get_port() == old_peer.port
+-        };
+-        if self.peers.iter().any(is_peer_connected) {
+-            return Err(WireError::PeerAlreadyExists(
+-                peer_address.get_net_address(),
+-                peer_address.get_port(),
+-            ));
+-        }
+-
+         // Only allow P2PV1 fallback if the peer's connection kind is manual,
+         // or if the `--allow-v1-fallback` CLI argument was set.
+         let allow_v1_fallback =
+             matches!(conn_kind, ConnectionKind::Manual) || self.config.allow_v1_fallback;
+ 
+         // Open a connection to the peer.
+-        self.open_connection(conn_kind, peer_id, peer_address, allow_v1_fallback)?;
++        self.open_connection(conn_kind, peer_address, allow_v1_fallback)?;
+ 
+         Ok(())
+     }
+@@ -153,6 +128,40 @@ where
+         Ok(())
+     }
+ 
++    // Gossip contributes at most one endpoint per host. A local second endpoint may fill a
++    // missing proof service without replacing the healthy connection or claiming another vote.
++    fn can_open_endpoint(&self, kind: ConnectionKind, endpoint: &LocalAddress) -> bool {
++        let mut siblings = self
++            .peers
++            .values()
++            .filter(|p| p.address == endpoint.get_net_address());
++        let Some(first) = siblings.next() else {
++            return true;
++        };
++        if kind == ConnectionKind::Manual {
++            return first.port != endpoint.get_port()
++                && siblings.all(|p| p.port != endpoint.get_port());
++        }
++        let ConnectionKind::Regular(service) = kind else {
++            return false;
++        };
++        if siblings.next().is_some()
++            || first.state != PeerStatus::Ready
++            || first.port == endpoint.get_port()
++            || !endpoint.get_services().has(service)
++            || first.services.has(service)
++        {
++            return false;
++        }
++        let proof = service_flags::UTREEXO.into();
++        let archive = service_flags::UTREEXO_ARCHIVE.into();
++        service == proof
++            || service == archive
++            || (service == ServiceFlags::NETWORK
++                && !first.serves_block_bodies()
++                && (first.services.has(proof) || first.services.has(archive)))
++    }
++
+     /// Creates a new outgoing connection with `address`.
+     ///
+     /// `kind` may or may not be a [`ConnectionKind::Feeler`], a special connection type
+@@ -167,10 +176,28 @@ where
+     pub(crate) fn open_connection(
+         &mut self,
+         kind: ConnectionKind,
+-        peer_id: usize,
+         peer_address: LocalAddress,
+         allow_v1_fallback: bool,
+     ) -> Result<(), WireError> {
++        if self
++            .address_man
++            .banned_until(&peer_address.get_addrv2())
++            .is_some()
++        {
++            return Err(WireError::PeerMisbehaving);
++        }
++        if !self.can_open_endpoint(kind, &peer_address) {
++            return Err(WireError::PeerAlreadyExists(
++                peer_address.get_net_address(),
++                peer_address.get_port(),
++            ));
++        }
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap_or_default()
++            .as_secs();
++        self.address_man
++            .update_set_state(peer_address.id, AddressState::Failed(now));
+         let (requests_tx, requests_rx) = unbounded_channel();
+         if let Some(ref proxy) = self.socks5 {
+             spawn(timeout(
+@@ -233,7 +260,7 @@ where
+                 services: ServiceFlags::NONE,
+                 _last_message: Instant::now(),
+                 kind,
+-                address_id: peer_id as u32,
++                address_id: peer_address.id,
+                 height: 0,
+                 banscore: 0,
+                 // Will be downgraded to V1 if the V2 handshake fails, and we allow fallback
+@@ -588,22 +615,18 @@ where
+         }
+ 
+         for address in anchors {
+-            self.open_connection(
+-                ConnectionKind::Regular(
+-                    if address
+-                        .get_services()
+-                        .has(service_flags::UTREEXO_ARCHIVE.into())
+-                    {
+-                        service_flags::UTREEXO_ARCHIVE.into()
+-                    } else {
+-                        service_flags::UTREEXO.into()
+-                    },
+-                ),
+-                address.id,
++            let address = self.address_man.remember_local_endpoint(address);
++            let service = if address.get_services().has(service_flags::UTREEXO_ARCHIVE.into()) {
++                service_flags::UTREEXO_ARCHIVE.into()
++            } else {
++                service_flags::UTREEXO.into()
++            };
++            // A restored sibling, duplicate or banned anchor must not prevent trying the rest.
++            try_and_log!(self.open_connection(
++                ConnectionKind::Regular(service),
+                 address,
+-                // Using V1 transport fallback as utreexo nodes have limited support
+                 true,
+-            )?;
++            ));
+         }
+ 
+         Ok(())
+@@ -649,34 +672,14 @@ where
+         if self.added_peers.is_empty() {
+             return Ok(());
+         }
+-        let peers_count = self.peer_id_count;
+-        for added_peer in self.added_peers.clone() {
+-            let matching_peer = self.peers.values().find(|peer| {
+-                self.to_addr_v2(peer.address) == added_peer.address && peer.port == added_peer.port
+-            });
+-
+-            if matching_peer.is_none() {
+-                let address = LocalAddress::new(
+-                    added_peer.address.clone(),
+-                    0,
+-                    AddressState::Tried(
+-                        SystemTime::now()
+-                            .duration_since(UNIX_EPOCH)
+-                            .unwrap()
+-                            .as_secs(),
+-                    ),
+-                    ServiceFlags::NONE,
+-                    added_peer.port,
+-                    peers_count as usize,
+-                );
+-
+-                // Finally, open the connection with the node
+-                self.open_connection(
+-                    ConnectionKind::Manual,
+-                    peers_count as usize,
+-                    address,
+-                    added_peer.v1_fallback,
+-                )?
++        for added in self.added_peers.clone() {
++            if self.can_open_endpoint(ConnectionKind::Manual, &added.endpoint)
++                && self
++                    .address_man
++                    .banned_until(&added.endpoint.get_addrv2())
++                    .is_none()
++            {
++                self.open_connection(ConnectionKind::Manual, added.endpoint, added.v1_fallback)?;
+             }
+         }
+         Ok(())
+diff --git a/crates/floresta-wire/src/p2p_wire/node/mod.rs b/crates/floresta-wire/src/p2p_wire/node/mod.rs
+index 3fa0910..f711a51 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/mod.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/mod.rs
+@@ -188,7 +188,7 @@ pub struct LocalPeerView {
+     pub(crate) state: PeerStatus,
+ 
+     /// An id identifying this peer's address in our address manager
+-    pub(crate) address_id: u32,
++    pub(crate) address_id: usize,
+ 
+     /// A channel used to send requests to this peer
+     pub(crate) channel: UnboundedSender<NodeRequest>,
+diff --git a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+index 0cb37cb..85c617a 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+@@ -2,6 +2,7 @@
+ 
+ use core::net::IpAddr;
+ use core::net::SocketAddr;
++use std::collections::HashSet;
+ use std::time::Instant;
+ use std::time::SystemTime;
+ use std::time::UNIX_EPOCH;
+@@ -44,11 +45,8 @@ use crate::p2p_wire::peer::Version;
+ #[derive(Debug, Clone)]
+ /// A simple struct of added peers, used to track the ones we added manually by `addnode <ip:port> add` command.
+ pub struct AddedPeerInfo {
+-    /// The address of the peer
+-    pub(crate) address: AddrV2,
+-
+-    /// The port of the peer
+-    pub(crate) port: u16,
++    /// The exact endpoint and its address-manager identity, retained across reconnects.
++    pub(crate) endpoint: LocalAddress,
+ 
+     /// Whether we should allow V1 fallback for this connection
+     pub(crate) v1_fallback: bool,
+@@ -115,6 +113,16 @@ where
+             .count()
+     }
+ 
++    /// Count distinct hosts toward the header-sync peer threshold.
++    pub(crate) fn connected_hosts(&self) -> usize {
++        self.peers
++            .values()
++            .filter(|p| p.state == PeerStatus::Ready && p.is_long_lived())
++            .map(|p| p.address)
++            .collect::<HashSet<_>>()
++            .len()
++    }
++
+     /// Sends a request to an initialized peer that supports `required_service`, chosen via a
+     /// latency-weighted distribution (lower latency => more likely).
+     ///
+@@ -264,6 +272,13 @@ where
+         peer: u32,
+         mut version: Version,
+     ) -> Result<(), WireError> {
++        if self
++            .peers
++            .get(&peer)
++            .is_some_and(|p| p.state == PeerStatus::Banned)
++        {
++            return Err(WireError::PeerMisbehaving);
++        }
+         self.inflight.remove(&InflightRequests::Connect(peer));
+ 
+         // Mark this peer as ready to communicate with
+@@ -512,8 +527,7 @@ where
+                         .update_set_state(idx, AddressState::Failed(now));
+                 }
+                 PeerStatus::Banned => {
+-                    self.address_man
+-                        .update_set_state(idx, AddressState::Banned(RunningNode::BAN_TIME));
++                    self.address_man.ban_host(idx, RunningNode::BAN_TIME);
+                 }
+             }
+         }
+@@ -582,17 +596,21 @@ where
+ 
+     /// Disconnects a peer and bans it for `T::BAN_TIME`.
+     pub(crate) fn disconnect_and_ban(&mut self, peer: PeerId) -> Result<(), WireError> {
+-        if let Some(peer) = self.peers.get_mut(&peer) {
+-            // Manual connections are exempt from being punished
+-            if peer.is_manual_peer() {
+-                return Ok(());
+-            }
+-
+-            // `handle_disconnection` will mark the address as banned when `Peer` object return
+-            peer.state = PeerStatus::Banned;
++        let source = self.peers.get(&peer).ok_or(WireError::PeerNotFound)?;
++        if source.is_manual_peer() {
++            return Ok(());
++        }
++        let host = source.address;
++        let id = source.address_id;
++        self.address_man.ban_host(id, T::BAN_TIME);
++        for sibling in self
++            .peers
++            .values_mut()
++            .filter(|p| p.address == host && !p.is_manual_peer())
++        {
++            sibling.state = PeerStatus::Banned;
++            let _ = sibling.channel.send(NodeRequest::Shutdown);
+         }
+-
+-        self.send_to_peer(peer, NodeRequest::Shutdown)?;
+         Ok(())
+     }
+ 
+@@ -769,7 +787,7 @@ where
+             .peers
+             .values()
+             .filter(|peer| peer.state == PeerStatus::Ready && peer.serves_block_proofs())
+-            .map(|peer| peer.address_id as usize)
++            .map(|peer| peer.address_id)
+             .collect();
+         if peers_usize.is_empty() {
+             warn!("No connected Utreexo peers to save to disk");
+@@ -922,22 +940,14 @@ where
+         if self
+             .added_peers
+             .iter()
+-            .any(|info| address == info.address && port == info.port)
++            .any(|info| address == info.endpoint.get_addrv2() && port == info.endpoint.get_port())
+         {
+             return Err(WireError::PeerAlreadyExists(addr, port));
+         }
+ 
+-        // Add this address to our address manager for later
+-        // assume it has the bare-minimum services, otherwise `push_addresses` will ignore it
+-        let mut local_address = LocalAddress::from(address.clone());
+-        local_address.set_services(ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS);
+-
+-        self.address_man.push_addresses(&[local_address]);
+-
+-        // Add a simple reference to the peer
++        let endpoint = self.address_man.manual_endpoint(address, port);
+         self.added_peers.push(AddedPeerInfo {
+-            address,
+-            port,
++            endpoint,
+             v1_fallback: !v2_transport,
+         });
+ 
+@@ -960,10 +970,9 @@ where
+         debug!("Trying to remove peer {addr}:{port}");
+ 
+         let address = self.to_addr_v2(addr);
+-        let index = self
+-            .added_peers
+-            .iter()
+-            .position(|info| address == info.address && port == info.port);
++        let index = self.added_peers.iter().position(|info| {
++            address == info.endpoint.get_addrv2() && port == info.endpoint.get_port()
++        });
+ 
+         match index {
+             Some(peer_id) => self.added_peers.remove(peer_id),
+@@ -1010,19 +1019,8 @@ where
+             return Err(WireError::PeerAlreadyExists(addr, port));
+         }
+ 
+-        let kind = ConnectionKind::Manual;
+-
+-        // Add this address to our address manager for later
+-        // assume it has the bare-minimum services, otherwise `push_addresses` will ignore it
+-        let address_v2 = self.to_addr_v2(addr);
+-        let mut local_address = LocalAddress::from(address_v2.clone());
+-
+-        local_address.set_port(port);
+-        local_address.set_services(ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS);
+-
+-        self.address_man.push_addresses(&[local_address.clone()]);
+-        // Return true if exists or false if anything fails during connection
+-        // We allow V1 fallback iff the `v2` flag is not set
+-        self.open_connection(kind, local_address.id, local_address, !v2_transport)
++        let address = self.to_addr_v2(addr);
++        let endpoint = self.address_man.manual_endpoint(address, port);
++        self.open_connection(ConnectionKind::Manual, endpoint, !v2_transport)
+     }
+ }
+diff --git a/crates/floresta-wire/src/p2p_wire/tests/utils.rs b/crates/floresta-wire/src/p2p_wire/tests/utils.rs
+index 7043732..8b5215e 100644
+--- a/crates/floresta-wire/src/p2p_wire/tests/utils.rs
++++ b/crates/floresta-wire/src/p2p_wire/tests/utils.rs
+@@ -175,7 +175,7 @@ pub fn create_peer(
+ 
+     LocalPeerView {
+         message_times: Ema::with_half_life_50(),
+-        address: "127.0.0.1".parse().unwrap(),
++        address: IpAddr::V4((0x7f00_0001 + peer_id).into()),
+         services: service_flags::UTREEXO.into(),
+         user_agent: "/utreexo:0.1.0/".to_string(),
+         height: 0,
+@@ -490,7 +490,7 @@ fn routing_peer(
+             state: PeerStatus::Ready,
+             kind: ConnectionKind::Regular(services),
+             banscore: 0,
+-            address_id: id,
++            address_id: id as usize,
+             _last_message: Instant::now(),
+             transport_protocol: TransportProtocol::V2,
+             message_times: latency,
+@@ -499,6 +499,95 @@ fn routing_peer(
+     receiver
+ }
+ 
++#[tokio::test]
++async fn a_pinned_second_port_fills_a_missing_proof_service_only() {
++    use crate::address_man::LocalAddress;
++
++    let (dir, mut node) = routing_node();
++    // Keep both disposable TCP ports claimed by this test throughout. No handshake leaves loopback.
++    let core = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let bridge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let core_addr = core.local_addr().unwrap();
++    let mut raw = LocalAddress::try_from(core_addr.to_string().as_str()).unwrap();
++    let mut proof =
++        LocalAddress::try_from(bridge.local_addr().unwrap().to_string().as_str()).unwrap();
++    let proof_service: ServiceFlags = service_flags::UTREEXO.into();
++    raw.set_services(ServiceFlags::NETWORK | ServiceFlags::WITNESS);
++    proof.set_services(proof_service | ServiceFlags::WITNESS);
++    node.open_connection(
++        ConnectionKind::Regular(ServiceFlags::NETWORK),
++        raw.clone(),
++        false,
++    )
++    .unwrap();
++    let requested = ConnectionKind::Regular(proof_service);
++    assert!(node
++        .open_connection(requested, proof.clone(), false)
++        .is_err());
++    let first_id = node.peers.keys().copied().next().unwrap();
++    let first = node.peers.get_mut(&first_id).unwrap();
++    first.services = raw.get_services();
++    first.state = PeerStatus::Ready;
++    assert!(node
++        .open_connection(
++            ConnectionKind::Regular(ServiceFlags::NONE),
++            proof.clone(),
++            false
++        )
++        .is_err());
++    assert!(node.open_connection(requested, raw.clone(), false).is_err());
++    node.open_connection(requested, proof.clone(), false)
++        .unwrap();
++    let second = node
++        .peers
++        .values_mut()
++        .find(|p| p.port == proof.get_port())
++        .unwrap();
++    second.state = PeerStatus::Ready;
++    second.services = proof.get_services();
++    assert_eq!(node.connected_peers(), 2);
++    assert_eq!(node.connected_hosts(), 1);
++    assert_eq!(node.peers[&first_id].address_id, raw.id);
++    assert!(node
++        .open_connection(requested, proof.clone(), false)
++        .is_err());
++
++    node.peers.remove(&first_id);
++    // Reverse arrival order: a verified proof-only peer keeps its connection while raw
++    // blocks come from the other pinned port. Generic and duplicate attempts are refused.
++    assert!(node
++        .open_connection(
++            ConnectionKind::Regular(ServiceFlags::NONE),
++            raw.clone(),
++            false
++        )
++        .is_err());
++    node.open_connection(
++        ConnectionKind::Regular(ServiceFlags::NETWORK),
++        raw.clone(),
++        false,
++    )
++    .unwrap();
++    assert_eq!(node.peers.len(), 2);
++
++    // Exact operator-supplied port and address ID survive reconnect without relying on live IDs.
++    node.peers.clear();
++    node.handle_addnode_add_peer(core_addr.ip(), core_addr.port(), true)
++        .unwrap();
++    let explicit = node.added_peers[0].endpoint.clone();
++    assert_eq!(explicit.get_socket_address(), core_addr);
++    assert_eq!(node.peers.values().next().unwrap().address_id, explicit.id);
++    node.peers.clear();
++    node.maybe_open_connection_with_added_peers().unwrap();
++    assert_eq!(node.peers.values().next().unwrap().address_id, explicit.id);
++    assert_eq!(node.peers.values().next().unwrap().port, core_addr.port());
++    node.handle_addnode_onetry_peer(core_addr.ip(), proof.get_port(), true)
++        .unwrap();
++    assert_eq!(node.peers.len(), 2);
++    drop(node);
++    std::fs::remove_dir_all(dir).unwrap();
++}
++
+ #[tokio::test]
+ async fn block_and_proof_requests_use_different_peers() {
+     use crate::node_interface::UserRequest;

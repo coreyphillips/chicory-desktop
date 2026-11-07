@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { patchEngine } from '../apply-engine-patches.mjs';
+import { patchEngineEndpointPolicy } from '../apply-engine-endpoint-policy.mjs';
+import { patchEngineWatchControl } from '../apply-engine-watch-control.mjs';
 import { patchStorageEncryption, verifyDriver } from '../apply-storage-encryption.mjs';
 import { prepareTor } from './prepare-tor.mjs';
 import { buildWindowsHello } from './build-windows-hello.mjs';
@@ -88,6 +90,8 @@ execFileSync(node, [npm, 'ci', '--ignore-scripts', '--include=optional', '--omit
 });
 const enginePackage = path.join(engine, 'node_modules/beignet');
 patchEngine(enginePackage);
+patchEngineEndpointPolicy(enginePackage);
+patchEngineWatchControl(enginePackage);
 const storage = await patchStorageEncryption(enginePackage, { node });
 verifyDriver(node, enginePackage);
 await prepareTor(root);

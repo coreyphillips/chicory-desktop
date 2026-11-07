@@ -205,3 +205,13 @@ test('the lock grant for an erase is one-shot and refused while locked', async t
   const off = new AppLock({ profile: temporary(t), authenticator: { availability: async () => ({ kind: null }) } });
   assert.equal(off.takeGrant(), true, 'with the lock off the in-app confirmation is the gate');
 });
+
+test('declining unresolved node cleanup leaves wallet keys accessible and wallet engines running', async t => {
+  const profile = populated(t);
+  const { instance, calls } = eraser(profile, { prepareNodeErase: async () => false });
+  assert.deepEqual(calls, []);
+  assert.equal((await instance.erase()).code, 'ERASE_NODE_DATA');
+  assert.deepEqual(calls, []);
+  assert.equal(fs.existsSync(path.join(profile, 'storage-key.json')), true);
+  assert.equal(hasPendingErase(profile), false);
+});

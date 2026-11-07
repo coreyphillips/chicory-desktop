@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { systemTar } from './system-tar.mjs';
 
 const defaultRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -51,7 +52,7 @@ export async function prepareTor(root = defaultRoot) {
   const destination = path.join(runtime, 'tor');
   try {
     // Windows 10/11 include bsdtar. Only the checksum-pinned archive is extracted.
-    execFileSync(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-xzf', archiveFile, '-C', stage, 'tor', 'data', 'docs'], { stdio: 'inherit' });
+    execFileSync(systemTar, ['-xzf', archiveFile, '-C', stage, 'tor', 'data', 'docs'], { stdio: 'inherit' });
     // Bridge transports are not configured by this release and are not shipped.
     await fs.rm(path.join(stage, 'tor/pluggable_transports'), { recursive: true, force: true });
     await fs.rm(path.join(stage, 'tor/tor-gencert.exe'), { force: true });

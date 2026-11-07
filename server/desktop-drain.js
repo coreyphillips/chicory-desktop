@@ -338,6 +338,12 @@ function createDesktopDrains(manager, { atomicSave, electrum = electrumRequests,
 		activity,
 		sync,
 		useWallets(get) { wallets = get; },
+		watchTargets(id) {
+			const chain = chainFor(manager.registry.get(id).network);
+			const rows = entry(id).coordinator.watchTargets();
+			return { scripts: rows.map(row => bitcoinAddress.toOutputScript(row.address, chain).toString('hex')),
+				outpoints: rows.flatMap(row => row.outpoints) };
+		},
 		close() { clearInterval(timer); }
 	};
 }

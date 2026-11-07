@@ -1,0 +1,179 @@
+name: Floresta candidate
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'build/floresta/**'
+      - 'desktop/floresta*.cjs'
+      - 'desktop/main.cjs'
+      - 'build/electron-builder.yml'
+      - 'build/verify-package.cjs'
+      - 'scripts/apply-storage-encryption.mjs'
+      - 'scripts/desktop/package-floresta-preview.mjs'
+      - 'scripts/desktop/system-tar.mjs'
+      - 'scripts/desktop/prepare-runtime.mjs'
+      - 'scripts/desktop/prepare-tor.mjs'
+      - 'scripts/qualification/floresta-preview*.mjs'
+      - 'scripts/desktop/prepare-floresta.mjs'
+      - '.github/workflows/floresta.yml'
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: x64 }
+          - { os: macos-15, arch: arm64 }
+          - { os: macos-15-intel, arch: x64 }
+          - { os: windows-2025, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 50 || 40 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - name: Prepare the Rust compiler
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install Boost and Clang on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev libclang-dev
+      - name: Install Boost on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install boost@1.85
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix boost@1.85)" >> "$GITHUB_ENV"
+          echo "Boost_DIR=$(brew --prefix boost@1.85)/lib/cmake/Boost-1.85.0" >> "$GITHUB_ENV"
+      - name: Install verified Boost headers on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # libbitcoinkernel links only Boost::headers. These matching Win64
+          # packages supply the include tree and Boost's generated CMake config.
+          $prefix = Join-Path $env:RUNNER_TEMP 'boost-headers'
+          $packages = [ordered]@{
+            'libboost-headers-1.85.0-h57928b3_4.conda' = 'c1b5f878403534ac1b2d1b84d5c6e522f5b988ff3904ce246f1272b6b3d85f54'
+            'libboost-devel-1.85.0-h91493d7_4.conda' = '64ecbc36863488ac08f67aa7272932d5d2d35e4515b3d39cbfeeef45f03ad7f2'
+          }
+          foreach ($name in $packages.Keys) {
+            $archive = Join-Path $env:RUNNER_TEMP $name
+            curl.exe --fail --location --retry 3 --output $archive "https://conda.anaconda.org/conda-forge/win-64/$name"
+            if ($LASTEXITCODE -ne 0 -or (Get-FileHash $archive).Hash -ne $packages[$name]) { throw "Boost package verification failed: $name" }
+            Write-Host "Extracting verified $name"
+            & "$env:CONDA/python.exe" -c "import sys; from conda_package_handling.api import extract; extract(sys.argv[1], dest_dir=sys.argv[2], components=['pkg'])" $archive $prefix
+            if ($LASTEXITCODE -ne 0) { throw "Boost extraction failed: $name" }
+          }
+          $library = Join-Path $prefix 'Library'
+          if (!(Test-Path "$library/include/boost/version.hpp") -or !(Test-Path "$library/lib/cmake/boost_headers-1.85.0/boost_headers-config.cmake")) { throw 'Boost headers or CMake config are missing.' }
+          "CMAKE_PREFIX_PATH=$library" >> $env:GITHUB_ENV
+          "Boost_DIR=$library/lib/cmake/Boost-1.85.0" >> $env:GITHUB_ENV
+          "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
+      - name: Compile the pinned candidate
+        id: build
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: 1.99.1
+        run: |
+          $flags = @()
+          if ($env:RUNNER_OS -eq 'Linux') { $flags += '--test' }
+          $binary = node scripts/desktop/prepare-floresta.mjs @flags | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Candidate build failed.' }
+          "CHICORY_TEST_MANAGED_FLORESTA_BINARY=$binary" >> $env:GITHUB_ENV
+      - name: Test native control, storage ownership and exit
+        run: node --test desktop/floresta.test.cjs desktop/floresta-settings.test.cjs desktop/floresta-wallet-sync.test.cjs
+      - name: Prepare wallet dependencies for the unpacked preview
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          git config --global --add url."https://github.com/".insteadOf git@github.com:
+          npm ci
+          npm --prefix server ci --omit=dev
+          npm run runtime:prepare
+          npm run build
+          node --test desktop/floresta-preview.test.cjs
+      - name: Verify the host preview
+        shell: pwsh
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # electron-builder skips even identity '-' for PRs by default. This
+          # job has no signing credentials and the preview packager never publishes.
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' && github.event_name == 'pull_request' && 'true' || 'false' }}
+        run: |
+          $arch = node -p process.arch
+          if ($LASTEXITCODE -ne 0 -or $arch -ne $env:EXPECTED_ARCH) { throw "Expected $env:EXPECTED_ARCH host; got $arch." }
+          $sha = (Get-FileHash -LiteralPath $env:CHICORY_TEST_MANAGED_FLORESTA_BINARY).Hash.ToLowerInvariant()
+          $dir = node scripts/desktop/package-floresta-preview.mjs --sha256 $sha | Tee-Object -Variable log | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $dir -PathType Container)) { $log; throw 'Preview packaging failed.' }
+          "PREVIEW_DIRECTORY=$dir" >> $env:GITHUB_ENV
+      - name: Start and stop the packaged Linux monitor
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y gnome-keyring dbus-x11
+          # Permit Chromium's sandbox only for the verified executable in this job.
+          executable=$(realpath "$PREVIEW_DIRECTORY/chicory-floresta-preview")
+          [[ "$executable" =~ ^/[a-zA-Z0-9/._-]+$ ]]
+          profile=$(mktemp)
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\n"%s" flags=(unconfined) {\n  userns,\n}\n' "$executable" > "$profile"
+          sudo apparmor_parser -a "$profile"
+          trap 'sudo apparmor_parser -R "$profile"; rm -f "$profile"' EXIT
+          dbus-run-session -- sh -ec 'printf qualify | gnome-keyring-daemon --unlock --components=secrets > /dev/null; xvfb-run -a node scripts/qualification/floresta-preview-smoke.mjs "$PREVIEW_DIRECTORY/chicory-floresta-preview"'
+      - name: Start and stop the packaged Windows monitor
+        if: runner.os == 'Windows'
+        run: node scripts/qualification/floresta-preview-smoke.mjs "$env:PREVIEW_DIRECTORY/Chicory Floresta Preview.exe"
+      - name: Archive and smoke-test the ad hoc signed macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          PREVIEW_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          app_name='Chicory Floresta Preview.app'
+          test "$(basename "$PREVIEW_DIRECTORY")" = "$app_name"
+          archive="$RUNNER_TEMP/Chicory-Floresta-Preview-macOS-$PREVIEW_ARCH-adhoc.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$PREVIEW_DIRECTORY" "$archive"
+          extracted=$(mktemp -d "$RUNNER_TEMP/chicory-mac-smoke.XXXXXXXX")
+          /usr/bin/ditto -xk "$archive" "$extracted"
+          app="$extracted/$app_name"
+          main="$app/Contents/MacOS/Chicory Floresta Preview"
+          daemon="$app/Contents/Resources/runtime/floresta/florestad"
+          mach_arch="$PREVIEW_ARCH"
+          if [[ "$mach_arch" == x64 ]]; then mach_arch=x86_64; fi
+          /usr/bin/lipo "$main" -verify_arch "$mach_arch"
+          /usr/bin/lipo "$daemon" -verify_arch "$mach_arch"
+          test -L "$app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          /usr/bin/codesign --verify --deep --strict "$app"
+          /usr/bin/codesign --verify --strict "$daemon"
+          for signed in "$app" "$daemon"; do
+            signature=$(/usr/bin/codesign --display --verbose=2 "$signed" 2>&1)
+            grep -Fxq 'Signature=adhoc' <<< "$signature"
+          done
+          node scripts/qualification/floresta-preview-smoke.mjs "$main"
+          echo "PREVIEW_ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Archive the verified unpacked directory
+        if: runner.os != 'macOS'
+        shell: pwsh
+        run: |
+          $dir = Get-Item -LiteralPath $env:PREVIEW_DIRECTORY
+          if ($env:RUNNER_OS -eq 'Linux') {
+            $archive = Join-Path $env:RUNNER_TEMP 'Chicory-Floresta-Preview-linux-x64.tar.gz'
+            tar -czf $archive -C $dir.Parent.FullName $dir.Name
+          } else {
+            $archive = Join-Path $env:RUNNER_TEMP 'Chicory-Floresta-Preview-windows-x64.zip'
+            & "$env:SystemRoot/System32/tar.exe" -acf $archive -C $dir.Parent.FullName $dir.Name
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not archive the preview.' }
+          "PREVIEW_ARCHIVE=$archive" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Floresta-preview-${{ runner.os }}-${{ matrix.arch }}
+          path: ${{ env.PREVIEW_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3

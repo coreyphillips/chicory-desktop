@@ -6,14 +6,62 @@ const vault = require('./vault-files');
 const entry = process.argv[2];
 const args = process.argv.slice(3);
 let initialized = false;
+let fenced = false;
+let chainWatch;
+const engineRoot = path.resolve(path.dirname(entry), '..') + path.sep;
 const timeout = setTimeout(() => process.exit(1), 15000);
 process.once('disconnect', () => {
   if (!initialized) process.exit(0);
   else if (process.listenerCount('SIGTERM')) process.emit('SIGTERM');
   else process.exit(0);
 });
-process.on('message', message => {
-  if (initialized || message?.type !== 'initialize-storage') return;
+process.on('message', async message => {
+  // Only our fork parent has this channel. No HTTP endpoint or renderer IPC
+  // can request descriptors, acknowledge coverage or stop startup.
+  if (message?.type === 'chicory-chain-control/v1') {
+    if (!Number.isSafeInteger(message.id) || message.id < 0) return;
+    let result;
+    try {
+      switch (message.action) {
+        case 'enable-observation':
+          if (!initialized || fenced) {
+            result = { enabled: false };
+            break;
+          }
+          chainWatch = require(path.join(engineRoot, 'chicory-watch-control.cjs'));
+          chainWatch.enable();
+          result = { enabled: true };
+          break;
+        case 'disable-observation':
+          result = { disabled: chainWatch?.disableObservation() ?? true };
+          break;
+        case 'fence-before-init':
+          if (!initialized) fenced = true;
+          result = { fenced, status: fenced ? 'fenced-before-init' : 'deferred-engine-started' };
+          break;
+        case 'watch-snapshot':
+          result = chainWatch?.snapshot() || { status: 'disabled', coverageComplete: false };
+          break;
+        case 'acknowledge-watch':
+          result = chainWatch?.acknowledge(message.generation) || { accepted: false };
+          break;
+        case 'invalidate-watch':
+          chainWatch?.invalidate();
+          result = { invalidated: true };
+          break;
+        case 'reconnect-confirmed-funding':
+          result = initialized && !fenced && process.env.CHICORY_FLORESTA_WALLET_LAB === '1'
+            ? await require(path.join(engineRoot, 'chicory-watch-control.cjs')).reconnectConfirmedFunding(message) : { reconciled: false };
+          break;
+        default: return;
+      }
+    } catch {
+      result = { status: 'watch-control-unavailable', coverageComplete: false };
+    }
+    if (process.connected) process.send({ type: 'chicory-chain-reply/v1', id: message.id, result }, () => {});
+    return;
+  }
+  if (fenced || initialized || message?.type !== 'initialize-storage') return;
   initialized = true;
   clearTimeout(timeout);
   try {
@@ -33,7 +81,16 @@ process.on('message', message => {
       message.apiToken = undefined;
     }
     message.filesKey = undefined; message.databaseKey = undefined;
-    const engineRoot = path.resolve(path.dirname(entry), '..') + path.sep;
+    if (message.electrumLease !== undefined) {
+      const fromEngine = Module.createRequire(entry);
+      fromEngine('rn-electrum-client/helpers/chicory-endpoint-policy.cjs').bindLocalSession(message.electrumLease);
+      message.electrumLease = undefined;
+    }
+    if (message.requireWatchAck === true && message.chainWatch !== true) throw new Error();
+    if (message.chainWatch === true) {
+      chainWatch = require(path.join(engineRoot, 'chicory-watch-control.cjs'));
+      chainWatch.enable({ requireWatchAck: message.requireWatchAck === true });
+    }
     const load = Module._load;
     Module._load = function(request, parent, isMain) {
       if (parent?.filename?.startsWith(engineRoot) && !parent.filename.endsWith(`${path.sep}engine-storage.cjs`)) {

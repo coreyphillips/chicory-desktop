@@ -81,7 +81,7 @@ function eraseProfileData(profile, io = fs) {
 const MESSAGES = {
   busy: 'Chicory is busy protecting wallet storage or installing an update. Try again shortly.',
   locked: 'Unlock Chicory and confirm again to erase.',
-  engines: 'A wallet engine did not stop cleanly, so nothing was erased. Quit Chicory, reopen it, and try again.',
+  engines: 'A wallet engine did not stop cleanly. Wallet files were preserved. Quit Chicory, reopen it, and try again.',
   partial: 'Erasing did not finish. Some wallet files could not be removed. Your wallets cannot be opened again, but the erase must complete before Chicory can start over. Try again.',
   storage: 'Erasing did not finish because local app data could not be cleared. Try again.',
 };
@@ -105,8 +105,8 @@ const MESSAGES = {
  */
 class ProfileEraser {
   constructor({ profile, io = fs, now = Date.now, authorize, busy = () => false, exclusive = task => task(),
-    stopService, stopTor, clearRendererState, startOver, record = () => {} }) {
-    Object.assign(this, { profile, io, now, authorize, busy, exclusive, stopService, stopTor, clearRendererState, startOver, record });
+    prepareNodeErase = async () => true, stopService, stopTor, clearRendererState, startOver, record = () => {} }) {
+    Object.assign(this, { profile, io, now, authorize, busy, exclusive, prepareNodeErase, stopService, stopTor, clearRendererState, startOver, record });
     this.running = null;
   }
 
@@ -125,6 +125,9 @@ class ProfileEraser {
     if (!this.authorize()) return { ok: false, code: 'ERASE_LOCKED', error: MESSAGES.locked };
     if (this.busy()) return { ok: false, code: 'ERASE_BUSY', error: MESSAGES.busy };
     const result = await this.exclusive(async () => {
+      if (!await this.prepareNodeErase()) {
+        return { ok: false, code: 'ERASE_NODE_DATA', error: 'Wallet erase cancelled. Reconnect the node volume and try again.' };
+      }
       this.record('erase started');
       const service = await this.stopService();
       // A service that was killed at its deadline may have left an engine

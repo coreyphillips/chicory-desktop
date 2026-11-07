@@ -48,12 +48,16 @@ test('onion Electrum uses the private bridge and never changes clearnet TLS', as
   const channel = transport(); const network = configureDesktopNetwork({ transport: channel }); t.after(() => network.close());
   const original = { host: 'electrum.example', port: 50002, tls: true, tlsVerify: true };
   assert.equal(await resolveElectrum(original), original); assert.equal(channel.sent.length, 0);
-  const pending = resolveElectrum({ host: onion, port: 50001, tls: true });
+  const pending = resolveElectrum({ host: onion, port: 50001, tls: true, tlsVerify: true, tlsFingerprints: ['ab'.repeat(32)] });
   const request = channel.sent[0]; assert.equal(request.type, 'tor:bridge'); assert.equal(request.host, onion);
   channel.emit('message', { type: 'tor:result', requestId: request.requestId, result: { host: '127.0.0.1', port: 19384 } });
   const resolved = await pending;
-  assert.equal(resolved.host, '127.0.0.1'); assert.equal(resolved.port, 19384); assert.equal(resolved.tls, false);
+  assert.equal(resolved.host, '127.0.0.1'); assert.equal(resolved.port, 19384); assert.equal(resolved.tls, true);
+  assert.equal(resolved.tlsVerify, true); assert.deepEqual(resolved.tlsFingerprints, ['ab'.repeat(32)]);
   assert.equal(resolved.onionHost, onion);
+  const other = await resolveElectrum({ host: onion, port: 50001, tls: false });
+  assert.equal(other.tls, false); assert.equal(other.port, resolved.port);
+  assert.equal(channel.sent.length, 1, 'use the existing raw tunnel for this destination');
   await assert.rejects(resolveElectrum({ host: 'invalid.onion', port: 50001 }), /valid onion/);
 });
 

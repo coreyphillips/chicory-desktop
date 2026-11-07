@@ -1,0 +1,668 @@
+diff --git a/bin/florestad/src/managed_cleanup.rs b/bin/florestad/src/managed_cleanup.rs
+--- a/bin/florestad/src/managed_cleanup.rs
++++ b/bin/florestad/src/managed_cleanup.rs
+@@ -192,6 +192,8 @@
+                             | "chicory-backfill-v1.key.tmp"
+                             | "chicory-backfill-v1.state"
+                             | "chicory-backfill-v1.state.tmp"
++                            | "chicory-checkpoint-fence-v1"
++                            | "chicory-checkpoint-fence-v1.tmp"
+                     )
+             }
+             Layout::Chain => matches!(
+diff --git a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs b/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
+--- a/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
++++ b/crates/floresta-chain/src/pruned_utreexo/chain_state.rs
+@@ -182,6 +182,15 @@
+     /// Reorganizations update individual disk headers before replacing BestChain.
+     /// During that interval no managed chain or wallet observer can certify a tip.
+     pub fn active_chain_status(&self) -> Result<Option<ActiveChainStatus>, BlockchainError> {
++        Ok(self.active_chain_status_at(None)?.map(|(tip, _)| tip))
++    }
++
++    /// Read the requested historical anchor, active tip and validation index in
++    /// one chainstate observation. The caller rejects a missing or detached pin.
++    pub fn active_chain_status_at(
++        &self,
++        anchor_height: Option<u32>,
++    ) -> Result<Option<(ActiveChainStatus, Option<BlockHash>)>, BlockchainError> {
+         let inner = self.inner.read();
+         let best = &inner.best_block;
+         let stored = inner
+@@ -209,12 +218,19 @@
+         {
+             return Ok(None);
+         }
+-        Ok(Some(ActiveChainStatus {
+-            height: best.depth,
+-            tip: best.best_block,
+-            validated,
+-            ibd: inner.ibd,
+-        }))
++        let anchor = match anchor_height {
++            Some(height) if height <= best.depth => inner.chainstore.get_block_hash(height)?,
++            _ => None,
++        };
++        Ok(Some((
++            ActiveChainStatus {
++                height: best.depth,
++                tip: best.best_block,
++                validated,
++                ibd: inner.ibd,
++            },
++            anchor,
++        )))
+     }
+ 
+     fn maybe_reindex(&self, potential_tip: &DiskBlockHeader) -> Result<(), BlockchainError> {
+@@ -1891,8 +1907,13 @@
+             Err(BlockchainError::BadValidationIndex)
+         ));
+         assert!(chain.active_chain_status().unwrap().is_none());
++        assert!(chain.active_chain_status_at(Some(5)).unwrap().is_none());
+ 
+         chain.switch_chain(fork[4].block_hash()).unwrap();
++        let (competing, checkpoint) = chain.active_chain_status_at(Some(10)).unwrap().unwrap();
++        assert_eq!(competing.tip, fork[4].block_hash());
++        assert_eq!(checkpoint, Some(competing.tip));
++        assert_ne!(checkpoint, Some(original[9].block_hash()));
+         let status = chain.active_chain_status().unwrap().unwrap();
+         assert_eq!(
+             (status.height, status.validated, status.tip),
+diff --git a/crates/floresta-node/src/florestad.rs b/crates/floresta-node/src/florestad.rs
+--- a/crates/floresta-node/src/florestad.rs
++++ b/crates/floresta-node/src/florestad.rs
+@@ -560,7 +560,8 @@
+                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                 loop {
+                     ticks.tick().await;
+-                    let state = match chain.active_chain_status() {
++                    let target = historical.target();
++                    let (state, active_anchor) = match chain.active_chain_status_at(target) {
+                         Ok(Some(state)) => state,
+                         Ok(None) => continue,
+                         Err(_) => break,
+@@ -571,7 +572,7 @@
+                         "walletOfferProtocol": wallet_offers.then_some("chicory.offer/1"),
+                         "pendingProtocol": "chicory.pending/1", "pendingTransactionProtocol": "chicory.pending-tx/1",
+                         "network": network.to_string(),
+-                        "historical": historical.snapshot(state.height, state.validated, state.ibd, |at| chain.get_block_hash(at).ok()),
++                        "historical": historical.snapshot(state.height, state.validated, state.ibd, |at| (Some(at) == target).then_some(active_anchor).flatten()),
+                         "endpoint": endpoint.to_string(), "genesis": genesis.to_string(),
+                         "height": state.height, "tip": state.tip.to_string(), "validated": state.validated, "ibd": state.ibd
+                     });
+diff --git a/crates/floresta-wire/src/p2p_wire/historical.rs b/crates/floresta-wire/src/p2p_wire/historical.rs
+--- a/crates/floresta-wire/src/p2p_wire/historical.rs
++++ b/crates/floresta-wire/src/p2p_wire/historical.rs
+@@ -22,6 +22,12 @@
+     target: u32,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     error: Option<String>,
++    #[serde(rename = "checkpointEligible")]
++    checkpoint_eligible: bool,
++    #[serde(rename = "checkpointHold", skip_serializing_if = "Option::is_none")]
++    checkpoint_hold: Option<&'static str>,
++    #[serde(skip)]
++    reserved_at: Option<u32>,
+     #[serde(skip)]
+     anchor: Option<BlockHash>,
+ }
+@@ -33,6 +39,9 @@
+             height: 0,
+             target: 0,
+             error: None,
++            checkpoint_eligible: false,
++            checkpoint_hold: None,
++            reserved_at: None,
+             anchor: None,
+         }
+     }
+@@ -42,14 +51,26 @@
+ pub struct Historical(Arc<Mutex<Progress>>);
+ 
+ impl Historical {
+-    pub(crate) fn begin(&self, height: u32, anchor: &AssumeUtreexoValue) {
++    pub(crate) fn begin(&self, height: u32, anchor: &AssumeUtreexoValue, admission: Admission) {
+         *self.0.lock().unwrap() = Progress {
+             state: "verifying",
+             height,
+             target: anchor.height,
+             error: None,
++            checkpoint_eligible: false,
++            reserved_at: (admission == Admission::Reserved).then_some(height),
++            checkpoint_hold: match admission {
++                Admission::Interrupted => Some("independent-replay-required"),
++                Admission::Mismatch => Some("previous-accumulator-mismatch"),
++                _ => None,
++            },
+             anchor: Some(anchor.block_hash),
+         };
++    }
++
++    pub fn target(&self) -> Option<u32> {
++        let progress = self.0.lock().unwrap();
++        progress.anchor.map(|_| progress.target)
+     }
+ 
+     pub(crate) fn completed_anchor(&self) -> Option<(u32, BlockHash)> {
+@@ -65,15 +86,23 @@
+     }
+ 
+     pub(crate) fn advance(&self, height: u32) {
+-        self.0.lock().unwrap().height = height;
++        let mut progress = self.0.lock().unwrap();
++        progress.height = height;
++        progress.checkpoint_eligible = progress.state == "verifying"
++            && height < progress.target
++            && progress.reserved_at.is_some_and(|start| height > start);
+     }
+ 
+     pub(crate) fn verified(&self) {
+-        self.0.lock().unwrap().state = "verified";
++        let mut progress = self.0.lock().unwrap();
++        progress.state = "verified";
++        progress.checkpoint_eligible = false;
++        progress.checkpoint_hold = None;
+     }
+ 
+     pub(crate) fn fail(&self, message: &str) {
+         let mut state = self.0.lock().unwrap();
++        state.checkpoint_eligible = false;
+         state.state = "error";
+         state.error = Some(message.to_owned());
+     }
+@@ -86,11 +115,14 @@
+         hash: impl FnOnce(u32) -> Option<BlockHash>,
+     ) -> Progress {
+         let mut result = self.0.lock().unwrap().clone();
+-        if result.state == "verified" {
+-            if hash(result.target) != result.anchor {
++        if result.state == "verified" || result.checkpoint_eligible {
++            let current = !ibd && tip == validated && result.target <= tip;
++            if result.target > tip || hash(result.target) != result.anchor {
++                result.checkpoint_eligible = false;
+                 result.state = "error";
+                 result.error = Some("Historical anchor left the active chain".to_owned());
+-            } else if ibd || validated != tip {
++            } else if !current {
++                result.checkpoint_eligible = false;
+                 result.state = "verifying";
+             }
+         }
+@@ -100,6 +132,29 @@
+ 
+ const KEY_FILE: &str = "chicory-backfill-v1.key";
+ const STATE_FILE: &str = "chicory-backfill-v1.state";
++const FENCE_FILE: &str = "chicory-checkpoint-fence-v1";
++
++// Ready exists only after clean interruption, or after independently proven completion.
++// A durable reservation makes an unexpected exit conservative across process boundaries.
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Fence {
++    Ready = 1,
++    Reserved = 2,
++    Mismatch = 3,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Admission {
++    StrictOnly,
++    Reserved,
++    Interrupted,
++    Mismatch,
++}
++impl Admission {
++    pub(crate) fn requires_replay(self) -> bool {
++        matches!(self, Self::Interrupted | Self::Mismatch)
++    }
++}
+ const MAX_RECORD: usize = 16384;
+ const MAC_SIZE: usize = 32;
+ 
+@@ -175,6 +230,8 @@
+     key: [u8; MAC_SIZE],
+     pub anchor: AssumeUtreexoValue,
+     moving_target: bool,
++    mainnet_pin: bool,
++    new_key: bool,
+ }
+ 
+ // NodeContext requires Debug. Keep the integrity key out of logs.
+@@ -193,21 +250,30 @@
+         anchor: AssumeUtreexoValue,
+     ) -> io::Result<Self> {
+         let key_path = dir.join(KEY_FILE);
+-        let key = match read_bounded(&key_path, MAC_SIZE) {
+-            Ok(bytes) => bytes
+-                .try_into()
+-                .map_err(|_| invalid("Invalid historical checkpoint key"))?,
++        let (key, new_key): ([u8; MAC_SIZE], bool) = match read_bounded(&key_path, MAC_SIZE) {
++            Ok(bytes) => (
++                bytes
++                    .try_into()
++                    .map_err(|_| invalid("Invalid historical checkpoint key"))?,
++                false,
++            ),
+             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                 let mut key = [0; MAC_SIZE];
+                 OsRng.try_fill_bytes(&mut key).map_err(io::Error::other)?;
+                 save(&key_path, &key)?;
+-                key
++                (key, true)
+             }
+             Err(error) => return Err(error),
+         };
+         // Bind the unchanged record layout to the network, consensus policy and
+         // released assumption. Old unbound records trigger a full replay.
+         let pin = ChainParams::get_assume_utreexo(network);
++        let mainnet_pin = network == Network::Bitcoin
++            && floresta_chain::SCRIPT_KERNEL_ENABLED
++            && anchor.height == pin.height
++            && anchor.block_hash == pin.block_hash
++            && anchor.leaves == pin.leaves
++            && anchor.roots == pin.roots;
+         let mut domain = HmacEngine::<sha256::Hash>::new(&key);
+         domain.input(b"chicory.full-script-replay/2");
+         domain.input(&network.magic().to_bytes());
+@@ -223,6 +289,8 @@
+             key: Hmac::from_engine(domain).to_byte_array(),
+             anchor,
+             moving_target: pin.height == 0,
++            mainnet_pin,
++            new_key,
+         })
+     }
+ 
+@@ -230,6 +298,92 @@
+         let mut engine = HmacEngine::<sha256::Hash>::new(&self.key);
+         engine.input(bytes);
+         Hmac::from_engine(engine).to_byte_array()
++    }
++
++    fn fence_tag(&self, state: u8) -> [u8; MAC_SIZE] {
++        let mut domain = HmacEngine::<sha256::Hash>::new(&self.key);
++        domain.input(b"chicory.assumed-checkpoint/1");
++        domain.input(&[state]);
++        Hmac::from_engine(domain).to_byte_array()
++    }
++
++    fn read_fence(&self, fresh_chain: bool) -> Option<Fence> {
++        let bytes = match read_bounded(&self.path.with_file_name(FENCE_FILE), MAC_SIZE + 1) {
++            Ok(bytes) => bytes,
++            Err(e) if e.kind() == io::ErrorKind::NotFound && fresh_chain && self.new_key => {
++                return Some(Fence::Ready)
++            }
++            Err(_) => return None,
++        };
++        let (&value, tag) = bytes.split_first()?;
++        if tag != self.fence_tag(value) {
++            return None;
++        }
++        match value {
++            1 => Some(Fence::Ready),
++            2 => Some(Fence::Reserved),
++            3 => Some(Fence::Mismatch),
++            _ => None,
++        }
++    }
++
++    pub(crate) fn fence(&self, state: Fence) -> io::Result<()> {
++        if !self.mainnet_pin {
++            return Ok(());
++        }
++        let mut bytes = vec![state as u8];
++        bytes.extend(self.fence_tag(state as u8));
++        save(&self.path.with_file_name(FENCE_FILE), &bytes)
++    }
++
++    pub(crate) fn reserve(
++        &self,
++        fresh_chain: bool,
++        progress_intact: bool,
++        complete: bool,
++    ) -> io::Result<Admission> {
++        if !self.mainnet_pin {
++            return Ok(Admission::StrictOnly);
++        }
++        let previous = self.read_fence(fresh_chain);
++        if previous == Some(Fence::Mismatch) {
++            return Ok(Admission::Mismatch);
++        }
++        let allowed = previous == Some(Fence::Ready) && progress_intact;
++        if allowed && complete {
++            return Ok(Admission::StrictOnly);
++        }
++        // Write and sync before granting *any* provisional authority or examining
++        // another candidate that might disprove the pin. An interrupted update is held.
++        self.fence(Fence::Reserved)?;
++        Ok(if allowed {
++            Admission::Reserved
++        } else {
++            Admission::Interrupted
++        })
++    }
++
++    /// The complete replay must name the selected header before a different
++    /// accumulator can establish a contradiction. Peer or storage errors cannot.
++    pub(crate) fn check_replayed_anchor(
++        &self,
++        height: u32,
++        hash: BlockHash,
++        active: Option<BlockHash>,
++        stump: &Stump,
++    ) -> io::Result<()> {
++        if height != self.anchor.height || hash != self.anchor.block_hash || active != Some(hash) {
++            return Err(invalid(
++                "Active header differs from the historical replay target",
++            ));
++        }
++        if !self.matches(stump) {
++            self.fence(Fence::Mismatch)?;
++            return Err(invalid(
++                "Independently replayed accumulator differs from the active historical anchor",
++            ));
++        }
++        Ok(())
+     }
+ 
+     pub(crate) fn matches(&self, stump: &Stump) -> bool {
+@@ -459,10 +613,188 @@
+     }
+ 
+     #[test]
++    fn reserved_mainnet_replay_requires_new_validated_work_and_matching_active_anchor() {
++        if !floresta_chain::SCRIPT_KERNEL_ENABLED {
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let pin = ChainParams::get_assume_utreexo(Network::Bitcoin);
++        let check = Checkpoint::open(dir.path(), Network::Bitcoin, pin.clone()).unwrap();
++        let grant = check.reserve(true, true, false).unwrap();
++        assert_eq!(grant, Admission::Reserved);
++        let status = Historical::default();
++        status.begin(100, &pin, grant);
++        let tip = pin.height + 30;
++        let read = || status.snapshot(tip, tip, false, |_| Some(pin.block_hash));
++        assert!(!read().checkpoint_eligible);
++        status.advance(100);
++        assert!(!read().checkpoint_eligible);
++        status.advance(101);
++        assert!(read().checkpoint_eligible);
++        assert!(
++            !status
++                .snapshot(tip, tip - 1, false, |_| Some(pin.block_hash))
++                .checkpoint_eligible
++        );
++        assert!(
++            !status
++                .snapshot(tip, tip, true, |_| Some(pin.block_hash))
++                .checkpoint_eligible
++        );
++        let detached = status.snapshot(tip, tip, false, |_| Some(BlockHash::all_zeros()));
++        assert!(!detached.checkpoint_eligible);
++        assert_eq!(detached.state, "error");
++        status.advance(pin.height);
++        assert!(!read().checkpoint_eligible);
++        check.fence(Fence::Ready).unwrap(); // orderly partial shutdown
++        let restart = Checkpoint::open(dir.path(), Network::Bitcoin, pin).unwrap();
++        assert_eq!(
++            restart.reserve(false, true, false).unwrap(),
++            Admission::Reserved
++        );
++    }
++
++    #[test]
++    fn contradiction_survives_restart_and_requires_a_successful_independent_replay() {
++        if !floresta_chain::SCRIPT_KERNEL_ENABLED {
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let pin = ChainParams::get_assume_utreexo(Network::Bitcoin);
++        let check = Checkpoint::open(dir.path(), Network::Bitcoin, pin.clone()).unwrap();
++        assert_eq!(
++            check.reserve(true, true, false).unwrap(),
++            Admission::Reserved
++        );
++        let valid = Stump {
++            leaves: pin.leaves,
++            roots: pin.roots.clone(),
++        };
++        // Even a genuine old positive record cannot retire a subsequent failure.
++        check
++            .store(pin.height, pin.block_hash, &valid, true)
++            .unwrap();
++        let bad = Stump::default();
++        assert!(check
++            .check_replayed_anchor(pin.height, pin.block_hash, None, &bad)
++            .is_err());
++        assert!(matches!(check.read_fence(false), Some(Fence::Reserved)));
++        assert!(check
++            .check_replayed_anchor(pin.height, pin.block_hash, Some(pin.block_hash), &bad)
++            .is_err());
++        let reopen = Checkpoint::open(dir.path(), Network::Bitcoin, pin.clone()).unwrap();
++        let (_, _, complete) = reopen.recover(|_| Some(pin.block_hash)).unwrap();
++        assert!(complete);
++        let denied = reopen.reserve(false, true, complete).unwrap();
++        assert_eq!(denied, Admission::Mismatch);
++        assert!(denied.requires_replay());
++        let status = Historical::default();
++        status.begin(0, &pin, denied);
++        status.advance(10);
++        let snapshot = status.snapshot(pin.height, pin.height, false, |_| Some(pin.block_hash));
++        assert!(!snapshot.checkpoint_eligible);
++        assert_eq!(
++            snapshot.checkpoint_hold,
++            Some("previous-accumulator-mismatch")
++        );
++        reopen
++            .check_replayed_anchor(pin.height, pin.block_hash, Some(pin.block_hash), &valid)
++            .unwrap();
++        reopen
++            .store(pin.height, pin.block_hash, &valid, true)
++            .unwrap();
++        reopen.fence(Fence::Ready).unwrap();
++        assert_eq!(
++            reopen.reserve(false, true, true).unwrap(),
++            Admission::StrictOnly
++        );
++    }
++
++    #[test]
++    fn missing_corrupt_or_wrong_policy_fences_keep_an_existing_store_ineligible() {
++        if !floresta_chain::SCRIPT_KERNEL_ENABLED {
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let pin = ChainParams::get_assume_utreexo(Network::Bitcoin);
++        let open = || Checkpoint::open(dir.path(), Network::Bitcoin, pin.clone()).unwrap();
++        let check = open();
++        assert_eq!(
++            check.reserve(false, true, false).unwrap(),
++            Admission::Interrupted
++        );
++        let path = dir.path().join(FENCE_FILE);
++        std::fs::remove_file(&path).unwrap();
++        assert_eq!(
++            open().reserve(true, true, false).unwrap(),
++            Admission::Interrupted
++        );
++        check.fence(Fence::Ready).unwrap();
++        assert_eq!(
++            open().reserve(false, false, false).unwrap(),
++            Admission::Interrupted
++        );
++        check.fence(Fence::Ready).unwrap();
++        let mut bytes = std::fs::read(&path).unwrap();
++        bytes[5] ^= 1;
++        std::fs::write(&path, bytes).unwrap();
++        assert_eq!(
++            open().reserve(false, true, false).unwrap(),
++            Admission::Interrupted
++        );
++        for network in [Network::Testnet, Network::Regtest, Network::Signet] {
++            let other = Checkpoint::open(
++                dir.path(),
++                network,
++                ChainParams::get_assume_utreexo(network),
++            )
++            .unwrap();
++            assert_eq!(
++                other.reserve(true, true, false).unwrap(),
++                Admission::StrictOnly
++            );
++        }
++        let mut other_pin = pin.clone();
++        other_pin.height -= 1;
++        let other = Checkpoint::open(dir.path(), Network::Bitcoin, other_pin).unwrap();
++        assert_eq!(
++            other.reserve(true, true, false).unwrap(),
++            Admission::StrictOnly
++        );
++    }
++
++    #[test]
++    fn abrupt_worker_exit_cannot_reopen_the_same_assumed_grant() {
++        if !floresta_chain::SCRIPT_KERNEL_ENABLED {
++            return;
++        }
++        const CHILD: &str = "CHICORY_TEST_FENCE_CRASH_DIRECTORY";
++        let pin = ChainParams::get_assume_utreexo(Network::Bitcoin);
++        if let Some(dir) = std::env::var_os(CHILD) {
++            let check = Checkpoint::open(Path::new(&dir), Network::Bitcoin, pin).unwrap();
++            assert_eq!(
++                check.reserve(true, true, false).unwrap(),
++                Admission::Reserved
++            );
++            std::process::exit(73); // leave the reservation without a destructor or shutdown
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let exited = std::process::Command::new(std::env::current_exe().unwrap())
++            .args(["--exact", "p2p_wire::historical::tests::abrupt_worker_exit_cannot_reopen_the_same_assumed_grant"])
++            .env(CHILD, dir.path()).output().unwrap();
++        assert_eq!(exited.status.code(), Some(73));
++        let reopened = Checkpoint::open(dir.path(), Network::Bitcoin, pin).unwrap();
++        assert_eq!(
++            reopened.reserve(false, true, false).unwrap(),
++            Admission::Interrupted
++        );
++    }
++
++    #[test]
+     fn verified_snapshot_requires_active_anchor_and_foreground_validation() {
+         let progress = Historical::default();
+         let anchor = anchor();
+-        progress.begin(0, &anchor);
++        progress.begin(0, &anchor, Admission::StrictOnly);
+         assert_eq!(
+             progress
+                 .snapshot(5, 5, false, |_| Some(anchor.block_hash))
+diff --git a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+--- a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+@@ -187,8 +187,9 @@
+         &self,
+         status: crate::Historical,
+         done: std::sync::mpsc::Sender<()>,
++        fresh_chain: bool,
+     ) -> Result<bool, WireError> {
+-        use crate::p2p_wire::historical::Checkpoint;
++        use crate::p2p_wire::historical::{Admission, Checkpoint, Fence};
+         use floresta_chain::ChainParams;
+         use std::io;
+         use std::path::Path;
+@@ -216,13 +217,24 @@
+             self.config.network,
+             anchor.clone(),
+         )?;
+-        let (height, stump, complete) = checkpoint
+-            .recover(|at| self.chain.get_block_hash(at).ok())
+-            .unwrap_or_else(|error| {
+-                warn!("Restarting historical validation from genesis: {error}");
+-                (0, Stump::default(), false)
+-            });
+-        status.begin(height, &anchor);
++        let recovered = checkpoint.recover(|at| self.chain.get_block_hash(at).ok());
++        let admission = checkpoint.reserve(
++            fresh_chain,
++            recovered.is_ok(),
++            matches!(&recovered, Ok((_, _, true))),
++        )?;
++        let (mut height, mut stump, mut complete) = recovered.unwrap_or_else(|error| {
++            warn!("Restarting historical validation from genesis: {error}");
++            (0, Stump::default(), false)
++        });
++        // A previous partial replay is still authenticated work. Never retire a
++        // fence merely by reloading an old complete record at the target.
++        if admission.requires_replay() && height >= anchor.height {
++            height = 0;
++            stump = Stump::default();
++            complete = false;
++        }
++        status.begin(height, &anchor, admission);
+         if complete || anchor.height == 0 {
+             if anchor.height == 0 && !checkpoint.matches(&Stump::default()) {
+                 return Err(io::Error::other("Genesis accumulator mismatch").into());
+@@ -260,17 +272,20 @@
+             let stump = chain.get_acc();
+             if height < anchor.height {
+                 checkpoint.store(height, hash, &stump, false)?;
++                if admission == Admission::Reserved
++                    && *node.kill_signal.read().await
++                    && outer.get_block_hash(anchor.height).ok() == Some(anchor.block_hash)
++                {
++                    checkpoint.fence(Fence::Ready)?;
++                }
+                 return Ok(());
+             }
+-            if height != anchor.height
+-                || hash != anchor.block_hash
+-                || !checkpoint.matches(&stump)
+-                || outer.get_block_hash(height).ok() != Some(hash)
+-            {
+-                return Err(io::Error::other(
+-                    "Replayed accumulator or active header differs from the historical anchor",
+-                ));
+-            }
++            checkpoint.check_replayed_anchor(
++                height,
++                hash,
++                outer.get_block_hash(height).ok(),
++                &stump,
++            )?;
+             for block in chain.list_valid_blocks() {
+                 outer
+                     .mark_block_as_valid(block.block_hash())
+@@ -283,6 +298,7 @@
+                 ));
+             }
+             checkpoint.store(height, hash, &stump, true)?;
++            checkpoint.fence(Fence::Ready)?;
+             progress.verified();
+             Ok::<_, io::Error>(())
+         });
+@@ -403,6 +419,16 @@
+     }
+ 
+     pub async fn run(mut self, stop_signal: tokio::sync::oneshot::Sender<()>) {
++        // Capture freshness before examining any peer headers. Losing a fence file
++        // in an established store never creates a fresh fast-start permission.
++        let fresh_chain = self.config.historical.is_some()
++            && self.config.network == bitcoin::Network::Bitcoin
++            && self.chain.get_validation_index().ok() == Some(0)
++            && self.chain.get_best_block().ok()
++                == Some((
++                    0,
++                    bitcoin::constants::genesis_block(bitcoin::Network::Bitcoin).block_hash(),
++                ));
+         try_and_warn!(self.init_peers());
+ 
+         // Use this node state to Initial Block download
+@@ -432,7 +458,7 @@
+                 info!("Starting backfill task...");
+                 match self.config.historical.clone() {
+                     Some(status) => self
+-                        .managed_backfill(status.clone(), sender)
++                        .managed_backfill(status.clone(), sender, fresh_chain)
+                         .unwrap_or_else(|error| {
+                             status.fail(&error.to_string());
+                             false

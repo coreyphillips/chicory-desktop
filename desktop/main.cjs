@@ -10,6 +10,9 @@ const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require
 const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
 const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
 const { installFullBackupIpc } = require('./full-backup-ipc.cjs');
+const { candidateDigest, FlorestaSettings, installFlorestaIpc } = require('./floresta-settings.cjs');
+const { previewCandidate } = require('./floresta-preview.cjs');
+const { setWatchCollection, reconcileQualificationWatches } = require('./floresta-wallet-sync.cjs');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { Readable } = require('node:stream');
 const fs = require('node:fs');
@@ -26,9 +29,13 @@ const demo = process.argv.includes('--demo');
 // that need an empty first run (CHICORY_MANUAL_SETUP=1), load the page for
 // first-run setup instead, where Restore is offered.
 const SETUP_URL = `${APP_URL}?setup`;
-const manualSetup = process.env.CHICORY_MANUAL_SETUP === '1';
-app.setName('Chicory');
-const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), demo ? 'Chicory Desktop Demo' : 'Chicory Desktop');
+const metadata = app.isPackaged ? require('../package.json') : {};
+const preview = metadata.chicoryChannel === 'floresta-preview';
+const manualSetup = preview || process.env.CHICORY_MANUAL_SETUP === '1';
+app.setName(preview ? 'Chicory Floresta Preview' : 'Chicory');
+if (preview && process.platform === 'win32') app.setAppUserModelId('com.chicory.desktop.floresta-preview');
+const profileName = (preview ? 'Chicory Floresta Preview' : 'Chicory Desktop') + (demo ? ' Demo' : '');
+const profile = process.env.CHICORY_PROFILE_DIR || path.join(app.getPath('appData'), profileName);
 app.setPath('userData', profile);
 const locked = app.requestSingleInstanceLock();
 let window;
@@ -50,6 +57,14 @@ let quitting;
 const token = randomBytes(32).toString('hex');
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const runtime = path.join(root, app.isPackaged ? 'runtime' : '.runtime');
+const bundledCandidate = demo ? null : previewCandidate(metadata, root);
+const candidate = bundledCandidate?.sha256 || candidateDigest({ isPackaged: app.isPackaged, demo, digest: process.env.CHICORY_FLORESTA_CANDIDATE_SHA256 });
+const floresta = candidate ? new FlorestaSettings({ root, profile, digest: candidate,
+  ...(bundledCandidate ? { load: () => bundledCandidate } : {}),
+  canCollect: () => !!manager?.connected && !!appLock && !appLock.required() && !stopping && !erasing,
+  setCollection: (network, enabled) => setWatchCollection(manager, network, enabled),
+  reconcile: (node, network, signal) => reconcileQualificationWatches({ node, network, manager, signal }),
+}) : null;
 const publicDirectory = path.join(root, 'dist');
 const coded = (message, code) => Object.assign(new Error(message), { code });
 // Redacted and bounded. Kept beside the profile so a failure before any
@@ -64,9 +79,7 @@ const diagnosticRequests = new Map();
 const RELEASES = 'https://github.com/coreyphillips/chicory-desktop/releases';
 // electron-builder writes the channel into the packaged package.json. Source
 // checkouts and CI test packages are development builds and never update.
-const channel = (() => {
-  try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8')).chicoryChannel; } catch {}
-})() === 'stable' && app.isPackaged ? 'stable' : 'development';
+const channel = metadata.chicoryChannel === 'stable' ? 'stable' : 'development';
 // An unreadable key list turns updates off. It must never stop Chicory opening.
 let updateKeys = [];
 if (channel === 'stable') {
@@ -293,6 +306,7 @@ async function installUpdate(file, offer, signal) {
     // encrypted profile and its OS-protected key are left exactly in place.
     stopping = true;
     diagnostics.shutdownBegan();
+    await floresta?.stopAll();
     const managerOutcome = await stopManager().catch(() => 'failed');
     const torOutcome = await Promise.resolve(tor?.stop()).then(() => 'stopped', () => 'failed');
     diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' });
@@ -466,6 +480,7 @@ function createWindow(desktopSession) {
     icon: path.join(__dirname, '../build/icon.png'),
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 12 } } : { frame: false }),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), session: desktopSession,
+      additionalArguments: candidate ? ['--chicory-floresta-qualification'] : [],
       nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       webviewTag: false, spellcheck: false, devTools: !app.isPackaged, backgroundThrottling: true },
   });
@@ -524,6 +539,7 @@ function trustedSender(event) {
 }
 
 function lockEvent(name, value) {
+  if (name === 'locked' || name === 'unlocked') floresta?.refreshCollection();
   if (!window || window.isDestroyed() || !isAppURL(window.webContents.getURL())) return;
   if (['locked', 'conceal', 'changed', 'unlocked'].includes(name))
     window.webContents.send('desktop:lock', name, typeof value === 'string' || typeof value === 'boolean' ? value : undefined);
@@ -537,6 +553,7 @@ function ensureManager() {
   if (!managerStart && loaded) diagnostics.startupBegan();
   managerStart ??= startManager().then(() => {
     if (loaded && !stopping) diagnostics.startupEnded('ready');
+    if (!stopping && !erasing && !appLock.required()) floresta?.resume();
   }, async (error) => {
     // A wallet service stopped by an erase did not fail to open.
     if (!stopping && !erasing) {
@@ -567,6 +584,19 @@ function createEraser(desktopSession) {
     authorize: () => appLock.takeGrant(),
     busy: () => !!gate.active,
     exclusive: task => gate.run('erase', task),
+    prepareNodeErase: () => {
+      const generation = appLock.generation;
+      const settings = floresta || new FlorestaSettings({ root, profile, digest: null });
+      return settings.prepareErase(async paths => {
+        const { response } = await appLock.duringPrompt(() => dialog.showMessageBox(window, {
+          type: 'warning', title: 'Local node data remains', message: 'Erase wallet keys and accessible data now?',
+          detail: 'Some node records could not be removed. Accessible node data was cleared where possible. Public wallet or channel history may remain in these locations:\n\n' +
+            paths.join('\n') + '\n\nReconnect the original volume and use Remove local node data in the experimental node Settings on a local macOS APFS volume. Other volumes and platforms require manual cleanup of the listed node store with every node stopped. Chicory remembers only the unresolved storage locations.',
+          buttons: ['Erase wallet keys and accessible data', 'Cancel wallet erase'], defaultId: 1, cancelId: 1
+        }));
+        return response === 0 && !stopping && !appLock.required() && generation === appLock.generation;
+      });
+    },
     stopService: async () => {
       erasing = true;
       // The manager stops every engine and waits for each to exit before it
@@ -584,6 +614,7 @@ function createEraser(desktopSession) {
     clearRendererState: () => desktopSession.clearStorageData(),
     startOver: async () => {
       erasing = false;
+      floresta?.afterErase();
       // A new storage key and an empty wallet service, then first-run setup,
       // which creates nothing until asked.
       await ensureManager();
@@ -619,10 +650,11 @@ app.on('before-quit', (event) => {
   if (quitting) return;
   stopping = true;
   diagnostics.shutdownBegan();
+  const stopNode = Promise.resolve(floresta?.stopAll()).catch(() => {});
   quitting = stopManager().catch(() => 'failed')
     .then(managerOutcome => Promise.resolve(tor?.stop()).then(() => 'stopped', () => 'failed')
       .then(torOutcome => diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' })))
-    .finally(() => { stopped = true; app.quit(); });
+    .finally(async () => { await stopNode; stopped = true; app.quit(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', showWindow);
@@ -653,6 +685,8 @@ else app.whenReady().then(async () => {
   installPermissions(desktopSession);
   installMenu();
   installLock();
+  if (floresta) installFlorestaIpc({ ipcMain, settings: floresta, appLock, dialog, window: () => window,
+    trusted: trustedSender, allowed: () => !stopping && !erasing && !gate.active });
   if (!demo) installFullBackupIpc({ ipcMain, trusted: trustedSender, appLock, dialog, fs, call: managerCall,
     window: () => window, documents: () => app.getPath('documents') });
   // With the lock on, no key is loaded and no wallet engine starts until it opens.

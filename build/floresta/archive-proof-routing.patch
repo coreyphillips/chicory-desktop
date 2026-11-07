@@ -1,0 +1,803 @@
+diff --git a/crates/floresta-wire/src/p2p_wire/address_man.rs b/crates/floresta-wire/src/p2p_wire/address_man.rs
+index bb4e2fd..b59f223 100644
+--- a/crates/floresta-wire/src/p2p_wire/address_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/address_man.rs
+@@ -390,8 +390,10 @@ impl AddressMan {
+ 
+     // Bridges can serve BIP183 inclusion proofs without serving block bodies.
+     fn useful_services(flags: ServiceFlags) -> bool {
+-        flags.has(ServiceFlags::WITNESS)
+-            && (flags.has(ServiceFlags::NETWORK_LIMITED) || flags.has(service_flags::UTREEXO.into()))
++        flags.has(service_flags::UTREEXO_ARCHIVE.into())
++            || (flags.has(ServiceFlags::WITNESS)
++                && (flags.has(ServiceFlags::NETWORK_LIMITED)
++                    || flags.has(service_flags::UTREEXO.into())))
+     }
+ 
+     /// Add a new address to our list of known address
+@@ -429,6 +431,7 @@ impl AddressMan {
+ 
+                 self.push_if_has_service(address, ServiceFlags::NETWORK);
+                 self.push_if_has_service(address, service_flags::UTREEXO.into());
++                self.push_if_has_service(address, service_flags::UTREEXO_ARCHIVE.into());
+                 self.push_if_has_service(address, ServiceFlags::NONE); // this means any peer
+                 self.push_if_has_service(address, ServiceFlags::COMPACT_FILTERS);
+             }
+@@ -654,9 +657,8 @@ impl AddressMan {
+     /// Returns a new random address to open a new connection, we try to get addresses with
+     /// a set of features supported for our peers
+     ///
+-    /// If no peers are known with the required service bit, we may return a random peer.
+-    /// Service bits are learned from DNS seeds or peer gossip and may be outdated or
+-    /// inaccurate, so we sometimes try random peers expecting they might implement the service.
++    /// Exact block and proof roles only use addresses advertising that service.
++    /// Non-specialized searches can probe other addresses whose advertised services are stale.
+     pub fn get_address_to_connect(
+         &mut self,
+         required_service: ServiceFlags,
+@@ -818,9 +820,7 @@ impl AddressMan {
+ 
+     /// Attempt to find one random peer that advertises the required service
+     ///
+-    /// If we cannot find a peer that advertises the required service, we return any peer
+-    /// that we have in our list of known peers. Luckily, either we'll connect to a peer that has
+-    /// this but we didn't know, or one of those peers will give us useful addresses.
++    /// Skip recently failed and currently connected candidates.
+     fn try_with_service(&self, service: ServiceFlags) -> Option<(usize, LocalAddress)> {
+         if let Some(peers) = self.peers_by_service.get(&service) {
+             let peers = peers
+@@ -864,7 +864,16 @@ impl AddressMan {
+             return Some(address);
+         }
+ 
+-        // if we can't find a peer that advertises the required service, get any peer
++        // A proof search must not consume every known block endpoint, or vice versa.
++        // Ordinary discovery and feelers still try addresses with other capabilities.
++        if service == ServiceFlags::NETWORK
++            || service == service_flags::UTREEXO.into()
++            || service == service_flags::UTREEXO_ARCHIVE.into()
++        {
++            return None;
++        }
++
++        // For other roles, try an address whose advertised services may be stale.
+         let idx = rand::random::<usize>() % self.addresses.len();
+         let peer = self.addresses.keys().nth(idx)?;
+ 
+@@ -910,6 +919,7 @@ impl AddressMan {
+                 if let Some(address) = self.addresses.get(&idx).cloned() {
+                     self.push_if_has_service(&address, ServiceFlags::NETWORK);
+                     self.push_if_has_service(&address, service_flags::UTREEXO.into());
++                    self.push_if_has_service(&address, service_flags::UTREEXO_ARCHIVE.into());
+                     self.push_if_has_service(&address, ServiceFlags::NONE); // this means any peer
+                     self.push_if_has_service(&address, ServiceFlags::COMPACT_FILTERS);
+                 }
+@@ -1598,6 +1608,43 @@ mod test {
+         assert!(!addresses.addresses.contains_key(&bridge.id));
+     }
+ 
++    #[test]
++    fn archive_only_services_do_not_require_a_witness_or_a_block_body() {
++        let archive: ServiceFlags = service_flags::UTREEXO_ARCHIVE.into();
++        let mut addr = LocalAddress::from(AddrV2::Ipv4("42.43.44.47".parse().unwrap()));
++        addr.services = archive;
++        addr.state = AddressState::Tried(AddressMan::time_since_unix());
++        let mut manager = AddressMan::new(None, &[ReachableNetworks::IPv4]);
++        manager.push_addresses(&[LocalAddress::from(DiskLocalAddress::from(addr.clone()))]);
++        assert_eq!(manager.get_address_by_service(archive).unwrap().0, addr.id);
++        assert!(manager
++            .get_address_by_service(ServiceFlags::NETWORK)
++            .is_none());
++        assert!(manager
++            .get_address_by_service(service_flags::UTREEXO.into())
++            .is_none());
++        assert!(manager
++            .get_address_to_connect(ServiceFlags::NETWORK, false)
++            .is_none());
++        manager.update_set_service_flag(
++            addr.id,
++            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::NETWORK_LIMITED,
++        );
++        assert!(manager
++            .get_address_to_connect(service_flags::UTREEXO.into(), false)
++            .is_none());
++        assert!(manager.get_address_to_connect(archive, false).is_none());
++        assert_eq!(
++            manager
++                .get_address_to_connect(ServiceFlags::NETWORK, false)
++                .unwrap()
++                .0,
++            addr.id
++        );
++        manager.update_set_service_flag(addr.id, ServiceFlags::NONE);
++        assert!(manager.get_address_by_service(archive).is_none());
++    }
++
+     #[test]
+     fn test_push_address() {
+         let mut address_man = AddressMan::new(None, &[ReachableNetworks::IPv4]);
+diff --git a/crates/floresta-wire/src/p2p_wire/node/blocks.rs b/crates/floresta-wire/src/p2p_wire/node/blocks.rs
+index 6990410..9858bde 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/blocks.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/blocks.rs
+@@ -11,7 +11,6 @@ use floresta_chain::BlockValidationErrors;
+ use floresta_chain::BlockchainError;
+ use floresta_chain::ChainBackend;
+ use floresta_chain::CompactLeafData;
+-use floresta_common::service_flags;
+ use rustreexo::proof::Proof;
+ use tracing::debug;
+ use tracing::error;
+@@ -98,8 +97,10 @@ where
+             return Ok(());
+         }
+ 
+-        let peer =
+-            self.send_to_fast_peer(NodeRequest::GetBlock(blocks.clone()), ServiceFlags::NETWORK)?;
++        let peer = self.send_to_fast_peer(
++            NodeRequest::GetBlock(blocks.clone()),
++            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
++        )?;
+ 
+         for block in blocks.iter() {
+             self.inflight
+@@ -130,9 +131,10 @@ where
+ 
+         // We only need auxiliary utreexo data if there are non-coinbase transactions
+         if txdata_len != 1 {
+-            let utreexo_peer = self.send_to_fast_peer(
++            let utreexo_peer = self.send_block_proof_request(
++                block_hash,
+                 NodeRequest::GetBlockProof((block_hash, Bitmap::new(), Bitmap::new())),
+-                service_flags::UTREEXO.into(),
++                None,
+             )?;
+ 
+             self.inflight.insert(
+@@ -179,7 +181,7 @@ where
+     /// while we didn't have more utreexo peers to redo the request.
+     pub(crate) fn ask_for_missed_proofs(&mut self) -> Result<(), WireError> {
+         // If we have no peers, we can't ask for proofs
+-        if !self.has_utreexo_peers() {
++        if !self.has_block_proof_peers() {
+             return Ok(());
+         }
+ 
+@@ -203,9 +205,10 @@ where
+             .collect::<Vec<_>>();
+ 
+         for block_hash in pending_blocks {
+-            let peer = self.send_to_fast_peer(
++            let peer = self.send_block_proof_request(
++                block_hash,
+                 NodeRequest::GetBlockProof((block_hash, Bitmap::new(), Bitmap::new())),
+-                service_flags::UTREEXO.into(),
++                None,
+             )?;
+ 
+             self.inflight.insert(
+diff --git a/crates/floresta-wire/src/p2p_wire/node/conn.rs b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+index 63e19f1..926c327 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/conn.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+@@ -589,7 +589,16 @@ where
+ 
+         for address in anchors {
+             self.open_connection(
+-                ConnectionKind::Regular(service_flags::UTREEXO.into()),
++                ConnectionKind::Regular(
++                    if address
++                        .get_services()
++                        .has(service_flags::UTREEXO_ARCHIVE.into())
++                    {
++                        service_flags::UTREEXO_ARCHIVE.into()
++                    } else {
++                        service_flags::UTREEXO.into()
++                    },
++                ),
+                 address.id,
+                 address,
+                 // Using V1 transport fallback as utreexo nodes have limited support
+diff --git a/crates/floresta-wire/src/p2p_wire/node/mod.rs b/crates/floresta-wire/src/p2p_wire/node/mod.rs
+index 86bef8e..3fa0910 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/mod.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/mod.rs
+@@ -27,6 +27,7 @@ use bitcoin::Network;
+ use bitcoin::Txid;
+ pub(crate) use blocks::InflightBlock;
+ use floresta_chain::ChainBackend;
++use floresta_common::service_flags;
+ use floresta_common::Ema;
+ use floresta_compact_filters::flat_filters_store::FlatFiltersStore;
+ use floresta_compact_filters::network_filters::NetworkFilters;
+@@ -228,8 +229,22 @@ pub struct LocalPeerView {
+ }
+ 
+ impl LocalPeerView {
++    pub(crate) fn serves_block_proofs(&self) -> bool {
++        self.services.has(service_flags::UTREEXO.into())
++            || self.services.has(service_flags::UTREEXO_ARCHIVE.into())
++    }
++
++    fn serves_historical_proofs(&self) -> bool {
++        self.services.has(service_flags::UTREEXO_ARCHIVE.into())
++            || self
++                .services
++                .has(ServiceFlags::NETWORK | service_flags::UTREEXO.into())
++    }
++
+     pub(crate) fn serves_block_bodies(&self) -> bool {
+-        self.services.has(ServiceFlags::NETWORK) || self.services.has(ServiceFlags::NETWORK_LIMITED)
++        self.services.has(ServiceFlags::WITNESS)
++            && (self.services.has(ServiceFlags::NETWORK)
++                || self.services.has(ServiceFlags::NETWORK_LIMITED))
+     }
+ 
+     /// Whether this is a manually added peer
+@@ -251,6 +266,8 @@ impl LocalPeerView {
+ pub struct NodeCommon<Chain: ChainBackend> {
+     // 1. Core Blockchain and Transient Data
+     pub(crate) chain: Chain,
++    // A partial chain replays an earlier interval and has no hash-to-height index.
++    pub(crate) historical_replay: bool,
+     pub(crate) blocks: HashMap<BlockHash, InflightBlock>,
+     pub(crate) mempool: Arc<tokio::sync::Mutex<Mempool>>,
+     pub(crate) block_filters: Option<Arc<NetworkFilters<FlatFiltersStore>>>,
+@@ -370,6 +387,7 @@ where
+                 last_block_request: chain.get_validation_index().expect("Invalid chain"),
+                 chain,
+                 peer_ids: Vec::new(),
++                historical_replay: false,
+                 peer_by_service: HashMap::new(),
+                 mempool,
+                 network: config.network,
+diff --git a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+index a8902ca..0cb37cb 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/peer_man.rs
+@@ -67,7 +67,10 @@ where
+     /// Each candidate weight is computed as `lowest_time / time_i`. For instance, if we have two
+     /// candidates with latencies of 50ms and 100ms, weights are 1.0 and 0.5 respectively, and the
+     /// probability of being chosen is 2/3 and 1/3.
+-    fn choose_peer_by_latency(&self, service: ServiceFlags) -> Option<(&PeerId, &LocalPeerView)> {
++    fn choose_peer_by_latency(
++        &self,
++        accepts: impl Fn(PeerId, &LocalPeerView) -> bool,
++    ) -> Option<(&PeerId, &LocalPeerView)> {
+         // Epsilon is a small positive floor for `f64`. If by any chance a peer has extremely low
+         // message latency, we clamp it to `EPS` so `lowest_time / time_i` stays finite and stable.
+         const EPS: f64 = 1e-9;
+@@ -75,7 +78,7 @@ where
+         let candidates: Vec<(&PeerId, &LocalPeerView, f64)> = self
+             .peers
+             .iter()
+-            .filter(|(_, peer)| peer.services.has(service) && peer.state == PeerStatus::Ready)
++            .filter(|(id, peer)| peer.state == PeerStatus::Ready && accepts(**id, peer))
+             .filter_map(|(id, peer)| {
+                 // Get the average message latency from each peer
+                 let Some(t) = peer.message_times.value() else {
+@@ -122,7 +125,7 @@ where
+         required_service: ServiceFlags,
+     ) -> Result<PeerId, WireError> {
+         let (peer_id, peer) = self
+-            .choose_peer_by_latency(required_service)
++            .choose_peer_by_latency(|_, peer| peer.services.has(required_service))
+             .ok_or(WireError::NoPeersAvailable)?;
+ 
+         peer.channel.send(request)?;
+@@ -130,6 +133,52 @@ where
+         Ok(*peer_id)
+     }
+ 
++    /// BIP183 archives and full Utreexo nodes promise historical proofs. Recent
++    /// providers may retain older proofs, so keep them as a fallback. Never
++    /// send a block-body request to a proof-only peer or use it for tx relay.
++    pub(crate) fn send_block_proof_request(
++        &self,
++        hash: bitcoin::BlockHash,
++        request: NodeRequest,
++        previous: Option<PeerId>,
++    ) -> Result<PeerId, WireError> {
++        let historical = if self.historical_replay {
++            true
++        } else {
++            let (tip, _) = self.chain.get_best_block()?;
++            // Unknown hashes are allowed in the existing by-hash API. Height
++            // only chooses a provider; proofs are still checked against the stump.
++            self.chain
++                .get_block_height(&hash)
++                .ok()
++                .flatten()
++                .is_none_or(|height| tip.saturating_sub(height) >= 288)
++        };
++        // Try another capable peer on timeout, even if its advertised range is
++        // less specific. A single provider can be retried after its timeout.
++        for exclude in [previous, None] {
++            let ready = |id, p: &LocalPeerView| Some(id) != exclude && p.serves_block_proofs();
++            let peer = self
++                .choose_peer_by_latency(|id, p| {
++                    ready(id, p)
++                        && if historical {
++                            p.serves_historical_proofs()
++                        } else {
++                            p.services.has(service_flags::UTREEXO.into())
++                        }
++                })
++                .or_else(|| self.choose_peer_by_latency(ready));
++            if let Some((id, peer)) = peer {
++                peer.channel.send(request)?;
++                return Ok(*id);
++            }
++            if exclude.is_none() {
++                break;
++            }
++        }
++        Err(WireError::NoPeersAvailable)
++    }
++
+     #[inline]
+     pub(crate) fn send_to_random_peer(
+         &mut self,
+@@ -230,7 +279,7 @@ where
+         let good_peers_count = self.connected_peers();
+         if good_peers_count > T::MAX_OUTGOING_PEERS {
+             // We allow utreexo, extra and manual peers to bypass our connection limits
+-            let is_utreexo_peer = matches!(version.kind, ConnectionKind::Regular(services) if services.has(service_flags::UTREEXO.into()));
++            let is_utreexo_peer = matches!(version.kind, ConnectionKind::Regular(services) if services.has(service_flags::UTREEXO.into()) || services.has(service_flags::UTREEXO_ARCHIVE.into()));
+             let is_manual_peer = version.kind == ConnectionKind::Manual;
+             let is_extra = version.kind == ConnectionKind::Extra;
+ 
+@@ -484,7 +533,7 @@ where
+         for req in inflight {
+             self.inflight.remove(&req.0);
+ 
+-            if let Err(e) = self.redo_inflight_request(&req.0) {
++            if let Err(e) = self.redo_inflight_request(&req.0, peer) {
+                 // CRITICAL: never drop the request, so we retry it later
+                 self.inflight.insert(req.0, req.1);
+                 return Err(e);
+@@ -599,7 +648,7 @@ where
+             // Increase the banscore and try banning the peer if needed, then re-request
+             try_and_log!(self.increase_banscore(peer, 1));
+ 
+-            if let Err(e) = self.redo_inflight_request(&req) {
++            if let Err(e) = self.redo_inflight_request(&req, peer) {
+                 // CRITICAL: never drop the request, so we retry it later
+                 self.inflight.insert(req, (peer, time));
+                 return Err(e);
+@@ -635,10 +684,11 @@ where
+     pub(crate) fn redo_inflight_request(
+         &mut self,
+         req: &InflightRequests,
++        previous: PeerId,
+     ) -> Result<(), WireError> {
+         match req {
+             InflightRequests::UtreexoProof(block_hash) => {
+-                if !self.has_utreexo_peers() {
++                if !self.has_block_proof_peers() {
+                     return Ok(());
+                 }
+ 
+@@ -652,9 +702,10 @@ where
+                     return Ok(());
+                 }
+ 
+-                let peer = self.send_to_fast_peer(
++                let peer = self.send_block_proof_request(
++                    *block_hash,
+                     NodeRequest::GetBlockProof((*block_hash, Bitmap::new(), Bitmap::new())),
+-                    service_flags::UTREEXO.into(),
++                    Some(previous),
+                 )?;
+ 
+                 self.inflight.insert(
+@@ -714,11 +765,12 @@ where
+ 
+     /// Saves the utreexo peers to disk so we can reconnect with them later
+     pub(crate) fn save_utreexo_peers(&self) -> Result<(), WireError> {
+-        let peers: &Vec<u32> = self
+-            .peer_by_service
+-            .get(&service_flags::UTREEXO.into())
+-            .ok_or(WireError::NoUtreexoPeersAvailable)?;
+-        let peers_usize: Vec<usize> = peers.iter().map(|&peer| peer as usize).collect();
++        let peers_usize: Vec<usize> = self
++            .peers
++            .values()
++            .filter(|peer| peer.state == PeerStatus::Ready && peer.serves_block_proofs())
++            .map(|peer| peer.address_id as usize)
++            .collect();
+         if peers_usize.is_empty() {
+             warn!("No connected Utreexo peers to save to disk");
+             return Ok(());
+@@ -800,6 +852,18 @@ where
+         metrics.peer_count.set(self.peer_ids.len() as f64);
+     }
+ 
++    pub(crate) fn has_historical_proof_peer(&self) -> bool {
++        self.peers
++            .values()
++            .any(|peer| peer.state == PeerStatus::Ready && peer.serves_historical_proofs())
++    }
++
++    pub(crate) fn has_block_proof_peers(&self) -> bool {
++        self.peers
++            .values()
++            .any(|peer| peer.state == PeerStatus::Ready && peer.serves_block_proofs())
++    }
++
+     pub(crate) fn has_utreexo_peers(&self) -> bool {
+         !self
+             .peer_by_service
+diff --git a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+index f8389f5..b6d9269 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+@@ -146,17 +146,34 @@ where
+         // retry the added peers connections
+         self.maybe_open_connection_with_added_peers()?;
+ 
+-        // if we have 10 connections, but not a single utreexo or CBF one, disconnect one random
+-        // peer and create a utreexo and CBS connection
+-        if !self.has_utreexo_peers() {
+-            if self.connected_peers() >= RunningNode::MAX_OUTGOING_PEERS {
++        // Historical wallet scans can still need proofs far behind the active tip.
++        let need_archive = !self.has_historical_proof_peer();
++        let need_recent = !self.has_utreexo_peers();
++        if (need_archive || need_recent)
++            && self.connected_peers() >= RunningNode::MAX_OUTGOING_PEERS
++        {
++            let count = |test: fn(&super::LocalPeerView) -> bool| {
+                 self.peers
+                     .values()
+-                    .filter(|peer| peer.is_regular_peer())
+-                    .choose(&mut thread_rng())
+-                    .and_then(|p| p.channel.send(NodeRequest::Shutdown).ok());
+-            }
+-
++                    .filter(|p| p.state == super::PeerStatus::Ready && test(p))
++                    .count()
++            };
++            let body_peers = count(super::LocalPeerView::serves_block_bodies);
++            let proof_peers = count(super::LocalPeerView::serves_block_proofs);
++            self.peers
++                .values()
++                .filter(|p| {
++                    p.is_regular_peer()
++                        && (!p.serves_block_proofs() || (need_archive && proof_peers > 1))
++                        && (!p.serves_block_bodies() || body_peers > 1)
++                })
++                .choose(&mut thread_rng())
++                .and_then(|p| p.channel.send(NodeRequest::Shutdown).ok());
++        }
++        if need_archive {
++            self.maybe_open_connection(service_flags::UTREEXO_ARCHIVE.into())?;
++        }
++        if need_recent {
+             self.maybe_open_connection(service_flags::UTREEXO.into())?;
+         }
+ 
+@@ -254,6 +271,7 @@ where
+             self.kill_signal.clone(),
+             self.address_man.clone(),
+         )?;
++        node.historical_replay = true;
+         node.context.replay = Some((checkpoint.clone(), status.clone(), height));
+         let outer = self.chain.clone();
+         let progress = status.clone();
+@@ -365,7 +383,7 @@ where
+             }
+         };
+ 
+-        let backfill = UtreexoNode::<PartialChainState, SyncNode>::new(
++        let mut backfill = UtreexoNode::<PartialChainState, SyncNode>::new(
+             self.config.clone(),
+             chain,
+             self.mempool.clone(),
+@@ -378,6 +396,7 @@ where
+         let datadir = self.config.datadir.clone();
+         let outer_chain = self.chain.clone();
+ 
++        backfill.historical_replay = true;
+         let fut = UtreexoNode::<PartialChainState, SyncNode>::run(
+             backfill,
+             move |chain: &PartialChainState| {
+@@ -670,7 +689,7 @@ where
+         try_and_log!(self.ask_missed_block());
+ 
+         // requests that need a utreexo peer
+-        if !self.has_utreexo_peers() {
++        if !self.has_block_proof_peers() {
+             return LoopControl::Continue;
+         }
+ 
+diff --git a/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
+index baf1447..571d0ff 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/sync_ctx.rs
+@@ -2,6 +2,7 @@
+ 
+ //! A node that downloads and validates the blockchain.
+ 
++use std::collections::HashSet;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
+@@ -22,6 +23,7 @@ use crate::node::ConnectionKind;
+ use crate::node::InflightRequests;
+ use crate::node::NodeNotification;
+ use crate::node::NodeRequest;
++use crate::node::PeerStatus;
+ use crate::node::UtreexoNode;
+ use crate::node_context::LoopControl;
+ use crate::node_context::NodeContext;
+@@ -149,11 +151,27 @@ where
+     fn check_connections(&mut self) -> Result<(), WireError> {
+         let total_peers = self.connected_peers();
+         let utreexo_peers = self
+-            .peer_by_service
+-            .get(&service_flags::UTREEXO.into())
+-            .map_or(0, |peers| peers.len());
++            .peers
++            .values()
++            .filter(|peer| peer.state == PeerStatus::Ready && peer.serves_block_proofs())
++            .map(|peer| peer.address)
++            .collect::<HashSet<_>>()
++            .len();
++        let need_archive = !self.has_historical_proof_peer()
++            && (self.historical_replay
++                || self
++                    .chain
++                    .get_best_block()?
++                    .0
++                    .saturating_sub(self.chain.get_validation_index()?)
++                    >= 288);
++        let body_peers = self
++            .peers
++            .values()
++            .filter(|peer| peer.state == PeerStatus::Ready && peer.serves_block_bodies())
++            .count();
+ 
+-        if utreexo_peers < 2 && total_peers >= SyncNode::MAX_OUTGOING_PEERS {
++        if (utreexo_peers < 2 || need_archive) && total_peers >= SyncNode::MAX_OUTGOING_PEERS {
+             // if we have more than the maximum number of outgoing peers, disconnect
+             // some non-utreexo peers.
+             //
+@@ -162,12 +180,20 @@ where
+             self.peers
+                 .values()
+                 .filter(|peer| {
+-                    peer.is_regular_peer() && !peer.services.has(service_flags::UTREEXO.into())
++                    peer.is_regular_peer()
++                        && (!peer.serves_block_proofs() || (need_archive && utreexo_peers > 1))
++                        && (!peer.serves_block_bodies() || body_peers > 1)
+                 })
+                 .choose(&mut thread_rng())
+                 .and_then(|p| p.channel.send(NodeRequest::Shutdown).ok());
+         }
+ 
++        if body_peers == 0 {
++            self.maybe_open_connection(ServiceFlags::NETWORK)?;
++        }
++        if need_archive {
++            self.maybe_open_connection(service_flags::UTREEXO_ARCHIVE.into())?;
++        }
+         if utreexo_peers < 2 {
+             info!("Not enough utreexo peers (we have {utreexo_peers}), opening a new connection");
+             self.maybe_open_connection(service_flags::UTREEXO.into())?;
+@@ -307,7 +333,7 @@ where
+         }
+ 
+         try_and_log!(self.process_pending_blocks());
+-        if !self.has_utreexo_peers() {
++        if !self.has_block_proof_peers() {
+             return LoopControl::Continue;
+         }
+ 
+diff --git a/crates/floresta-wire/src/p2p_wire/node/user_req.rs b/crates/floresta-wire/src/p2p_wire/node/user_req.rs
+index 326b73a..af366cc 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/user_req.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/user_req.rs
+@@ -175,12 +175,13 @@ where
+             }
+         };
+ 
+-        let required = match &user_req {
+-            UserRequest::Block(_) => ServiceFlags::NETWORK,
+-            UserRequest::UtreexoProof(_) => floresta_common::service_flags::UTREEXO.into(),
+-            _ => ServiceFlags::NONE,
++        let peer = match &user_req {
++            UserRequest::Block(_) => {
++                self.send_to_fast_peer(req, ServiceFlags::NETWORK | ServiceFlags::WITNESS)
++            }
++            UserRequest::UtreexoProof(hash) => self.send_block_proof_request(*hash, req, None),
++            _ => self.send_to_fast_peer(req, ServiceFlags::NONE),
+         };
+-        let peer = self.send_to_fast_peer(req, required);
+         if let Ok(peer) = peer {
+             self.inflight_user_requests
+                 .insert(user_req, (peer, Instant::now(), responder));
+diff --git a/crates/floresta-wire/src/p2p_wire/tests/utils.rs b/crates/floresta-wire/src/p2p_wire/tests/utils.rs
+index 96b297a..7043732 100644
+--- a/crates/floresta-wire/src/p2p_wire/tests/utils.rs
++++ b/crates/floresta-wire/src/p2p_wire/tests/utils.rs
+@@ -447,11 +447,10 @@ mod tests {
+     }
+ }
+ 
+-#[tokio::test]
+-async fn block_and_proof_requests_use_different_peers() {
+-    use crate::node_interface::UserRequest;
+-    use tokio::sync::oneshot;
+-
++fn routing_node() -> (
++    String,
++    UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode>,
++) {
+     let dir = format!("./tmp-db/{}.proof_routes", rand::random::<u32>());
+     let store = FlatChainStore::new(FlatChainStoreConfig::new(dir.clone())).unwrap();
+     let chain = Arc::new(ChainState::new(
+@@ -459,7 +458,7 @@ async fn block_and_proof_requests_use_different_peers() {
+         Network::Regtest,
+         AssumeValidArg::Disabled,
+     ));
+-    let mut node = UtreexoNode::<_, SyncNode>::new(
++    let node = UtreexoNode::<_, SyncNode>::new(
+         get_node_config(dir.clone(), Network::Regtest, false),
+         chain,
+         Arc::new(Mutex::new(Mempool::new(1000))),
+@@ -468,37 +467,50 @@ async fn block_and_proof_requests_use_different_peers() {
+         AddressMan::new(None, &[]),
+     )
+     .unwrap();
+-    let (block_tx, mut blocks) = unbounded_channel();
+-    let (proof_tx, mut proofs) = unbounded_channel();
+-    for (id, services, channel) in [
+-        (1, ServiceFlags::NETWORK | ServiceFlags::WITNESS, block_tx),
+-        (
+-            2,
+-            ServiceFlags::WITNESS | ServiceFlags::P2P_V2 | service_flags::UTREEXO.into(),
+-            proof_tx,
+-        ),
+-    ] {
+-        let mut latency = Ema::with_half_life_50();
+-        latency.add(0.01);
+-        node.peers.insert(
+-            id,
+-            LocalPeerView {
+-                address: "127.0.0.1".parse().unwrap(),
+-                port: 8333,
+-                services,
+-                channel,
+-                user_agent: "fixture".into(),
+-                height: 100,
+-                state: PeerStatus::Ready,
+-                kind: ConnectionKind::Regular(services),
+-                banscore: 0,
+-                address_id: id,
+-                _last_message: Instant::now(),
+-                transport_protocol: TransportProtocol::V2,
+-                message_times: latency,
+-            },
+-        );
+-    }
++    (dir, node)
++}
++
++fn routing_peer(
++    node: &mut UtreexoNode<Arc<ChainState<FlatChainStore>>, SyncNode>,
++    id: u32,
++    services: ServiceFlags,
++) -> UnboundedReceiver<NodeRequest> {
++    let (channel, receiver) = unbounded_channel();
++    let mut latency = Ema::with_half_life_50();
++    latency.add(0.01);
++    node.peers.insert(
++        id,
++        LocalPeerView {
++            address: "127.0.0.1".parse().unwrap(),
++            port: 8333,
++            services,
++            channel,
++            user_agent: "fixture".into(),
++            height: 100,
++            state: PeerStatus::Ready,
++            kind: ConnectionKind::Regular(services),
++            banscore: 0,
++            address_id: id,
++            _last_message: Instant::now(),
++            transport_protocol: TransportProtocol::V2,
++            message_times: latency,
++        },
++    );
++    receiver
++}
++
++#[tokio::test]
++async fn block_and_proof_requests_use_different_peers() {
++    use crate::node_interface::UserRequest;
++    use tokio::sync::oneshot;
++
++    let (dir, mut node) = routing_node();
++    let mut blocks = routing_peer(&mut node, 1, ServiceFlags::NETWORK | ServiceFlags::WITNESS);
++    let mut proofs = routing_peer(
++        &mut node,
++        2,
++        ServiceFlags::WITNESS | ServiceFlags::P2P_V2 | service_flags::UTREEXO.into(),
++    );
+     let hash = signet_headers()[1].block_hash();
+     node.request_blocks(vec![hash]).unwrap();
+     assert!(matches!(blocks.try_recv(), Ok(NodeRequest::GetBlock(items)) if items == [hash]));
+@@ -525,3 +537,73 @@ async fn block_and_proof_requests_use_different_peers() {
+     drop(node);
+     std::fs::remove_dir_all(dir).unwrap();
+ }
++
++#[tokio::test]
++async fn archival_routes_cover_history_live_boundary_and_retries() {
++    use crate::node_interface::UserRequest;
++    use tokio::sync::oneshot;
++    let (dir, mut node) = routing_node();
++    let mut blocks = routing_peer(&mut node, 1, ServiceFlags::NETWORK | ServiceFlags::WITNESS);
++    let mut recent = routing_peer(&mut node, 2, service_flags::UTREEXO.into());
++    let mut archive = routing_peer(&mut node, 3, service_flags::UTREEXO_ARCHIVE.into());
++
++    // Mine local regtest headers and test both sides of the BIP183 288-block boundary.
++    let mut header = bitcoin::blockdata::constants::genesis_block(Network::Regtest).header;
++    let mut hashes = vec![header.block_hash()];
++    for _ in 1..=289 {
++        header.prev_blockhash = header.block_hash();
++        header.time += 600;
++        header.nonce = 0;
++        while header.validate_pow(header.target()).is_err() {
++            header.nonce += 1;
++        }
++        hashes.push(header.block_hash());
++        node.chain.accept_header(header).unwrap();
++    }
++    for (hash, receiver) in [(hashes[1], &mut archive), (hashes[2], &mut recent)] {
++        node.perform_user_request(UserRequest::UtreexoProof(hash), oneshot::channel().0)
++            .await;
++        assert!(
++            matches!(receiver.try_recv(), Ok(NodeRequest::GetBlockProof((id, _, _))) if id == hash)
++        );
++    }
++    assert!(blocks.try_recv().is_err());
++
++    // The initial block request, a missed proof and a timed-out proof must
++    // all use the same routing rules. This block has non-coinbase spends.
++    let bytes = zstd::decode_all(
++        &include_bytes!("../../../../floresta-chain/testdata/block_367891/raw.zst")[..],
++    )
++    .unwrap();
++    let block: Block = encode::deserialize(&bytes).unwrap();
++    let hash = block.block_hash();
++    node.request_block_proof(block, 1).unwrap();
++    assert!(matches!(archive.try_recv(), Ok(NodeRequest::GetBlockProof((id, _, _))) if id == hash));
++    let req = InflightRequests::UtreexoProof(hash);
++    node.inflight.remove(&req);
++    node.redo_inflight_request(&req, 3).unwrap();
++    assert!(matches!(recent.try_recv(), Ok(NodeRequest::GetBlockProof((id, _, _))) if id == hash));
++    node.inflight.remove(&req);
++    node.peers.remove(&2);
++    node.ask_for_missed_proofs().unwrap();
++    assert!(matches!(archive.try_recv(), Ok(NodeRequest::GetBlockProof((id, _, _))) if id == hash));
++    node.request_blocks(vec![hashes[2]]).unwrap();
++    assert!(matches!(blocks.try_recv(), Ok(NodeRequest::GetBlock(ids)) if ids == [hashes[2]]));
++    assert!(archive.try_recv().is_err());
++
++    // A full NODE_NETWORK + NODE_UTREEXO peer also promises all historical proofs.
++    node.peers.remove(&3);
++    let mut full = routing_peer(
++        &mut node,
++        4,
++        ServiceFlags::NETWORK | service_flags::UTREEXO.into(),
++    );
++    let _opportunistic = routing_peer(&mut node, 5, service_flags::UTREEXO.into());
++    node.perform_user_request(UserRequest::UtreexoProof(hashes[1]), oneshot::channel().0)
++        .await;
++    assert!(
++        matches!(full.try_recv(), Ok(NodeRequest::GetBlockProof((id, _, _))) if id == hashes[1])
++    );
++    drop(node);
++    std::fs::remove_dir_all(dir).unwrap();
++}

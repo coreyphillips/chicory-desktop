@@ -73,7 +73,11 @@ async function startManager({
 	drains.mount(app);
 	// Public request metadata and durable browser payment identities live on
 	// the host because the stock daemon does not implement the portable routes.
-	drains.useWallets(mountBrowserWalletApi(app, manager, { drainActivity: (id) => drains.activity(id) }));
+	const browserWallet = mountBrowserWalletApi(app, manager, { drainActivity: (id) => drains.activity(id) });
+	drains.useWallets(browserWallet);
+	if (manager.florestaCollection) {
+		manager.florestaCollection.desktopWatches = id => [browserWallet(id).watchTargets(), drains.watchTargets(id)];
+	}
 
 	// --- Reverse proxy to the per-wallet beignet daemons. Mounted BEFORE the
 	// JSON body parser so request bodies (e.g. POST /send) stream through intact.
@@ -698,8 +702,14 @@ async function main() {
 	let service;
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	// Only the disposable funded fixture enables the wallet bridge. The
+	// renderer, wallet HTTP and normal manager startup cannot mint a lease.
+	const stopWalletBridges = process.connected && process.env.CHICORY_FLORESTA_WALLET_LAB === '1' &&
+		process.env.CHICORY_ENCRYPTED_STORAGE === '1' && process.env.DESKTOP_SESSION_TOKEN
+		? require('./floresta-bridge-control').installBridgeControl(process, { qualification: true }) : () => {};
 	const shutdown = async () => {
 		shutdownRequested = true;
+		stopWalletBridges();
 		if (!service) return;
 		if (shuttingDown) return;
 		shuttingDown = true;
@@ -716,6 +726,19 @@ async function main() {
 	process.on('SIGINT', shutdown);
 	process.on('message', (message) => {
 		if (message && message.type === 'shutdown') void shutdown();
+		if (process.env.CHICORY_ENCRYPTED_STORAGE === '1' && process.env.DESKTOP_SESSION_TOKEN &&
+			process.connected && SUPPORTED_NETWORKS.includes(message?.network)) {
+			const collection = service?.manager.florestaCollection;
+			if (message.type === 'floresta:collect' && !shuttingDown) {
+				collection?.setEnabled(message.network, message.enabled);
+			} else if (message.type === 'floresta:snapshots' && typeof message.requestId === 'string' &&
+				message.requestId.length <= 128) {
+				const reply = wallets => process.connected && process.send({ type: 'floresta:snapshots-result',
+					requestId: message.requestId, wallets }, () => {});
+				if (!collection || shuttingDown) reply([]);
+				else void collection.snapshots(message.network).then(reply, () => reply([]));
+			}
+		}
 		// The desktop shell asks before installing an update. It shuts the
 		// manager down next, so a granted hold is never released here.
 		if (message && message.type === 'update:hold' && typeof message.requestId === 'string') {

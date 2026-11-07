@@ -54,7 +54,9 @@ first, and a new wallet on either asks for its primary node. Set
 `CHICORY_MANUAL_SETUP=1` to start in setup without creating a wallet. Bundled
 Tor starts on demand for onion peers, guardians
 and onion Electrum servers. Its bootstrap must succeed before wallet connections
-use that route, and onion failures never fall back to a direct connection.
+use that route. Onion Electrum uses the selected TCP or TLS transport through
+the bridge. TLS verification checks the onion hostname or the saved certificate
+fingerprints. Wallet queries and fee requests stay on that selected endpoint.
 Clearnet peers continue to connect directly; this is not an all-traffic VPN.
 
 To explore the interface without creating a wallet or installing the wallet
@@ -156,6 +158,12 @@ See [desktop verification](docs/desktop-verification.md) for the exact checks
 performed and remaining platform qualification. The inherited
 [regtest report](docs/regtest.md) documents the upstream browser and manager
 baseline, not new funded testing of this desktop package.
+
+A source build and separate macOS, Linux x64 and Windows x64 developer previews can run Floresta and
+scan public wallet and channel history. Payments in both use the selected
+Electrum server. The funded regtest covers replacement notifications, reorgs
+and cold recovery of a spliced channel. See the [setup and qualification
+guide](docs/floresta-qualification.md) and the [bug filing register](docs/issue-33-bug-review.md).
 
 ## Source and license
 

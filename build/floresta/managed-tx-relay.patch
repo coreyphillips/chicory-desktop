@@ -1,0 +1,1055 @@
+diff --git a/crates/floresta-node/src/florestad.rs b/crates/floresta-node/src/florestad.rs
+index a04bf1e..3651fd2 100644
+--- a/crates/floresta-node/src/florestad.rs
++++ b/crates/floresta-node/src/florestad.rs
+@@ -425,6 +425,8 @@ impl Florestad {
+         let historical = self.config.managed_stdio.then(floresta_wire::Historical::default);
+         let config = UtreexoNodeConfig {
+             historical: historical.clone(),
++            managed_relay: floresta_wire::proven_tx::Relay::for_config(self.config.managed_stdio,
++                self.config.network,self.config.connect.as_deref(),proxy.is_some()),
+             disable_dns_seeds: self.config.disable_dns_seeds,
+             network: self.config.network,
+             pow_fraud_proofs: false,
+diff --git a/crates/floresta-wire/src/lib.rs b/crates/floresta-wire/src/lib.rs
+index ef1c301..4ab2dd7 100644
+--- a/crates/floresta-wire/src/lib.rs
++++ b/crates/floresta-wire/src/lib.rs
+@@ -37,6 +37,7 @@ pub use p2p_wire::node_context;
+ pub use p2p_wire::node_interface;
+ pub use p2p_wire::transport::TransportProtocol;
+ pub use p2p_wire::historical::Historical;
++pub use p2p_wire::proven_tx;
+ pub use p2p_wire::UtreexoNodeConfig;
+ 
+ /// NodeHooks is a trait that defines the hooks that a node can use to interact with the network
+diff --git a/crates/floresta-wire/src/p2p_wire/mod.rs b/crates/floresta-wire/src/p2p_wire/mod.rs
+index ec92723..d641223 100644
+--- a/crates/floresta-wire/src/p2p_wire/mod.rs
++++ b/crates/floresta-wire/src/p2p_wire/mod.rs
+@@ -51,6 +51,8 @@ pub struct UtreexoNodeConfig {
+     pub backfill: bool,
+     /// Managed historical verification status shared with the inherited control channel.
+     pub historical: Option<historical::Historical>,
++    /// In-process intake of untrusted peer transaction candidates for the managed validator.
++    pub managed_relay: Option<proven_tx::Relay>,
+     /// If we are using network-provided block filters, we may not need to download the whole
+     /// chain of filters, as our wallets may not have been created at the beginning of the chain.
+     /// With this option, we can make a rough estimate of the block height we need to start
+@@ -82,6 +84,7 @@ impl Default for UtreexoNodeConfig {
+             proxy: None,
+             backfill: false,
+             historical: None,
++            managed_relay: None,
+             assume_utreexo: None,
+             filter_start_height: None,
+             user_agent: format!("floresta:{}", env!("CARGO_PKG_VERSION")),
+@@ -98,6 +101,7 @@ pub mod node;
+ pub mod node_context;
+ pub mod node_interface;
+ pub mod peer;
++pub mod proven_tx;
+ pub mod socks;
+ #[cfg(test)]
+ #[doc(hidden)]
+diff --git a/crates/floresta-wire/src/p2p_wire/node/conn.rs b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+index 901896c..63e19f1 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/conn.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/conn.rs
+@@ -209,6 +209,7 @@ where
+                         .expect("infallible in ChainState")
+                         .0,
+                     allow_v1_fallback,
++                    self.config.managed_relay.clone(),
+                 ),
+             ));
+         }
+@@ -272,8 +273,9 @@ where
+         our_user_agent: String,
+         our_best_block: u32,
+         allow_v1_fallback: bool,
++        managed_relay: Option<crate::proven_tx::Relay>,
+     ) -> Result<(), WireError> {
+-        let (transport_reader, transport_writer, transport_protocol) = transport::connect(
++        let (transport_reader, transport_writer, transport_protocol, actual) = transport::connect(
+             (peer_address.get_net_address(), peer_address.get_port()),
+             network,
+             allow_v1_fallback,
+@@ -303,6 +305,7 @@ where
+             our_best_block,
+             cancellation_sender,
+             transport_protocol,
++            managed_relay.and_then(|relay| relay.bind(network, actual)),
+         );
+ 
+         Ok(())
+@@ -349,6 +352,7 @@ where
+             our_best_block,
+             cancellation_sender,
+             transport_protocol,
++            None,
+         );
+         Ok(())
+     }
+diff --git a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+index 2fc5e95..77ad52b 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/running_ctx.rs
+@@ -228,8 +228,10 @@ where
+         }
+ 
+         let chain = self.chain.get_partial_chain(height, anchor.height, stump)?;
++        let mut replay_config = self.config.clone();
++        replay_config.managed_relay = None;
+         let mut node = UtreexoNode::<PartialChainState, SyncNode>::new(
+-            self.config.clone(),
++            replay_config,
+             chain,
+             self.mempool.clone(),
+             None,
+@@ -525,6 +527,13 @@ where
+ 
+         // Jobs that don't need a connected peer
+         try_and_log!(self.process_pending_blocks());
++        if let Some(relay) = &self.config.managed_relay {
++            let current = self.chain.get_best_block().ok().and_then(|(height, hash)| {
++                (!self.chain.is_in_ibd() && self.chain.get_validation_index().ok() == Some(height))
++                    .then(|| (height, hash, self.chain.get_acc().leaves))
++            });
++            relay.tip(current);
++        }
+ 
+         // Save our peers db
+         periodic_job!(
+diff --git a/crates/floresta-wire/src/p2p_wire/node/user_req.rs b/crates/floresta-wire/src/p2p_wire/node/user_req.rs
+index 94d2f2d..ead310d 100644
+--- a/crates/floresta-wire/src/p2p_wire/node/user_req.rs
++++ b/crates/floresta-wire/src/p2p_wire/node/user_req.rs
+@@ -32,7 +32,9 @@ where
+     /// multiple handles. It also doesn't require a mutable reference to the node, or any
+     /// synchronization mechanism.
+     pub fn get_handle(&self) -> NodeInterface {
+-        NodeInterface::new(self.common.node_tx.clone())
++        let mut interface = NodeInterface::new(self.common.node_tx.clone());
++        interface.managed_relay = self.config.managed_relay.clone();
++        interface
+     }
+ 
+     /// Handles getpeerinfo requests, returning a list of all connected peers and some useful
+diff --git a/crates/floresta-wire/src/p2p_wire/node_interface.rs b/crates/floresta-wire/src/p2p_wire/node_interface.rs
+index 568b63f..a7571cc 100644
+--- a/crates/floresta-wire/src/p2p_wire/node_interface.rs
++++ b/crates/floresta-wire/src/p2p_wire/node_interface.rs
+@@ -159,6 +159,7 @@ pub enum NodeResponse {
+ /// This struct will be used by consumers to interact with the node. You may have as many of it as
+ /// you need, and you can use it to send requests to the node and get responses back.
+ pub struct NodeInterface {
++    pub(crate) managed_relay: Option<crate::proven_tx::Relay>,
+     node_sender: UnboundedSender<NodeNotification>,
+ }
+ 
+@@ -171,7 +172,19 @@ pub struct RequestData {
+ 
+ impl NodeInterface {
+     pub fn new(node_sender: UnboundedSender<NodeNotification>) -> Self {
+-        NodeInterface { node_sender }
++        NodeInterface {
++            node_sender,
++            managed_relay: None,
++        }
++    }
++
++    /// Take bounded, untrusted wire candidates. The caller must verify the complete
++    /// accumulator proof and script policy at its still-active validated tip.
++    pub fn drain_proven_transactions(&self) -> Vec<crate::proven_tx::Candidate> {
++        self.managed_relay
++            .as_ref()
++            .map(|relay| relay.drain())
++            .unwrap_or_default()
+     }
+ 
+     /// Sends a request to the node.
+diff --git a/crates/floresta-wire/src/p2p_wire/peer.rs b/crates/floresta-wire/src/p2p_wire/peer.rs
+index 0dfe5ee..60da614 100644
+--- a/crates/floresta-wire/src/p2p_wire/peer.rs
++++ b/crates/floresta-wire/src/p2p_wire/peer.rs
+@@ -125,6 +125,7 @@ pub fn create_actors<R: AsyncRead + Unpin + Send>(
+ pub struct Peer<T: AsyncWrite + Unpin + Send + Sync> {
+     mempool: Arc<Mutex<Mempool>>,
+     blocks_only: bool,
++    managed_relay: Option<crate::proven_tx::BoundRelay>,
+     services: ServiceFlags,
+     user_agent: String,
+     messages: u64,
+@@ -132,6 +133,7 @@ pub struct Peer<T: AsyncWrite + Unpin + Send + Sync> {
+     last_message: Instant,
+     last_addrv2: Instant,
+     last_inv: Instant,
++    last_mempool: Option<(bitcoin::BlockHash, Instant)>,
+     current_best_block: i32,
+     last_ping: Option<Instant>,
+     id: u32,
+@@ -268,11 +270,18 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+ 
+     async fn peer_loop_inner(&mut self) -> Result<()> {
+         // Send a `version` message to the peer.
+-        let message_version = peer_utils::build_version_message(
++        let mut message_version = peer_utils::build_version_message(
+             self.our_user_agent.clone(),
+             self.our_best_block,
+             &self.address,
+         );
++        if let NetworkMessage::Version(version) = &mut message_version {
++            version.relay = self
++                .managed_relay
++                .as_ref()
++                .and_then(|bound| bound.permitted())
++                .is_some();
++        }
+         self.write(message_version).await?;
+         self.state = State::SentVersion(Instant::now());
+         loop {
+@@ -309,6 +318,31 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+                 return Ok(());
+             }
+ 
++            // utreexod serves MEMPOOL only to filter-capable clients. A peer snapshot is
++            // bounded and has no completion marker. Refresh independent of wallet watches.
++            if self.state == State::Connected
++                && self.services.has(
++                    ServiceFlags::BLOOM
++                        | ServiceFlags::WITNESS
++                        | floresta_common::service_flags::UTREEXO.into(),
++                )
++            {
++                if let Some(tip) = self
++                    .managed_relay
++                    .as_ref()
++                    .and_then(|bound| bound.permitted())
++                    .and_then(|relay| relay.active_tip())
++                {
++                    let due = self.last_mempool.map_or(true, |(previous, time)| {
++                        previous != tip && time.elapsed() >= Duration::from_secs(60)
++                    });
++                    if due {
++                        self.write(NetworkMessage::MemPool).await?;
++                        self.last_mempool = Some((tip, Instant::now()));
++                    }
++                }
++            }
++
+             // If we send a ping and our peer doesn't respond in time, disconnect
+             if let Some(when) = self.last_ping {
+                 if when.elapsed() > PING_TIMEOUT {
+@@ -446,6 +480,31 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+         match self.state {
+             State::Connected => match message {
+                 NetworkMessage::Inv(inv) => {
++                    if let Some(relay) = self
++                        .managed_relay
++                        .as_ref()
++                        .and_then(|bound| bound.permitted())
++                    {
++                        let required =
++                            ServiceFlags::WITNESS | floresta_common::service_flags::UTREEXO.into();
++                        if self.services.has(required) {
++                            let requests = relay.requests(self.id, &inv);
++                            if !requests.is_empty() {
++                                self.write(NetworkMessage::GetData(requests)).await?;
++                            }
++                        }
++                        // A transaction-only announcement must not consume the block INV throttle.
++                        if !inv.iter().any(|i| {
++                            matches!(
++                                i,
++                                Inventory::Block(_)
++                                    | Inventory::WitnessBlock(_)
++                                    | Inventory::CompactBlock(_)
++                            )
++                        }) {
++                            return Ok(());
++                        }
++                    }
+                     let mut block_inv_elements = 0;
+ 
+                     // Silently drop
+@@ -539,6 +598,21 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+                     self.last_ping = None;
+                 }
+                 NetworkMessage::Unknown { command, payload } => {
++                    if command.as_ref() == "utreexotx" {
++                        if let Some(relay) = self
++                            .managed_relay
++                            .as_ref()
++                            .and_then(|bound| bound.permitted())
++                        {
++                            // A stale or unsolicited transaction has no local or network effects.
++                            if let crate::proven_tx::Intake::Request(request) =
++                                relay.receive(self.id, &payload)
++                            {
++                                self.write(NetworkMessage::GetData(request)).await?;
++                            }
++                        }
++                        return Ok(());
++                    }
+                     let utreexo_proof_cmd =
+                         CommandString::try_from_static(UTREEXO_PROOF_CMD_STRING)
+                             .expect("Invalid command string");
+@@ -676,15 +750,18 @@ impl<T: AsyncWrite + Unpin + Send + Sync> Peer<T> {
+         our_best_block: u32,
+         cancellation_sender: tokio::sync::oneshot::Sender<()>,
+         transport_protocol: TransportProtocol,
++        managed_relay: Option<crate::proven_tx::BoundRelay>,
+     ) {
+         let peer = Peer {
+             address,
+             blocks_only: false,
++            managed_relay,
+             current_best_block: -1,
+             id,
+             mempool,
+             last_ping: None,
+             last_message: Instant::now(),
++            last_mempool: None,
+             last_inv: Instant::now() - INV_MESSAGE_INTERVAL,
+             last_addrv2: Instant::now() - ADDRV2_MESSAGE_INTERVAL,
+             node_tx,
+@@ -945,8 +1022,10 @@ mod tests {
+             user_agent: "/Mock-Peer:0.0.0/".into(),
+             start_time: Instant::now(),
+             blocks_only: true,
++            managed_relay: None,
+             last_addrv2: Instant::now(),
+             last_message: Instant::now(),
++            last_mempool: None,
+             last_inv: Instant::now(),
+             send_headers: true,
+             wants_addrv2: true,
+diff --git a/crates/floresta-wire/src/p2p_wire/proven_tx.rs b/crates/floresta-wire/src/p2p_wire/proven_tx.rs
+new file mode 100644
+index 0000000..4a53342
+--- /dev/null
++++ b/crates/floresta-wire/src/p2p_wire/proven_tx.rs
+@@ -0,0 +1,617 @@
++// SPDX-License-Identifier: MIT OR Apache-2.0
++
++//! Bounded acquisition of proof-carrying Utreexo transactions. A candidate is untrusted
++//! until the consumer verifies every input against the same locally validated chain tip.
++use std::collections::{BTreeSet, HashMap, VecDeque};
++use std::net::SocketAddr;
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
++
++use bitcoin::consensus::encode::{deserialize_partial, Decodable, VarInt};
++use bitcoin::hashes::Hash;
++use bitcoin::p2p::message_blockdata::Inventory;
++use bitcoin::{BlockHash, Transaction, Txid};
++use floresta_chain::{CompactLeafData, ScriptPubKeyKind};
++use rustreexo::{node_hash::BitcoinNodeHash, proof::Proof};
++
++pub(crate) const MAX_BYTES: usize = 400_000;
++const MAX_HELD: usize = 8 * 1024 * 1024;
++const MAX_INPUTS: usize = 256;
++const MAX_PENDING: usize = 64;
++const MAX_SEEN: usize = 1024;
++const TTL: Duration = Duration::from_secs(30);
++const PROOF_HASH: u32 = 6;
++const UTREEXO_TX: u32 = 0x0100_0001;
++const WITNESS_UTREEXO_TX: u32 = 0x4100_0001;
++
++#[derive(Debug)]
++pub struct Candidate {
++    pub peer: u32,
++    pub height: u32,
++    pub tip: BlockHash,
++    pub tx: Transaction,
++    pub proof: Proof,
++    /// One entry per normalized transaction input. None must spend an independently admitted parent.
++    pub leaves: Vec<Option<CompactLeafData>>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct Tip {
++    height: u32,
++    hash: BlockHash,
++    leaves: u64,
++}
++
++struct Request {
++    peer: u32,
++    tip: Tip,
++    targets: Vec<u64>,
++    hashes: usize,
++    needs_hint: bool,
++    since: Instant,
++}
++
++#[derive(Default)]
++struct State {
++    tip: Option<Tip>,
++    pending: HashMap<Txid, Request>,
++    seen: HashMap<Txid, Instant>,
++    ready: VecDeque<Candidate>,
++    bytes: usize,
++}
++
++#[derive(Clone)]
++pub struct Relay(Arc<Mutex<State>>, SocketAddr);
++
++/// Authority for one connected socket. The kernel-reported destination is immutable
++/// for this connection and is compared with the configured endpoint on each operation.
++pub struct BoundRelay {
++    relay: Relay,
++    remote: SocketAddr,
++}
++
++impl BoundRelay {
++    pub(crate) fn permitted(&self) -> Option<&Relay> {
++        (self.remote.ip().is_loopback() && self.remote == self.relay.1).then_some(&self.relay)
++    }
++}
++
++impl std::fmt::Debug for Relay {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("Managed transaction intake")
++    }
++}
++
++/// Return all sibling positions for a complete proof in the Utreexo wire protocol's
++/// fixed 63-row forest. Each leading-one prefix identifies the row, and remaining
++/// bits select the aligned leaf interval. Reject overlapping, unpopulated or duplicate
++/// targets and more than 256 confirmed inputs before traversing the forest.
++pub fn proof_positions(targets: &[u64], leaves: u64) -> Option<Vec<u64>> {
++    if targets.len() > MAX_INPUTS || leaves >= 1 << 63 {
++        return None;
++    }
++    let position = |index: u64, row: u32| {
++        if row == 0 {
++            index
++        } else {
++            (u64::MAX << (64 - row)) | index
++        }
++    };
++    let mut roots = BTreeSet::new();
++    let mut start = 0;
++    for row in (0..63).rev() {
++        let width = 1u64 << row;
++        if leaves & width != 0 {
++            roots.insert(position(start >> row, row));
++            start += width;
++        }
++    }
++    let mut nodes = BTreeSet::new();
++    for &target in targets {
++        let row = target.leading_ones();
++        if row >= 63 {
++            return None;
++        }
++        let index = target ^ position(0, row);
++        if index >= (leaves >> row) || !nodes.insert(target) {
++            return None;
++        }
++    }
++    let mut hashes = Vec::new();
++    while let Some(node) = nodes.pop_first() {
++        if roots.contains(&node) {
++            continue;
++        }
++        if !nodes.remove(&(node ^ 1)) {
++            hashes.push(node ^ 1);
++        }
++        let parent = (node >> 1) | (1u64 << 63);
++        if parent == node || !nodes.insert(parent) {
++            return None;
++        }
++    }
++    hashes.sort_unstable();
++    Some(hashes)
++}
++
++fn txid(inv: &Inventory) -> Option<Txid> {
++    match inv {
++        Inventory::Transaction(id) | Inventory::WitnessTransaction(id) => Some(*id),
++        Inventory::Unknown {
++            inv_type: UTREEXO_TX | WITNESS_UTREEXO_TX,
++            hash,
++        } => Some(Txid::from_byte_array(*hash)),
++        _ => None,
++    }
++}
++
++fn unpack(invs: &[Inventory]) -> Option<Vec<u64>> {
++    if invs.len() > MAX_INPUTS / 4 {
++        return None;
++    }
++    let mut positions = Vec::new();
++    let mut padded = false;
++    for item in invs {
++        let Inventory::Unknown {
++            inv_type: PROOF_HASH,
++            hash,
++        } = item
++        else {
++            return None;
++        };
++        for bytes in hash.chunks_exact(8) {
++            let p = u64::from_le_bytes(bytes.try_into().ok()?);
++            if p == u64::MAX {
++                padded = true;
++            } else if padded {
++                return None;
++            } else {
++                positions.push(p);
++            }
++        }
++    }
++    Some(positions)
++}
++
++fn pack(values: &[u64]) -> Vec<Inventory> {
++    values
++        .chunks(4)
++        .map(|group| {
++            let mut hash = [0xff; 32];
++            for (slot, position) in hash.chunks_exact_mut(8).zip(group) {
++                slot.copy_from_slice(&position.to_le_bytes());
++            }
++            Inventory::Unknown {
++                inv_type: PROOF_HASH,
++                hash,
++            }
++        })
++        .collect()
++}
++
++fn read<T: Decodable>(bytes: &mut &[u8]) -> Option<T> {
++    let (item, used) = deserialize_partial::<T>(bytes).ok()?;
++    *bytes = &bytes[used..];
++    Some(item)
++}
++
++fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Option<&'a [u8]> {
++    let chunk = bytes.get(..count)?;
++    *bytes = &bytes[count..];
++    Some(chunk)
++}
++
++fn count(bytes: &mut &[u8], max: usize) -> Option<usize> {
++    let n = usize::try_from(read::<VarInt>(bytes)?.0).ok()?;
++    (n <= max).then_some(n)
++}
++
++fn decode(mut bytes: &[u8]) -> Option<(Transaction, Proof, Vec<Option<CompactLeafData>>)> {
++    if bytes.len() > MAX_BYTES {
++        return None;
++    }
++    let n = count(&mut bytes, MAX_INPUTS)?;
++    let targets = (0..n)
++        .map(|_| Some(read::<VarInt>(&mut bytes)?.0))
++        .collect::<Option<Vec<_>>>()?;
++    let n = count(&mut bytes, MAX_INPUTS * 63)?;
++    let hashes = take(&mut bytes, n.checked_mul(32)?)?
++        .chunks_exact(32)
++        .map(|chunk| BitcoinNodeHash::new(chunk.try_into().unwrap()))
++        .collect();
++    let mut tx: Transaction = read(&mut bytes)?;
++    if tx.input.is_empty() || tx.input.len() > MAX_INPUTS {
++        return None;
++    }
++    let mut leaves = Vec::with_capacity(tx.input.len());
++    for input in &mut tx.input {
++        let unconfirmed = input.previous_output.vout & 1 != 0;
++        input.previous_output.vout >>= 1;
++        leaves.push(if unconfirmed {
++            None
++        } else {
++            let header_code = read(&mut bytes)?;
++            let amount = read(&mut bytes)?;
++            let spk_ty = match read::<u8>(&mut bytes)? {
++                0 => {
++                    let n = count(&mut bytes, 10_000)?;
++                    ScriptPubKeyKind::Other(take(&mut bytes, n)?.into())
++                }
++                1 => ScriptPubKeyKind::PubKeyHash,
++                2 => ScriptPubKeyKind::WitnessV0PubKeyHash,
++                3 => ScriptPubKeyKind::ScriptHash,
++                4 => ScriptPubKeyKind::WitnessV0ScriptHash,
++                _ => return None,
++            };
++            Some(CompactLeafData {
++                header_code,
++                amount,
++                spk_ty,
++            })
++        });
++    }
++    if !bytes.is_empty() || leaves.iter().flatten().count() != targets.len() {
++        return None;
++    }
++    Some((tx, Proof::new(targets, hashes), leaves))
++}
++
++/// Network actions remain separate from candidate admission.
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum Intake {
++    Dropped,
++    Queued,
++    Request(Vec<Inventory>),
++}
++
++impl Relay {
++    /// Only the explicitly selected, local regtest qualification endpoint may receive
++    /// proof-transaction traffic. All ordinary peer and network configurations remain block-only.
++    pub fn for_config(
++        managed: bool,
++        network: bitcoin::Network,
++        fixed: Option<&str>,
++        proxied: bool,
++    ) -> Option<Self> {
++        if !managed || network != bitcoin::Network::Regtest || proxied {
++            return None;
++        }
++        let endpoint: SocketAddr = fixed?.parse().ok()?;
++        if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
++            return None;
++        }
++        Some(Self(Arc::default(), endpoint))
++    }
++
++    pub(crate) fn bind(
++        &self,
++        network: bitcoin::Network,
++        remote: Option<SocketAddr>,
++    ) -> Option<BoundRelay> {
++        if network != bitcoin::Network::Regtest {
++            return None;
++        }
++        let bound = BoundRelay {
++            relay: self.clone(),
++            remote: remote?,
++        };
++        bound.permitted()?;
++        Some(bound)
++    }
++
++    pub(crate) fn tip(&self, tip: Option<(u32, BlockHash, u64)>) {
++        let tip = tip.map(|(height, hash, leaves)| Tip {
++            height,
++            hash,
++            leaves,
++        });
++        let mut state = self.0.lock().unwrap();
++        if state.tip != tip {
++            *state = State {
++                tip,
++                ..Default::default()
++            };
++        }
++    }
++
++    pub(crate) fn active_tip(&self) -> Option<BlockHash> {
++        self.0.lock().unwrap().tip.map(|tip| tip.hash)
++    }
++
++    pub(crate) fn requests(&self, peer: u32, invs: &[Inventory]) -> Vec<Inventory> {
++        let mut state = self.0.lock().unwrap();
++        let Some(tip) = state.tip else {
++            return vec![];
++        };
++        let now = Instant::now();
++        state
++            .pending
++            .retain(|_, r| now.duration_since(r.since) < TTL);
++        state.seen.retain(|_, t| now.duration_since(*t) < TTL);
++        let mut out = Vec::new();
++        let mut iter = invs.iter().enumerate().peekable();
++        while let Some((i, item)) = iter.next() {
++            let Some(id) = txid(item) else {
++                continue;
++            };
++            let mut end = i + 1;
++            while iter
++                .next_if(|(_, item)| {
++                    matches!(
++                        item,
++                        Inventory::Unknown {
++                            inv_type: PROOF_HASH,
++                            ..
++                        }
++                    )
++                })
++                .is_some()
++            {
++                end += 1;
++            }
++            if state.pending.len() >= MAX_PENDING || state.seen.len() >= MAX_SEEN {
++                break;
++            }
++            if state.seen.contains_key(&id) {
++                continue;
++            }
++            let Some(targets) = unpack(&invs[i + 1..end]) else {
++                continue;
++            };
++            let Some(positions) = proof_positions(&targets, tip.leaves) else {
++                continue;
++            };
++            let packed = pack(&positions);
++            if out.len() + 1 + packed.len() > 4096 {
++                break;
++            }
++            state.pending.insert(
++                id,
++                Request {
++                    peer,
++                    tip,
++                    needs_hint: targets.is_empty(),
++                    targets,
++                    hashes: positions.len(),
++                    since: now,
++                },
++            );
++            state.seen.insert(id, now);
++            out.push(Inventory::Unknown {
++                inv_type: WITNESS_UTREEXO_TX,
++                hash: id.to_byte_array(),
++            });
++            out.extend(packed);
++        }
++        out
++    }
++
++    pub(crate) fn receive(&self, peer: u32, bytes: &[u8]) -> Intake {
++        {
++            let state = self.0.lock().unwrap();
++            if bytes.len() > MAX_BYTES
++                || !state
++                    .pending
++                    .values()
++                    .any(|r| r.peer == peer && r.since.elapsed() < TTL)
++            {
++                return Intake::Dropped;
++            }
++        }
++        let Some((tx, proof, leaves)) = decode(bytes) else {
++            return Intake::Dropped;
++        };
++        let mut state = self.0.lock().unwrap();
++        let id = tx.compute_txid();
++        let Some(req) = state.pending.get(&id) else {
++            return Intake::Dropped;
++        };
++        if req.peer != peer || Some(req.tip) != state.tip || req.since.elapsed() >= TTL {
++            return Intake::Dropped;
++        }
++        if req.needs_hint && !proof.targets.is_empty() {
++            // MEMPOOL replies omit the packed target positions. The first GETDATA can
++            // reveal them but cannot establish inclusion. Request the full sibling set
++            // for those positions under the same tip and transaction identity.
++            if !proof.hashes.is_empty() {
++                return Intake::Dropped;
++            }
++            let Some(positions) = proof_positions(&proof.targets, req.tip.leaves) else {
++                return Intake::Dropped;
++            };
++            if !positions.is_empty() {
++                let request = state.pending.get_mut(&id).unwrap();
++                request.targets = proof.targets;
++                request.hashes = positions.len();
++                request.needs_hint = false;
++                let mut inv = vec![Inventory::Unknown {
++                    inv_type: WITNESS_UTREEXO_TX,
++                    hash: id.to_byte_array(),
++                }];
++                inv.extend(pack(&positions));
++                return Intake::Request(inv);
++            }
++            // A complete proof can contain no sibling hashes when all targets are roots.
++        } else if req.targets != proof.targets || req.hashes != proof.hashes.len() {
++            return Intake::Dropped;
++        }
++        let tip = req.tip;
++        state.pending.remove(&id);
++        if state.bytes + bytes.len() > MAX_HELD || state.ready.len() >= MAX_PENDING {
++            return Intake::Dropped;
++        }
++        state.bytes += bytes.len();
++        state.ready.push_back(Candidate {
++            peer,
++            height: tip.height,
++            tip: tip.hash,
++            tx,
++            proof,
++            leaves,
++        });
++        Intake::Queued
++    }
++
++    pub(crate) fn drain(&self) -> Vec<Candidate> {
++        let mut state = self.0.lock().unwrap();
++        state.bytes = 0;
++        state.ready.drain(..).collect()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use bitcoin::hex::FromHex;
++
++    fn test_relay() -> Relay {
++        Relay::for_config(
++            true,
++            bitcoin::Network::Regtest,
++            Some("127.0.0.1:18444"),
++            false,
++        )
++        .unwrap()
++    }
++
++    #[test]
++    fn qualification_requires_managed_regtest_and_exact_direct_socket() {
++        use bitcoin::Network;
++        let local = Some("127.0.0.1:18444");
++        for network in [
++            Network::Bitcoin,
++            Network::Testnet,
++            Network::Testnet4,
++            Network::Signet,
++        ] {
++            assert!(Relay::for_config(true, network, local, false).is_none());
++        }
++        assert!(Relay::for_config(false, Network::Regtest, local, false).is_none());
++        assert!(Relay::for_config(true, Network::Regtest, local, true).is_none());
++        for endpoint in [
++            None,
++            Some("127.0.0.1:0"),
++            Some("localhost:18444"),
++            Some("192.0.2.1:18444"),
++            Some("[::]:18444"),
++        ] {
++            assert!(Relay::for_config(true, Network::Regtest, endpoint, false).is_none());
++        }
++        let relay = test_relay();
++        assert!(relay.bind(Network::Regtest, None).is_none());
++        for endpoint in [
++            "127.0.0.1:18445",
++            "127.0.0.2:18444",
++            "192.0.2.1:18444",
++            "[::1]:18444",
++        ] {
++            assert!(relay
++                .bind(Network::Regtest, Some(endpoint.parse().unwrap()))
++                .is_none());
++        }
++        let actual = Some("127.0.0.1:18444".parse().unwrap());
++        assert!(relay.bind(Network::Bitcoin, actual).is_none());
++        assert!(relay
++            .bind(Network::Regtest, actual)
++            .unwrap()
++            .permitted()
++            .is_some());
++    }
++    // Captured from the v0.6.0 bridge after a funded regtest transaction spent leaf 0 at 101.
++    const PAYLOAD: &str = "01000634b828cedf38ed3e9d8fba739af97affc2d0bd465971bf1085c84c47e8a4df7d4fe3af0c4bf72ffcc2214b01dbe2cd8b5038809f033e8db5dbb730542cb29cc7945f415cfb20472581186b48218ed22a0a0f8823625ae84b4defb81372058769f15395c44fa1a63da6f38d884659f3fdfff0c10c818065914c4fedcb05a2c4ceb3c9cf7f319f67ea72164c0ec7e703a9d5efde62e97e853d58c78cd3308061db18b91b96fae6362914b39449f154d0d05df0a482cf8883ee757fc73bc38d67430100000001bbfa4bc8a83cf9d4f647ae5c65b86b6514b9c63deef411dba1e060c2516f6c2400000000020151fdffffff03e026052a0100000017a914da1745e9b549bd0bfa1a569971c77eba30cd5a4b87e80300000000000017a914da1745e9b549bd0bfa1a569971c77eba30cd5a4b8750c3000000000000220020dbeda1256f5e8b945ea986a7501758010dd85225901a2d531013f4c516824013000000000300000000f2052a0100000003";
++    const TXID: &str = "bb89170c9e2f2db83d1f248fff2906beb22ba8055a6b935ed7b5045c08333858";
++
++    #[test]
++    fn bridge_response_requires_peer_request_and_exact_active_tip() {
++        let wire = Vec::<u8>::from_hex(PAYLOAD).unwrap();
++        let relay = test_relay();
++        let tip = BlockHash::all_zeros();
++        let id = TXID.parse().unwrap();
++        let mut announcements = vec![Inventory::Transaction(id)];
++        announcements.extend(pack(&[0]));
++        assert_eq!(relay.receive(1, &wire), Intake::Dropped);
++        relay.tip(Some((101, tip, 101)));
++        let requested = relay.requests(1, &announcements);
++        assert_eq!(requested.len(), 3);
++        assert_eq!(
++            unpack(&requested[1..]).unwrap(),
++            vec![
++                1,
++                9223372036854775809,
++                13835058055282163713,
++                16140901064495857665,
++                17293822569102704641,
++                17870283321406128129
++            ]
++        );
++        assert!(relay.requests(2, &announcements).is_empty());
++        assert_eq!(relay.receive(2, &wire), Intake::Dropped);
++        let mut malformed = wire.clone();
++        malformed.push(0);
++        assert_eq!(relay.receive(1, &malformed), Intake::Dropped);
++        assert_eq!(relay.receive(1, &wire), Intake::Queued);
++        assert_eq!(relay.receive(1, &wire), Intake::Dropped);
++        let result = relay.drain().pop().unwrap();
++        assert_eq!(
++            (
++                result.peer,
++                result.height,
++                result.tip,
++                result.tx.compute_txid()
++            ),
++            (1, 101, tip, id)
++        );
++        assert_eq!(result.proof.targets, vec![0]);
++        assert_eq!(result.proof.hashes.len(), 6);
++        let leaf = result.leaves[0].as_ref().unwrap();
++        assert_eq!((leaf.header_code, leaf.amount), (3, 5_000_000_000));
++        assert_eq!(leaf.spk_ty, ScriptPubKeyKind::ScriptHash);
++        relay.tip(Some((102, tip, 105)));
++        assert_eq!(relay.receive(1, &wire), Intake::Dropped);
++    }
++
++    #[test]
++    fn cold_inventory_requests_target_hints_then_full_inclusion() {
++        let wire = Vec::<u8>::from_hex(PAYLOAD).unwrap();
++        let relay = test_relay();
++        relay.tip(Some((101, BlockHash::all_zeros(), 101)));
++        let request = relay.requests(1, &[Inventory::Transaction(TXID.parse().unwrap())]);
++        assert_eq!(request.len(), 1);
++        let mut hint = vec![1, 0, 0]; // one target at position zero and no sibling hashes
++        hint.extend_from_slice(&wire[3 + 6 * 32..]);
++        let Intake::Request(second) = relay.receive(1, &hint) else {
++            panic!("missing second proof request");
++        };
++        assert_eq!(second.len(), 3);
++        assert_eq!(relay.receive(1, &hint), Intake::Dropped);
++        assert!(relay.drain().is_empty());
++        assert_eq!(relay.receive(1, &wire), Intake::Queued);
++        assert_eq!(relay.drain().len(), 1);
++    }
++
++    #[test]
++    fn position_bounds_and_unconfirmed_input_encoding() {
++        assert_eq!(proof_positions(&[0, 1], 2), Some(vec![]));
++        assert_eq!(proof_positions(&[0, 2], 4), Some(vec![1, 3]));
++        assert_eq!(proof_positions(&[1 << 63], 2), Some(vec![]));
++        assert_eq!(proof_positions(&[0, 1 << 63], 2), None);
++        assert_eq!(proof_positions(&[2], 2), None);
++        assert_eq!(proof_positions(&[0, 0], 2), None);
++        let wire = Vec::<u8>::from_hex(PAYLOAD).unwrap();
++        let (mut tx, _, _) = decode(&wire).unwrap();
++        // An unconfirmed parent at vout 4 is carried as 9 with no leaf or proof.
++        tx.input[0].previous_output.vout = 9;
++        let mut bytes = vec![0, 0];
++        bytes.extend(bitcoin::consensus::serialize(&tx));
++        let (normalized, proof, leaves) = decode(&bytes).unwrap();
++        assert_eq!(normalized.input[0].previous_output.vout, 4);
++        assert_eq!(proof.targets.len(), 0);
++        assert_eq!(leaves, vec![None]);
++        let bad_padding = Inventory::Unknown {
++            inv_type: PROOF_HASH,
++            hash: [0xff; 32],
++        };
++        assert!(unpack(&[bad_padding, pack(&[0]).remove(0)]).is_none());
++        assert!(decode(&wire[..wire.len() - 1]).is_none());
++    }
++}
+diff --git a/crates/floresta-wire/src/p2p_wire/transport.rs b/crates/floresta-wire/src/p2p_wire/transport.rs
+index 226e952..6519027 100644
+--- a/crates/floresta-wire/src/p2p_wire/transport.rs
++++ b/crates/floresta-wire/src/p2p_wire/transport.rs
+@@ -53,6 +53,15 @@ use crate::address_man::LocalAddress;
+ 
+ type TcpReadTransport = ReadTransport<BufReader<ReadHalf<TcpStream>>>;
+ type TcpWriteTransport = WriteTransport<WriteHalf<TcpStream>>;
++type DirectTransportResult = Result<
++    (
++        TcpReadTransport,
++        TcpWriteTransport,
++        TransportProtocol,
++        Option<std::net::SocketAddr>,
++    ),
++    TransportError,
++>;
+ type TransportResult =
+     Result<(TcpReadTransport, TcpWriteTransport, TransportProtocol), TransportError>;
+ 
+@@ -234,7 +243,7 @@ pub async fn connect<A: ToSocketAddrs>(
+     address: A,
+     network: Network,
+     allow_v1_fallback: bool,
+-) -> TransportResult {
++) -> DirectTransportResult {
+     match try_connection(&address, network, false).await {
+         Ok(transport) => Ok(transport),
+         Err(TransportError::Protocol(ProtocolError::Io(_, ProtocolFailureSuggestion::RetryV1)))
+@@ -250,16 +259,17 @@ async fn try_connection<A: ToSocketAddrs>(
+     address: &A,
+     network: Network,
+     force_v1: bool,
+-) -> TransportResult {
++) -> DirectTransportResult {
+     let tcp_stream = TcpStream::connect(address).await?;
+     // Data is buffered until there is enough to send out
+     // thus reducing the amount of packages going through
+     // the network.
+     tcp_stream.set_nodelay(false)?;
+ 
+-    let peer_addr = match tcp_stream.peer_addr() {
+-        Ok(addr) => addr.to_string(),
+-        Err(_) => String::from("unknown peer"),
++    let actual = tcp_stream.peer_addr().ok();
++    let peer_addr = match actual {
++        Some(addr) => addr.to_string(),
++        None => String::from("unknown peer"),
+     };
+     let (reader, writer) = tokio::io::split(tcp_stream);
+     let reader = BufReader::new(reader);
+@@ -271,6 +281,7 @@ async fn try_connection<A: ToSocketAddrs>(
+                 ReadTransport::V1(reader, network),
+                 WriteTransport::V1(writer, network),
+                 TransportProtocol::V1,
++                actual,
+             ))
+         }
+         false => match Protocol::new(network, Role::Initiator, None, None, reader, writer).await {
+@@ -281,6 +292,7 @@ async fn try_connection<A: ToSocketAddrs>(
+                     ReadTransport::V2(reader_protocol),
+                     WriteTransport::V2(writer_protocol),
+                     TransportProtocol::V2,
++                    actual,
+                 ))
+             }
+             Err(e) => {
+@@ -404,6 +416,20 @@ where
+                     return Ok(msg);
+                 }
+ 
++                // utreexod assigns BIP324 short type 34 to its proof-bearing transaction.
++                if contents.first() == Some(&34) {
++                    let length = contents.len() - 1;
++                    if length > crate::proven_tx::MAX_BYTES {
++                        return Err(TransportError::OversizedMessage {
++                            max_size: crate::proven_tx::MAX_BYTES,
++                            message_size: length,
++                        });
++                    }
++                    return Ok(NetworkMessage::Unknown {
++                        command: CommandString::try_from_static("utreexotx").unwrap(),
++                        payload: contents[1..].to_vec(),
++                    });
++                }
+                 let msg = deserialize_v2(contents)?;
+                 Ok(msg)
+             }
+@@ -412,9 +438,14 @@ where
+                 reader.read_exact(&mut data).await?;
+ 
+                 let header: V1MessageHeader = deserialize_partial(&data)?.0;
+-                if header.length as usize > MAX_MSG_SIZE {
++                let max_size = if header.command == *b"utreexotx\0\0\0" {
++                    crate::proven_tx::MAX_BYTES
++                } else {
++                    MAX_MSG_SIZE
++                };
++                if header.length as usize > max_size {
+                     return Err(TransportError::OversizedMessage {
+-                        max_size: MAX_MSG_SIZE,
++                        max_size,
+                         message_size: header.length as usize,
+                     });
+                 }

@@ -83,6 +83,15 @@ class BrowserWallet {
     const state = this.load();
     return state.requests.map(row => ({ ...clone(row), bitcoinTracking: row.address == null ? 'lightning-only' : state.requests.filter(other => other.address === row.address).length > 1 ? 'ambiguous' : 'unique' }));
   }
+  watchTargets() {
+    const { addresses, requests, activity } = this.load();
+    return {
+      scripts: [...new Set([...addresses, ...requests.map(row => row.address).filter(address => address != null),
+        ...activity.map(row => row.address)])].map(address => scriptFor(address, this.record.network).toString('hex')),
+      outpoints: activity.filter(row => row.previousFundingTxid != null || row.previousFundingOutputIndex != null)
+        .map(row => ({ txid: row.previousFundingTxid, vout: row.previousFundingOutputIndex })),
+    };
+  }
   allocate(body) {
     return this.serial(async () => {
       const state = this.load();

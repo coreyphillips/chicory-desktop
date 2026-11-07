@@ -9,6 +9,17 @@ contextBridge.exposeInMainWorld('chicoryDesktop', Object.freeze({
   minimize: () => ipcRenderer.send('window:minimize'),
   toggleMaximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),
+  ...(process.argv?.includes('--chicory-floresta-qualification') ? {
+    floresta: Object.freeze({
+      status: network => ipcRenderer.invoke('floresta:settings', network, 'status'),
+      start: network => ipcRenderer.invoke('floresta:settings', network, 'start'),
+      stop: network => ipcRenderer.invoke('floresta:settings', network, 'stop'),
+      remove: network => ipcRenderer.invoke('floresta:settings', network, 'remove'),
+      allowCheckpoint: network => ipcRenderer.invoke('floresta:settings', network, 'allowCheckpoint'),
+      requireHistory: network => ipcRenderer.invoke('floresta:settings', network, 'requireHistory'),
+      folder: network => ipcRenderer.invoke('floresta:settings', network, 'folder'),
+    }),
+  } : {}),
   // Returns the redacted support report as text. The wallet's own report is
   // passed in so it is redacted by the same rules before it can be copied.
   diagnostics: (input) => ipcRenderer.invoke('desktop:diagnostics', input),

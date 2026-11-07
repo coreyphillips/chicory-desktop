@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const bip39 = require('bip39');
 const { config, SUPPORTED_NETWORKS, ELECTRUM_PRESETS, publicElectrumServers } = require('./config');
 const { Registry } = require('./registry');
+const { FlorestaCollection } = require('./floresta-collection');
 const { Settings } = require('./settings');
 const { TorControl, pickLocalIp } = require('./tor-control');
 const { probeSocksConnect } = require('./socks-probe');
@@ -179,6 +180,7 @@ class WalletManager {
 			defaultElectrum: config.defaultElectrum.host ? { ...config.defaultElectrum } : null
 		});
 		this.runtime = new Map();
+		this.florestaCollection = new FlorestaCollection(this);
 		// Per-wallet durable channel history (see channel-events.js). Keyed
 		// separately from runtime state so it is readable while a wallet is
 		// stopped and survives runtime resets.
@@ -1559,6 +1561,10 @@ class WalletManager {
 			BEIGNET_DAEMON_HOST: '127.0.0.1',
 			BEIGNET_DAEMON_PORT: String(rec.port),
 			BEIGNET_ELECTRUM_HOST: rec.electrum.host,
+			...(rec.electrum.onionHost ? {
+				CHICORY_ELECTRUM_POLICY: 'selected-only',
+				CHICORY_ELECTRUM_ONION_NAME: rec.electrum.onionHost
+			} : {}),
 			BEIGNET_ELECTRUM_PORT: String(rec.electrum.port),
 			BEIGNET_ELECTRUM_TLS: rec.electrum.tls ? 'true' : 'false',
 			// Certificate verification for a TLS server, when the record asks.
@@ -1831,7 +1837,8 @@ class WalletManager {
 			timer.unref();
 			proc.once('exit', () => clearTimeout(timer));
 			try {
-				proc.send({ type: 'initialize-storage', ...require('./vault-files').engineKeys(id), mnemonic, apiToken: token }, err => {
+				proc.send({ type: 'initialize-storage', ...require('./vault-files').engineKeys(id), mnemonic, apiToken: token,
+					...(this.florestaCollection?.networks.has(rec.network) ? { chainWatch: true } : {}) }, err => {
 					clearTimeout(timer);
 					if (err) failed();
 				});
