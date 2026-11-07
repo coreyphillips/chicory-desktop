@@ -12,8 +12,6 @@ type Snapshots = WeakMap<HTMLElement, Snapshot>;
 type Props = { entering?: unknown; exiting?: unknown; layout?: unknown };
 const ENTERING = 1;
 const EXITING = 2;
-/** On an element whose entrance is under way (`restingRect`). */
-const ENTERING_MARK = 'data-chicory-motion-enter';
 const active = new WeakMap<HTMLElement, MotionController>();
 /** What a LayoutAnimationConfig let go of with its exits skipped. */
 const skipping = new WeakSet<object>();
@@ -170,7 +168,6 @@ function animate(
   const exit = type === EXITING ? exitingElement(source, snapshots) : null;
   const target = exit?.element ?? source;
   const styles = renderer(target, values);
-  if (type === ENTERING) source.setAttribute(ENTERING_MARK, '');
   let controller: MotionController | undefined;
   controller = runMotion(description, styles.write, {
     now: () => performance.now(),
@@ -189,7 +186,6 @@ function animate(
     previous,
     done: finished => {
       if (controller && active.get(source) === controller) active.delete(source);
-      source.removeAttribute(ENTERING_MARK);
       if (exit) {
         // Notify the native observer's possible ancestor-retention handler.
         target.dispatchEvent(new Event('animationend'));
@@ -202,23 +198,29 @@ function animate(
 }
 
 /**
- * A view's box, in window points, as it will be once the entrances around it
- * are over. An entrance holds its pose on the element while it waits out its
- * delay, so the box alone can read still and be wrong: a control drawn under
- * two entrances of 12 points stays 24 points low for their first 80ms. Each
- * is lifted for the reading and put back in the same tick, so nothing paints.
- * Anything else that moves the view, such as a pane on its spring, still counts.
+ * A view's box, in window points, where layout puts it: where it will rest
+ * once everything moving it is over. Its box on screen can read still and be
+ * wrong. An entrance holds its pose while it waits out its delay, and a layout
+ * transition sets out slowly from where the view was, so two readings agree on
+ * a place it only starts from. Offsets know nothing of transforms, so nothing
+ * can hold them back.
  */
-export function restingRect(element: Element): DOMRect {
-  const poses: [HTMLElement, string][] = [];
-  for (let at = element as HTMLElement | null; at; at = at.parentElement) {
-    if (!at.hasAttribute(ENTERING_MARK)) continue;
-    poses.push([at, at.style.transform]);
-    at.style.transform = '';
+export function restingRect(element: Element): { left: number; top: number; width: number; height: number } {
+  const view = element as HTMLElement;
+  let left = 0;
+  let top = 0;
+  for (let at: HTMLElement | null = view; at;) {
+    left += at.offsetLeft;
+    top += at.offsetTop;
+    const parent = at.offsetParent as HTMLElement | null;
+    if (parent) { left += parent.clientLeft; top += parent.clientTop; }
+    at = parent;
   }
-  const box = element.getBoundingClientRect();
-  for (const [at, pose] of poses) at.style.transform = pose;
-  return box;
+  for (let at = view.parentElement; at; at = at.parentElement) {
+    left -= at.scrollLeft;
+    top -= at.scrollTop;
+  }
+  return { left, top, width: view.offsetWidth, height: view.offsetHeight };
 }
 
 /**

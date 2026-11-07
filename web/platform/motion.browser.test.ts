@@ -13,6 +13,12 @@ class Element extends EventTarget {
   offsetParent: Element | null = null;
   scrollTop = 0;
   scrollLeft = 0;
+  offsetLeft = 0;
+  offsetTop = 0;
+  offsetWidth = 88;
+  offsetHeight = 88;
+  clientLeft = 0;
+  clientTop = 0;
   isDummy?: boolean;
   dummyClone?: Element;
   removedAfterAnimation?: boolean;
@@ -209,54 +215,31 @@ const rise = (distance: number) => (() => ({
   initialValues: { opacity: 0, transform: [{ translateY: distance }] },
   animations: { opacity: instant(1), transform: [{ translateY: instant(0) }] },
 }));
-// The box follows the pose it is held in, as a browser's does.
-const posed = (element: Element, top: number, ...around: Element[]) => {
-  element.getBoundingClientRect = () => {
-    const offset = [element, ...around].reduce((sum, item) => sum + Number(/translateY\((-?\d+)/.exec(item.style.transform)?.[1] ?? 0), 0);
-    return { ...element.rect, top: top + offset };
-  };
-};
-
-test('a view is read where it comes to rest, while the entrances around it wait to start', () => {
+test('a view is read where layout puts it, whatever is moving it', () => {
   const env = environment();
   try {
-    const outer = env.source;
-    const inner = new Element(); inner.offsetParent = env.parent; inner.canvas = env.canvas; outer.appendChild(inner);
-    const control = new Element(); inner.appendChild(control);
-    runCustomWebAnimation({ entering: rise(12) }, outer as unknown as HTMLElement, 1);
-    runCustomWebAnimation({ entering: rise(12) }, inner as unknown as HTMLElement, 1);
-    posed(control, 706, inner, outer);
-    assert.equal(control.getBoundingClientRect().top, 730);
-    assert.equal(restingRect(control as unknown as HTMLElement).top, 706);
-    // Nothing painted differently: both poses are back as they were.
-    assert.equal(outer.style.transform, 'translateY(12px)');
-    assert.equal(inner.style.transform, 'translateY(12px)');
-    assert.equal(control.getBoundingClientRect().top, 730);
+    const pane = new Element();
+    const row = new Element(); pane.appendChild(row); row.offsetParent = pane;
+    const control = new Element(); row.appendChild(control); control.offsetParent = row;
+    pane.offsetLeft = 200; pane.offsetTop = 100;
+    row.offsetLeft = 10; row.offsetTop = 600;
+    control.offsetLeft = 30; control.offsetTop = 6;
+    // An entrance held at its start, or a layout transition just setting out.
+    row.style.transform = 'translateY(24px)';
+    control.getBoundingClientRect = () => ({ top: 730, left: 240, width: 88, height: 88 });
+    const rest = restingRect(control as unknown as HTMLElement);
+    assert.deepEqual(rest, { left: 240, top: 706, width: 88, height: 88 });
+    assert.equal(row.style.transform, 'translateY(24px)', 'Nothing it reads through is changed');
   } finally { env.restore(); }
 });
-test('a view with nothing entering around it is read as it stands', () => {
+test('a scrolled view rests where it is scrolled to, inside any border around it', () => {
   const env = environment();
   try {
-    // A pose that is not an entrance, such as a pane on its spring, still counts.
-    env.source.style.transform = 'translateY(40px)';
-    const control = new Element(); env.source.appendChild(control);
-    posed(control, 100, env.source);
-    assert.equal(restingRect(control as unknown as HTMLElement).top, 140);
-    assert.equal(env.source.style.transform, 'translateY(40px)');
-  } finally { env.restore(); }
-});
-test('an entrance stops counting once it ends, and if an exit takes over', () => {
-  const env = environment();
-  try {
-    const source = env.source as unknown as HTMLElement;
-    runCustomWebAnimation({ entering: rise(12) }, source, 1);
-    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), true);
-    env.frame();
-    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), false);
-
-    runCustomWebAnimation({ entering: rise(12) }, source, 1);
-    runCustomWebAnimation({ exiting: rise(12) }, source, 2);
-    assert.equal(env.source.hasAttribute('data-chicory-motion-enter'), false);
+    const scroller = new Element(); scroller.scrollTop = 40;
+    const control = new Element(); scroller.appendChild(control); control.offsetParent = scroller;
+    scroller.clientLeft = 4; scroller.clientTop = 4;
+    control.offsetLeft = 10; control.offsetTop = 100;
+    assert.deepEqual(restingRect(control as unknown as HTMLElement), { left: 14, top: 64, width: 88, height: 88 });
   } finally { env.restore(); }
 });
 test('the rewrite fits the installed Reanimated, and a version that no longer does stops the build', () => {

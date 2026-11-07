@@ -270,9 +270,11 @@ const HANDOVER = 0.3;
  * `OTHERS_GONE`), and the tapped one stays
  * whole while it travels and grows. On the canvas it stays whole where it
  * lands, standing in for the scene's own control, until `handover` (0 to 1)
- * says the control has come in over it; drawn on its own it hands over
- * across the last 30% of the way. Coming back, each comes in the same way
- * in reverse.
+ * says the control has come in over it, and only then goes, all at once: two
+ * opaque discs crossing would each show through the other, 75% at the middle,
+ * where one fading over a whole one never dims. Drawn on its own it hands over
+ * across the last 30% of the way. Coming back, each comes in the same way in
+ * reverse.
  */
 export function circleOpacity(
   away: number,
@@ -283,9 +285,8 @@ export function circleOpacity(
   'worklet';
   if (launch === 'none') return clamp01(1 - away);
   if (tapped) {
-    return handover === undefined
-      ? clamp01((1 - away) / HANDOVER)
-      : clamp01(1 - handover);
+    if (handover === undefined) return clamp01((1 - away) / HANDOVER);
+    return handover >= 1 ? 0 : 1;
   }
   return clamp01(1 - away / OTHERS_GONE);
 }

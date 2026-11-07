@@ -239,6 +239,53 @@ try {
     await steady(`Send at ${width}x${height}`, () => scene('send').click());
   }
 
+  // The flight from Home and back, at a size the window was not opened at. The
+  // circle never dims against the control, one fading over the other whole,
+  // and it sets off from where it is, however the window has changed since.
+  const flies = async name => {
+    const frames = page.evaluate(wait => window.chicorySwitch(wait), 1200);
+    await page.waitForTimeout(40);
+    await scene(name).click();
+    const seen = await frames;
+    const drawn = seen.filter(frame => frame.controls.length);
+    assert.ok(drawn.length > 5, `To ${name}: the control was seen`);
+    for (const [at, frame] of drawn.entries()) {
+      const coverage = 1 - frame.controls.reduce((rest, control) => rest * (1 - control.opacity), 1);
+      assert.ok(coverage >= 0.99, `To ${name}, frame ${at}: it never dims, at ${coverage}`);
+      // While both are drawn the circle is on the control, not where it was.
+      if (frame.controls.length < 2) continue;
+      const [one, other] = frame.controls;
+      assert.ok(Math.hypot(one.x - other.x, one.y - other.y) <= 3, `To ${name}, frame ${at}: the two are drawn as one, at ${one.x},${one.y} and ${other.x},${other.y}`);
+    }
+    assert.ok(drawn.some(frame => frame.controls.length === 2), `To ${name}: the two handed over`);
+    for (const [at, frame] of seen.entries())
+      assert.equal(frame.clones, 0, `To ${name}, frame ${at}: nothing that left is drawn again`);
+    await page.waitForTimeout(300);
+  };
+  const size = (width, height) => electron.evaluate(({ BrowserWindow }, wanted) => BrowserWindow.getAllWindows()[0].setSize(...wanted), [width, height]);
+  const balanceTop = async () => (await page.getByTestId('home-hero').boundingBox()).y;
+  await scene('home').click();
+  await page.waitForTimeout(1000);
+  await flies('send');
+  await flies('home');
+  await size(1600, 1000);
+  await page.waitForTimeout(700);
+  await flies('send');
+  await flies('home');
+  // The balance rests above the form however the window changes under it.
+  await scene('send').click();
+  await page.waitForTimeout(1000);
+  const restsAt = await balanceTop();
+  await size(1320, 760);
+  await page.waitForTimeout(800);
+  assert.ok(Math.abs(await balanceTop() - restsAt) <= 1, 'The balance stays in its band as the window changes with a scene open');
+  await flies('home');
+  await size(1320, 860);
+  await page.waitForTimeout(700);
+  await scene('send').click();
+  await page.waitForTimeout(1000);
+  checks.push('The flight from Home and back never dims and starts from the right place after a resize');
+
   // The dissolve is drawn over the page, out of a frame callback's sight, so
   // this reads what reached the screen. Beside the arrow the disc only ever
   // goes between its two looks: never darker or brighter than both, as a disc
