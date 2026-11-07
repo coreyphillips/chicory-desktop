@@ -89,7 +89,9 @@ function createOfflineCapacity(manager, { now = Date.now, wait = WAIT_MS } = {})
 
 	return async function offlineReceive(id) {
 		const record = manager.registry.get(id);
-		const primary = record?.lfbw?.primaryPubkey;
+		// With several ranked primaries the figure is the receive target's,
+		// the node the engine sends the next receive to (coreyphillips/beignet#1924).
+		const primary = record?.lfbw?.primariesReceiveTarget || record?.lfbw?.primaryPubkey;
 		if (!record || !primary || !manager.offlineReceiveAvailable()) return { maxSats: 0 };
 		// A wallet being emptied takes no new request.
 		if (manager.channelizeHeld?.(id)) return { maxSats: 0 };

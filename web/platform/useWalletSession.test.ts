@@ -703,3 +703,50 @@ test('the start state comes from the service, and reads the engine only once it 
   record = { status: 'error', healthy: false, lastStartError: { message: 'Port taken.' }, lfbw: { enabled: true } };
   assert.deepEqual(await client.startState(), { running: false, primaryConnected: false, failed: 'Port taken.' });
 });
+
+test('a start is linked when any ranked primary is connected, and the record names every one (coreyphillips/beignet#1924)', async () => {
+  const peers = [{ pubkey: 'p1', state: 'disconnected' }, { pubkey: 'p2', state: 'ready' }];
+  let record: Record<string, unknown> = {
+    status: 'running', healthy: true,
+    lfbw: { enabled: true, primaryPubkey: 'p1', primaries: [{ pubkey: 'p1' }, { pubkey: 'p2' }] },
+  };
+  const client = new UmbrelWalletClient({
+    walletId: 'w1',
+    fetch: (async (path: string) => new Response(JSON.stringify({ ok: true, result: /peers$/.test(String(path)) ? peers : record }))) as typeof fetch,
+  });
+  assert.deepEqual(await client.startState(), { running: true, primaryConnected: true }, 'rank 2 answering is a linked start');
+  peers[1].state = 'disconnected';
+  assert.deepEqual(await client.startState(), { running: true, primaryConnected: false });
+  record = { status: 'running', healthy: true, lfbw: { enabled: true, primaryPubkey: 'p1', primaries: [] } };
+  peers[0].state = 'ready';
+  assert.deepEqual(await client.startState(), { running: true, primaryConnected: true }, 'an empty list falls back to the one primary');
+});
+
+test('the watch after a start ends once any ranked primary connects, not only the first', async () => {
+  const host = new Host();
+  const ranked = (second: boolean) => ({
+    ...snapshot(record),
+    primary: { ...snapshot(record).primary, connected: false },
+    primaries: [
+      { pubkey: 'p1', rank: 1, uri: 'p1@h:1', fallbackUri: null, connected: false, setup: 'ready', balanceSat: 0, channelCount: 1, isReceiveTarget: false, selectionOrder: 1 },
+      { pubkey: 'p2', rank: 2, uri: 'p2@h:2', fallbackUri: null, connected: second, setup: 'ready', balanceSat: 0, channelCount: 1, isReceiveTarget: true, selectionOrder: 2 },
+    ],
+  });
+  let second = false;
+  host.read = async () => ranked(second);
+  host.state = async () => ({ running: true, primaryConnected: second });
+  const app = await mount(host);
+  await settle(50);
+  assert.equal(app.session.snapshot?.primary.connected, false);
+  const before = host.events.filter(event => event === 'state').length;
+  second = true;
+  await settle(450);
+  assert.equal(app.session.snapshot?.primaries?.[1].connected, true, 'the read that shows rank 2 connected lands');
+  await settle(6500);
+  const after = host.events.filter(event => event === 'state').length;
+  assert.ok(after > before, 'the start was followed until a node connected');
+  const settled = host.events.filter(event => event === 'state').length;
+  await settle(700);
+  assert.equal(host.events.filter(event => event === 'state').length, settled, 'and nothing more is asked once one is');
+});
+

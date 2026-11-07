@@ -122,9 +122,19 @@ async function startManager({
 				} catch (_) {
 					return; // truncated or not JSON after all
 				}
+				const route = String(req.originalUrl || '').replace(/^\/wallets\/[^/]+\/api/, '').split('?')[0];
+				// The dashboard edits the engine's ranked primaries directly; the
+				// record follows each write that went through, so the new node
+				// is trusted and dialed and the mirror the wallet client reads
+				// names it (coreyphillips/beignet#1924).
+				if (parsed && parsed.ok === true && req.method === 'POST' && /^\/primaries\/(add|remove|reorder|threshold)$/.test(route)) {
+					manager.syncPrimaries(req.params.id).catch((err) =>
+						manager.recordLog(req.params.id, `the ranked primaries could not be read back after ${route}: ${err.message}`)
+					);
+					return;
+				}
 				if (!parsed || parsed.ok !== false) return;
 				const err = parsed.error || {};
-				const route = String(req.originalUrl || '').replace(/^\/wallets\/[^/]+\/api/, '');
 				manager.recordLog(
 					req.params.id,
 					`${req.method} ${route} failed [${err.code || proxyRes.statusCode}] ${
@@ -237,7 +247,11 @@ async function startManager({
 				offlineReceiveAvailable: manager.offlineReceiveAvailable(),
 				// Settings > Empty wallet to an address (issue #29): the two-leg
 				// drain this manager serves when the bundled engine has its routes.
-				drainAvailable: manager.drainAvailable()
+				drainAvailable: manager.drainAvailable(),
+				// Several ranked primary nodes and an address send out of one or
+				// several channels (coreyphillips/beignet#1924, engine 0.37.0).
+				primariesAvailable: manager.primariesAvailable(),
+				channelSendAvailable: manager.channelSendAvailable()
 			}
 		});
 	});

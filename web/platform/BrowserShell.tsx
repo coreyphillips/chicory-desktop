@@ -9,6 +9,7 @@ import type { Phase } from '../chicory/src/stage/phase';
 import { normalizePaymentLink } from '../chicory/src/services/links';
 import { commandAccepted, desktopScene, desktopShortcut } from './desktop';
 import { editableTarget } from './keyboard';
+import { primariesConnected, receiveTargetConnected } from './primaries';
 
 const navigation: { name: 'home' | 'send' | 'receive' | 'activity' | 'settings'; label: string; glyph: GlyphName }[] = [
   { name: 'home', label: 'Overview', glyph: 'wallet' },
@@ -74,7 +75,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
             A relock may leave the session's wallet in memory, so the lock decides what shows. */}
         {phase.kind !== 'locked' && <div className="browser-wallet-identity" title={wallet?.name || 'Wallet'}
           data-wallet={session.walletId || undefined}>
-          <span className="browser-network" title={`${wallet?.network || session.activeProfile.network}: ${session.snapshot?.primary.connected ? 'Connected' : 'Connecting'}`}><i data-connected={!!session.snapshot?.primary.connected} /><span>{wallet?.network || session.activeProfile.network}</span></span>
+          <span className="browser-network" title={networkTitle(wallet?.network || session.activeProfile.network, session.snapshot)}><i data-connected={receiveTargetConnected(session.snapshot)} /><span>{wallet?.network || session.activeProfile.network}</span></span>
           <span className="browser-device-caption">On this computer</span>
         </div>}
       </aside>
@@ -82,3 +83,15 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
     </div>
   );
 }
+
+/**
+ * The network and whether the node the next receive goes to is connected;
+ * with several ranked primaries, how many of them answer
+ * (coreyphillips/beignet#1924).
+ */
+export function networkTitle(network: string, snapshot: Parameters<typeof receiveTargetConnected>[0]): string {
+  const state = receiveTargetConnected(snapshot) ? 'Connected' : 'Connecting';
+  const { connected, total } = primariesConnected(snapshot);
+  return total > 1 ? `${network}: ${state}, ${connected} of ${total} primaries connected` : `${network}: ${state}`;
+}
+

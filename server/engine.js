@@ -134,6 +134,37 @@ function drainAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'daemon.js', DRAIN_ROUTE_MARKERS);
 }
 
+// Ranked primaries (coreyphillips/beignet#1922, engine 0.37.0): the list of
+// liquidity nodes a wallet keeps in rank order, with the fill threshold that
+// steers a receive down it. The routes are literals in the daemon module.
+const PRIMARIES_ROUTE_MARKERS = [
+	"'GET /primaries'",
+	"'POST /primaries/add'",
+	"'POST /primaries/remove'",
+	"'POST /primaries/reorder'",
+	"'POST /primaries/threshold'"
+];
+// An address send paid out of one channel, or several in one transaction,
+// from the same engine; the wallet client prefers it to a splice-out of the
+// home channel when it is there.
+const CHANNEL_SEND_ROUTE_MARKERS = [
+	"'POST /channel-send/quote'",
+	"'POST /channel-send/execute'",
+	"'GET /channel-send/status'",
+	"'GET /channel-send/list'",
+	"'POST /channel-send/abort'"
+];
+
+/** True when the engine behind `bin` keeps a ranked list of primaries (coreyphillips/beignet#1924). */
+function primariesAvailable(bin = process.env.BEIGNET_BIN) {
+	return probe(bin, 'daemon.js', PRIMARIES_ROUTE_MARKERS);
+}
+
+/** True when the engine behind `bin` pays an address out of one or several channels. */
+function channelSendAvailable(bin = process.env.BEIGNET_BIN) {
+	return probe(bin, 'daemon.js', CHANNEL_SEND_ROUTE_MARKERS);
+}
+
 /** True when the engine behind `bin` quotes a JIT receive without an intent. */
 function jitQuoteAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'openapi.js', JIT_QUOTE_MARKERS);
@@ -197,6 +228,10 @@ function irohAvailable(bin = process.env.BEIGNET_BIN) {
 module.exports = {
 	drainAvailable,
 	DRAIN_ROUTE_MARKERS,
+	primariesAvailable,
+	PRIMARIES_ROUTE_MARKERS,
+	channelSendAvailable,
+	CHANNEL_SEND_ROUTE_MARKERS,
 	irohAvailable,
 	concurrentOfflineReceiveAvailable,
 

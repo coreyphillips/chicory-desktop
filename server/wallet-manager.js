@@ -48,6 +48,8 @@ const fullBackup = require('./full-backup');
 const {
 	engineVersion,
 	drainAvailable,
+	primariesAvailable,
+	channelSendAvailable,
 	recoveryAvailable,
 	lfbwAvailable,
 	jitQuoteAvailable,
@@ -231,6 +233,10 @@ class WalletManager {
 		this.electrumTlsVerifySupported = electrumTlsVerifyAvailable();
 		// The routes the desktop drain drives (issue #29), probed on the bundle.
 		this.drainSupported = drainAvailable();
+		// Ranked primaries and the channel send (coreyphillips/beignet#1924,
+		// engine 0.37.0), probed on the bundle the same way.
+		this.primariesSupported = primariesAvailable();
+		this.channelSendSupported = channelSendAvailable();
 		// Lightning-first setups in flight, one per wallet at a time.
 		this.lfbwSetupRunning = new Set();
 	}
@@ -238,6 +244,15 @@ class WalletManager {
 	async init() {
 		this.settings.load();
 		this.registry.load();
+		// A lightning-first record from before the ranked list reads as the
+		// one-entry list of the primary it named (coreyphillips/beignet#1924);
+		// a pure rewrite of the record, nothing is opened, closed or moved.
+		for (const rec of this.registry.list()) {
+			if (lfbw.isLfbw(rec) && !Array.isArray(rec.lfbw.primaries)) {
+				rec.lfbw = lfbw.migratePrimaries(rec.lfbw);
+				this.registry.upsert(rec);
+			}
+		}
 
 		process.stdout.write(
 			`engine: beignet ${this.engineVersion || 'unknown version'}` +
@@ -839,6 +854,14 @@ class WalletManager {
 
 	drainAvailable() {
 		return this.drainSupported === true;
+	}
+
+	primariesAvailable() {
+		return this.primariesSupported === true;
+	}
+
+	channelSendAvailable() {
+		return this.channelSendSupported === true;
 	}
 
 	/** Whether a wallet drain holds channelize back. The drain module replaces it. */
@@ -2020,7 +2043,7 @@ class WalletManager {
 			onConnect: () => this._fforReturn(id, { concurrentOnly: true }),
 			onEvent: (name, data) => {
 				if (name === 'peer:connect') {
-					if (data?.pubkey && data.pubkey === rec.lfbw?.primaryPubkey) this._markStart(id, rt, 'primary connected');
+					if (data?.pubkey && lfbw.primaryPubkeys(rec.lfbw).includes(data.pubkey)) this._markStart(id, rt, 'primary connected');
 					void this._fforReturn(id, { concurrentOnly: true, peer: data?.pubkey }).catch(err => this._log(id, `Receipt refresh failed: ${err.message}`));
 				}
 				// Channel lifecycle events (and errors naming a channel) go to the
@@ -3386,12 +3409,18 @@ class WalletManager {
 		lf.setup = 'pending';
 		lf.setupError = null;
 		this.registry.upsert(rec);
+		// The ranked list the record keeps (coreyphillips/beignet#1924) when the
+		// engine keeps one too; its first entry is the primary the steps below
+		// set up, the others follow once it is done.
+		const ranked = this.primariesAvailable() && Array.isArray(lf.primaries) && lf.primaries.length > 0;
+		const first = ranked ? lf.primaries[0] : null;
 		try {
 			await this._waitDaemonHealthy(rec);
 			await this._captureNodeId(id);
 			if (!rec.nodeId) throw new Error('the wallet did not report a node id');
 			const primary = await this._primaryEndpoint(lf);
 			lf.primaryPubkey = primary.pubkey;
+			if (first) first.pubkey = primary.pubkey;
 			this.registry.upsert(rec);
 
 			if (primary.rec) await this._ensureProviderRole(primary.rec);
@@ -3420,9 +3449,19 @@ class WalletManager {
 				lfbw.directFundingConfig(lf, primary, { allowSpliceSupported: this.lfbwAvailable() })
 			);
 
-			await this._connectPrimary(rec, primary);
+			// With other ranked primaries to fall back on, the first-ranked
+			// node being out of reach is that node's failure, not the wallet's:
+			// the others are still set up, and the engine steers a receive past
+			// it. With one primary a failed dial fails the setup, as before.
+			let firstError = null;
+			try {
+				await this._connectPrimary(rec, primary);
+			} catch (err) {
+				if (!ranked || lf.primaries.length < 2) throw err;
+				firstError = err;
+			}
 
-			if (primary.rec && lf.initialChannelSats > 0 && !lf.initialChannelOpened) {
+			if (!firstError && primary.rec && lf.initialChannelSats > 0 && !lf.initialChannelOpened) {
 				this._log(
 					id,
 					`lightning-first: opening a ${lf.initialChannelSats} sat${lf.trusted ? ' zero-conf' : ''} channel from "${primary.rec.name}"`
@@ -3444,23 +3483,233 @@ class WalletManager {
 				});
 			}
 
+			if (first) {
+				first.setup = firstError ? 'failed' : 'ready';
+				first.setupError = firstError ? firstError.message : null;
+				if (!firstError) first.setupAt = nowIso();
+			}
+			let aggregate = { setup: 'ready', setupError: null };
+			if (ranked) {
+				// The engine's list is made to agree with the record after an
+				// edit or a migration, and taken as read otherwise; then every
+				// other entry is trusted and dialed. A list that cannot be read
+				// leaves the first-ranked primary set up as before.
+				try {
+					await this._syncPrimaries(rec, { push: lf.primariesSyncedAt == null, settled: primary.pubkey, all: true });
+				} catch (err) {
+					this._log(id, `lightning-first: the ranked primaries could not be synced with the engine: ${err.message}`);
+				}
+				aggregate = lfbw.aggregateSetup(lf.primaries);
+				if (aggregate.setup !== 'ready') throw firstError || new Error(aggregate.setupError || 'no primary node could be set up');
+			}
+
 			lf.setup = 'ready';
-			lf.setupError = null;
+			lf.setupError = aggregate.setupError;
 			lf.setupAt = nowIso();
 			this.registry.upsert(rec);
-			this._log(id, 'lightning-first: setup complete');
+			this._log(
+				id,
+				firstError
+					? `lightning-first: setup complete; the first-ranked primary is out of reach (${firstError.message})`
+					: 'lightning-first: setup complete'
+			);
 			const rt = this.runtimeState(id);
-			rt.setupRetries = 0;
+			// A node that failed while the wallet works is tried again a few
+			// times; the count is not reset, so the retries stay bounded.
+			if (aggregate.setupError) this._scheduleSetupRetry(id);
+			else rt.setupRetries = 0;
 			this._markStart(id, rt, 'setup complete');
 			this._scheduleChannelize(id);
 		} catch (err) {
 			lf.setup = 'failed';
 			lf.setupError = err.message;
+			if (first && first.setup !== 'failed') {
+				first.setup = 'failed';
+				first.setupError = err.message;
+			}
 			this.registry.upsert(rec);
 			this._log(id, `lightning-first: setup failed: ${err.message}`);
 			this._scheduleSetupRetry(id);
 		} finally {
 			this.lfbwSetupRunning.delete(id);
+		}
+		return this.publicRecord(id);
+	}
+
+	/**
+	 * A ranked entry as something to connect to: the sibling wallet of an
+	 * internal one, the URI (with its onion fallback) of an external one.
+	 */
+	async _entryEndpoint(lf, entry) {
+		if (entry && entry.walletId) return this._primaryEndpoint({ ...lf, mode: 'internal', primaryWalletId: entry.walletId });
+		if (entry && entry.uri) {
+			return this._primaryEndpoint({ ...lf, mode: 'external', primaryUri: entry.uri, primaryFallbackUri: entry.fallbackUri || null });
+		}
+		return this._primaryEndpoint(lf);
+	}
+
+	/**
+	 * The engine's row for a ranked entry: host and port for a TCP or onion
+	 * node (the engine reads those back as the relay address it signs into
+	 * direct-funding requests), the canonical URI for an Iroh one.
+	 */
+	async _engineRow(lf, entry) {
+		const endpoint = await this._entryEndpoint(lf, entry);
+		if (endpoint.transport) return { pubkey: endpoint.pubkey, uri: lfbw.parseNodeUri(entry.uri).uri };
+		return { pubkey: endpoint.pubkey, host: endpoint.connectHost, port: endpoint.connectPort };
+	}
+
+	/** The sibling wallet, if any, that reports this node id. */
+	_siblingIdByNodeId(pubkey, selfId) {
+		const hit = this.registry.list().find((r) => r.id !== selfId && r.nodeId === pubkey && !r.onchainOnly);
+		return hit ? hit.id : null;
+	}
+
+	/**
+	 * Trust and dial one ranked entry beyond the first, recording the outcome
+	 * on the entry alone: a node out of reach is its own failure, and the
+	 * engine steers a receive past it. An internal sibling is made a provider
+	 * and trusts the wallet back, as the first-ranked one is.
+	 */
+	async _setupEntry(rec, entry) {
+		try {
+			const endpoint = await this._entryEndpoint(rec.lfbw, entry);
+			entry.pubkey = endpoint.pubkey;
+			if (endpoint.rec) await this._ensureProviderRole(endpoint.rec);
+			if (entry.trusted !== false) {
+				await this._daemonCall(rec, 'POST', '/trusted-peer/add', { pubkey: endpoint.pubkey });
+				if (endpoint.rec) await this._daemonCall(endpoint.rec, 'POST', '/trusted-peer/add', { pubkey: rec.nodeId });
+			}
+			await this._connectPrimary(rec, endpoint);
+			entry.setup = 'ready';
+			entry.setupError = null;
+			entry.setupAt = nowIso();
+		} catch (err) {
+			entry.setup = 'failed';
+			entry.setupError = err.message;
+			this._log(rec.id, `lightning-first: primary ${String(entry.pubkey || entry.uri || '').slice(0, 16)} could not be set up: ${err.message}`);
+		}
+	}
+
+	/**
+	 * Make the engine's ranked list and the record's agree
+	 * (coreyphillips/beignet#1924). With `push` (a record edited or migrated
+	 * since the last sync, or an engine whose list is empty) the engine is
+	 * written until it lists what the record does; otherwise the engine's list
+	 * is taken as read, since the dashboard edits it directly. The record then
+	 * mirrors the list, its threshold and the receive target, the first-ranked
+	 * entry's address becomes the block's scalar primary (direct funding
+	 * follows it when it changed), and the entries not yet set up are trusted
+	 * and dialed: every one after a start (`all`), the new ones otherwise.
+	 */
+	async _syncPrimaries(rec, { push = false, settled = null, all = false } = {}) {
+		const lf = rec.lfbw;
+		if (!this.primariesAvailable() || !lf) return;
+		let info = await this._daemonCall(rec, 'GET', '/primaries');
+		const entries = Array.isArray(lf.primaries) ? lf.primaries.filter(Boolean) : [];
+		if (push || !(info && Array.isArray(info.primaries) && info.primaries.length)) {
+			const wanted = [];
+			for (const entry of entries) {
+				try {
+					wanted.push(await this._engineRow(lf, entry));
+				} catch (err) {
+					entry.setup = 'failed';
+					entry.setupError = err.message;
+				}
+			}
+			const ops = lfbw.planPrimariesSync(info, wanted, lf.primariesThresholdSat);
+			for (const op of ops) {
+				try {
+					if (op.op === 'remove') await this._daemonCall(rec, 'POST', '/primaries/remove', { pubkey: op.pubkey });
+					else if (op.op === 'add') await this._daemonCall(rec, 'POST', '/primaries/add', op.row);
+					else if (op.op === 'reorder') await this._daemonCall(rec, 'POST', '/primaries/reorder', { order: op.order });
+					else if (op.op === 'threshold') {
+						await this._daemonCall(rec, 'POST', '/primaries/threshold', { fillThresholdSat: op.fillThresholdSat });
+					}
+				} catch (err) {
+					// A node the engine refuses (a bad address, the cap) is that
+					// entry's failure; the rest of the list still goes through.
+					if (op.op !== 'add') throw err;
+					const entry = entries.find((e) => e.pubkey === op.row.pubkey);
+					if (entry) {
+						entry.setup = 'failed';
+						entry.setupError = err.message;
+					}
+					this._log(rec.id, `lightning-first: the engine refused primary ${op.row.pubkey.slice(0, 16)}: ${err.message}`);
+				}
+			}
+			if (ops.length) info = await this._daemonCall(rec, 'GET', '/primaries');
+		}
+		const before = lf.primaryPubkey || null;
+		lf.primaries = lfbw.engineToEntries(info, entries, { siblingOf: (pubkey) => this._siblingIdByNodeId(pubkey, rec.id) });
+		lf.primariesThresholdSat = Number.isSafeInteger(info && info.fillThresholdSat) ? info.fillThresholdSat : null;
+		lf.primariesReceiveTarget = (info && info.receiveTarget) || null;
+		lf.primariesSyncedAt = nowIso();
+		for (const entry of lf.primaries) {
+			if (entry.pubkey === settled) {
+				if (entry.setup !== 'failed') {
+					entry.setup = 'ready';
+					entry.setupError = null;
+				}
+				continue;
+			}
+			if (entry.setup === 'failed' && entry.setupError && /^Unsupported primary address|^The engine holds no address/.test(entry.setupError)) continue;
+			if (all || entry.setup !== 'ready') await this._setupEntry(rec, entry);
+		}
+		const first = lf.primaries[0];
+		if (first) {
+			if (first.walletId) {
+				lf.mode = 'internal';
+				lf.primaryWalletId = first.walletId;
+				lf.primaryUri = null;
+				lf.primaryFallbackUri = null;
+			} else {
+				lf.mode = 'external';
+				lf.primaryWalletId = null;
+				lf.primaryUri = first.uri;
+				lf.primaryFallbackUri = first.fallbackUri || null;
+			}
+			lf.primaryPubkey = first.pubkey;
+			lf.trusted = first.trusted !== false;
+			// Direct funding names the first-ranked primary as its liquidity
+			// peer and relay; a list whose head moved re-arms it.
+			if (before && first.pubkey !== before) {
+				const endpoint = await this._entryEndpoint(lf, first).catch(() => null);
+				if (endpoint) {
+					await this._daemonCall(
+						rec,
+						'POST',
+						'/direct-funding/configure',
+						lfbw.directFundingConfig(lf, endpoint, { allowSpliceSupported: this.lfbwAvailable() })
+					);
+				}
+			}
+		}
+		this.registry.upsert(rec);
+	}
+
+	/**
+	 * The record follows an edit the dashboard made to the engine's ranked
+	 * list (a node added, removed or moved, the threshold changed): the list
+	 * is read back and mirrored, a new node is trusted and dialed, and the
+	 * wallet's setup state is the aggregate over its entries.
+	 */
+	async syncPrimaries(id) {
+		const rec = this.registry.get(id);
+		if (!rec) throw httpError(404, 'NOT_FOUND', 'Wallet not found');
+		if (!lfbw.isLfbw(rec)) throw httpError(400, 'NOT_LFBW', 'Not a lightning-first wallet');
+		if (!this.primariesAvailable()) throw httpError(400, 'PRIMARIES_UNSUPPORTED', 'The bundled engine keeps one primary node');
+		const rt = this.runtimeState(id);
+		if (!rt.proc || !rt.healthy) throw httpError(503, 'NOT_RUNNING', 'Wallet is not running');
+		// A setup in flight mirrors the list itself when it finishes.
+		if (this.lfbwSetupRunning.has(id)) return this.publicRecord(id);
+		await this._syncPrimaries(rec);
+		const lf = rec.lfbw;
+		if (lf.setup !== 'pending') {
+			const aggregate = lfbw.aggregateSetup(lf.primaries);
+			lf.setup = aggregate.setup;
+			lf.setupError = aggregate.setupError;
+			this.registry.upsert(rec);
 		}
 		return this.publicRecord(id);
 	}
@@ -4079,11 +4328,14 @@ class WalletManager {
 			for (const channel of channels || []) {
 				if (channel.ffor && !['CLOSED', 'ABORTED'].includes(channel.ffor.state)) reserved.add(channel.channelId);
 			}
+			// With several ranked primaries a deposit moves toward the engine's
+			// receive target (coreyphillips/beignet#1924); with one, as before.
+			const toward = lfbw.receiveTargetEntry(lf);
 			const target = lfbw.channelizeTarget({
 				onchainSats,
 				utxos,
 				channels,
-				primaryPubkey: lf.primaryPubkey
+				primaryPubkey: (toward && toward.pubkey) || lf.primaryPubkey
 			});
 			if (target.action === 'splice-in' && reserved.has(target.channelId)) return decided({ action: 'wait', reason: 'offline-receive' });
 			if (target.action === 'wait') return decided(target);
@@ -4105,13 +4357,14 @@ class WalletManager {
 					max: true,
 					channelFunding: true
 				}).catch(() => null);
-				primary = await this._primaryEndpoint(lf);
-				const info = lf.mode === 'external' ? await this._daemonCall(rec, 'GET', '/info').catch(() => null) : null;
+				primary = toward ? await this._entryEndpoint(lf, toward) : await this._primaryEndpoint(lf);
+				const towardMode = toward ? (toward.walletId ? 'internal' : 'external') : lf.mode;
+				const info = towardMode === 'external' ? await this._daemonCall(rec, 'GET', '/info').catch(() => null) : null;
 				order = lfbw.channelizeOrder(target, {
 					txQuote,
 					feeNormal,
-					mode: lf.mode,
-					trusted: lf.trusted,
+					mode: towardMode,
+					trusted: toward ? toward.trusted !== false : lf.trusted,
 					blockHeight: (info && info.blockHeight) || 0,
 					primary,
 					force
