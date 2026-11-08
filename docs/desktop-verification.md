@@ -145,6 +145,20 @@ no single channel carries is estimated as the split the payment would make
 instead of being refused as no route (coreyphillips/beignet#1969). The full
 run and the packaged build remain release work.
 
+Version 0.3.6 was published on 2026-11-08 (UTC) as the latest release, tag
+`v0.3.6` on `a4db2e7`, built, signed and notarized on the owner's Mac for Apple
+Silicon, with the signed update manifest: `Chicory-0.3.6-mac-arm64.dmg`
+(263,026,065 bytes, SHA-256 `c4c355033275db30544ef2c5ea8a110db7f4f559b4a29b8121c20e94c577b916`),
+`Chicory-0.3.6-mac-arm64.zip` (256,669,518 bytes, SHA-256
+`41928bb92271d1c5baaa87aa130c73c993bf76f3ef76a2b6db23c8b294f19140`),
+`SHA256SUMS`, `update-manifest.json` and `update-manifest.json.sig`. Checked
+logged out, as an installed app sees it: GitHub reports 0.3.6 as the latest
+release, all five files are public, a 0.3.5 install accepts the signed
+manifest, and the downloaded zip matches its published checksum. The packaged
+app was not qualified before publishing: the fresh install, the upgrade over
+a funded 0.3.5 and the update-path checks in [releases.md](releases.md) remain
+to be run and recorded here.
+
 The release workflow, signed update manifest and manual update path are
 described in [releases.md](releases.md). The workflow stays unused until the
 owner's signing identities are configured on GitHub.
