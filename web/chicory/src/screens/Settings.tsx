@@ -38,6 +38,7 @@ import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { unlockGlyph } from '../scenes/phases/visual';
 import { EmptyWallet } from '../scenes/settings/EmptyWallet';
 import { PrimariesPanel } from '../scenes/settings/PrimariesPanel';
+import { DEFAULT_FILL_TARGET_SATS } from '../scenes/settings/primariesModel';
 import { DiagnosticsPanel } from '../scenes/settings/Diagnostics';
 import { useFieldScan } from '../scenes/settings/fieldScan';
 import { AutoPayGlyph, HapticsGlyph } from '../scenes/settings/glyphMotion';
@@ -1330,6 +1331,14 @@ export function SettingsScreen({
       const policy = await client.addPrimary(
         fallbackUri === undefined ? { uri } : { uri, fallbackUri },
       );
+      // A second node brings the fill target: without one every receive
+      // would still go to rank 1 while it answers. The field under the list
+      // shows it, so it is the owner's to change.
+      if (policy.primaries.length >= 2 && policy.thresholdSat == null) {
+        await client
+          .setPrimariesThreshold(DEFAULT_FILL_TARGET_SATS)
+          .catch(() => undefined);
+      }
       done();
       onRefresh();
       const added = policy.primaries.find(entry => uri.startsWith(entry.pubkey));
@@ -1348,24 +1357,20 @@ export function SettingsScreen({
       return { phase: 'success' as const, message: words.primaries.removed };
     });
   }
-  async function movePrimary(pubkey: string, direction: 'up' | 'down') {
+  // A drop in the list asks for the whole order. The panel keeps the
+  // dropped order drawn while the engine is asked, and goes back to the
+  // engine's if it refuses, so it is told whether the engine took it.
+  async function reorderPrimaryList(order: string[]): Promise<boolean> {
+    let saved = false;
     await run(words.primaries.reordering, async () => {
-      const order = (snapshot.primaries ?? [])
-        .slice()
-        .sort((a, b) => a.rank - b.rank)
-        .map(entry => entry.pubkey);
-      const at = order.indexOf(pubkey);
-      const to = direction === 'up' ? at - 1 : at + 1;
-      if (at >= 0 && to >= 0 && to < order.length) {
-        order.splice(at, 1);
-        order.splice(to, 0, pubkey);
-        await client.reorderPrimaries(order);
-        onRefresh();
-      }
+      await client.reorderPrimaries(order);
+      saved = true;
+      onRefresh();
       return { phase: 'success' as const, message: words.primaries.reordered };
     });
+    return saved;
   }
-  async function saveThreshold(sats: number | null) {
+  async function saveThreshold(sats: number) {
     await run(words.primaries.savingThreshold, async () => {
       await client.setPrimariesThreshold(sats);
       onRefresh();
@@ -1451,7 +1456,7 @@ export function SettingsScreen({
                   symbol={symbol}
                   onAdd={addPrimaryEntry}
                   onRemove={removePrimaryEntry}
-                  onMove={movePrimary}
+                  onReorder={reorderPrimaryList}
                   onThreshold={saveThreshold}
                   onRetry={retry}
                 />

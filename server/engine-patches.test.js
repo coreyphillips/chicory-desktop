@@ -7,7 +7,7 @@ const os = require('node:os');
 const vm = require('node:vm');
 const { payments, networks } = require('bitcoinjs-lib');
 
-async function fixture(t, version = '0.38.0') {
+async function fixture(t, version = '0.38.1') {
   const patch = await import('../scripts/apply-engine-patches.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chicory-engine-patch-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

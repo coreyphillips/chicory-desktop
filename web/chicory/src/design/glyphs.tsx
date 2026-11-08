@@ -273,6 +273,14 @@ export const GLYPHS = {
     },
     { id: 'bolt', d: 'M12.4 6.6 7.6 13.2h3.6l-.6 4.2 4.8-6.6h-3.6z' },
   ],
+  // Two columns of three dots: the handle a ranked primary node is dragged
+  // by in Settings.
+  grip: [
+    {
+      id: 'grip',
+      d: 'M9.5 7v.01M14.5 7v.01M9.5 12v.01M14.5 12v.01M9.5 17v.01M14.5 17v.01',
+    },
+  ],
 } satisfies Record<string, GlyphPart[]>;
 
 export type GlyphName = keyof typeof GLYPHS;

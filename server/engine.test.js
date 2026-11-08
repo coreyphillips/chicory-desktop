@@ -214,7 +214,7 @@ test('Electrum certificate verification needs the env parser and the option wiri
 
 test('ranked primaries and the channel send are probed on the daemon module (coreyphillips/beignet#1924)', () => {
 	const { primariesAvailable, channelSendAvailable, PRIMARIES_ROUTE_MARKERS, CHANNEL_SEND_ROUTE_MARKERS } = require('./engine');
-	const { root, bin } = fakeInstall('0.38.0');
+	const { root, bin } = fakeInstall('0.38.1');
 	const dir = path.dirname(bin);
 	try {
 		assert.equal(primariesAvailable(bin), false, 'no daemon module at all');

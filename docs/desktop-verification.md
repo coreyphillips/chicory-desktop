@@ -120,21 +120,30 @@ notarization.
 was verified against the pinned key after publishing. No qualification run is
 recorded for this package, so funded flows remain unqualified.
 
-Version 0.3.6 adds several ranked primary nodes (coreyphillips/beignet#1924).
-On 2026-11-07 the source checkout (not a package) ran the regtest qualification
-stages `preflight`, `payments` and `primaries` on macOS Apple Silicon against
-the bundled Beignet 0.38.0 and wallet-core `9027384`: 7 checks passed, direct
-funding skipped as always. The `primaries` stage added a second funded,
-liquidity-providing node through the wallet client; the engine ranked it second
-and the local manager's record followed with both nodes set up. A fill target
-of 1,000 sats made the second node the receive target and the manager mirrored
-it. A receive of 45,001 sats, above the 25,001 sats the home channel could
-take, was quoted at the second node (the engine's steering), while a 1,000 sat
-receive named no node, as before. The second node opened the wallet's channel
-zero-conf and paid 30,000 sats over it; after the target was cleared and the
-node removed, the list held one node and the total rose from 389,096 to 419,096
-sats, so the channel with the removed node still counts. The full run and the
-packaged build remain release work.
+Version 0.3.6 adds several ranked primary nodes (coreyphillips/beignet#1924)
+and moves to Beignet 0.38.1. On 2026-11-07 the source checkout (not a package)
+ran the regtest qualification stages `preflight`, `payments` and `primaries` on
+macOS Apple Silicon against the bundled Beignet 0.38.1 and wallet-core
+`9027384`: 7 checks passed, direct funding skipped as always, and the guards
+reported the `primaries` and `channelSend` capabilities. The `primaries` stage
+added a second funded, liquidity-providing node through the wallet client; the
+engine ranked it second and the local manager's record followed with both
+nodes set up. A fill target of 1,000 sats made the second node the receive
+target and the manager mirrored it. A receive of 45,001 sats, above the 25,001
+sats the home channel could take, was quoted at the second node (the engine's
+steering), while a 1,000 sat receive named no node, as before. The second node
+opened the wallet's channel zero-conf and paid 30,000 sats over it; after the
+target was cleared and the node removed, the list held one node and the total
+rose from 389,096 to 419,096 sats, so the channel with the removed node still
+counts. The same run had passed on 0.38.0 earlier that day. The interface is
+re-vendored from Chicory `d8c0f26`, which draws Settings > Primary nodes as a
+list: one row a node with its host, its connection and a bar of how full it is,
+dragged up or down by a grip, opened for its address and a two-press remove,
+with the fill target field appearing once there are two nodes; the 96 gallery
+states render at both widths. What 0.38.1 changes for the desktop: a payment
+no single channel carries is estimated as the split the payment would make
+instead of being refused as no route (coreyphillips/beignet#1969). The full
+run and the packaged build remain release work.
 
 The release workflow, signed update manifest and manual update path are
 described in [releases.md](releases.md). The workflow stays unused until the
