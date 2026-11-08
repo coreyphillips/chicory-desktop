@@ -351,6 +351,13 @@ const settingsShots: Shot[] = [
     }),
     steps: [press(words.primaries.heading), press(words.primaries.add)],
   })),
+  settings('one ranked primary node', () => ({
+    snapshot: onMainnet({ primaries: [primaryOf(1)] }),
+    client: clientOf({
+      getConfig: async () => configOf({ primariesAvailable: true, drainAvailable: true }),
+    }),
+    steps: [press(words.primaries.heading)],
+  })),
   settings('changing the primary node', () => ({
     steps: [press(words.primary.heading), press(words.primary.change)],
   })),

@@ -105,36 +105,39 @@ export const settings = {
 
   /**
    * The Primary node row when the wallet ranks several primaries
-   * (coreyphillips/beignet#1924): the list, each node's state, what moves
-   * one up or down, what removes one, the soft fill target, and the way to
-   * add another. The add form keeps the one-primary panel's control names,
-   * which the suites look up.
+   * (coreyphillips/beignet#1924): the list of nodes, each with how full it
+   * is, the way to drag one up or down, to open one for its address and to
+   * remove it, the fill target the list shares once there are two, and the
+   * way to add another. The add form keeps the one-primary panel's control
+   * names, which the suites look up.
    */
   primaries: {
     heading: 'Primary nodes',
     count: (connected: number, total: number) =>
       `${connected} of ${total} connected`,
-    intro:
-      'A receive goes to the first node in rank order that is below the fill target, else to the one holding the least. Existing channels stay whatever the order.',
     rank: (rank: number) => `Rank ${rank}`,
+    /** The bolt beside the node the next receive goes to, and its words. */
     receiveTarget: 'Next receive goes here',
-    balance: 'Balance',
+    /** What a full bar stands for, under a node's balance. */
+    of: (amount: string) => `of ${amount}`,
+    channelsLabel: 'Channels',
     channels: (count: number) =>
       count === 1 ? '1 channel' : `${count} channels`,
     noChannel: 'No channel yet',
-    moveUp: (rank: number) => `Move rank ${rank} up`,
-    moveDown: (rank: number) => `Move rank ${rank} down`,
-    remove: (rank: number) => `Remove rank ${rank}`,
+    /** A screen reader's way to reorder, where a finger drags the grip. */
+    moveUp: 'Move up',
+    moveDown: 'Move down',
+    showDetails: 'Shows the node address and more',
+    hideDetails: 'Hides the node address',
+    remove: 'Remove node',
     removeKeeps:
-      'Existing channels and funds with this node stay in your wallet. It is no longer used for new receives.',
+      'Its channels and funds stay in your wallet. New receives stop going to it.',
     confirmRemove: 'Remove this primary node',
     add: 'Add a primary node',
-    addHint:
-      'The new node is trusted for instant funding and ranked last. Rank it higher afterwards if you want receives to go there first.',
-    threshold: 'Soft fill target',
+    addHint: 'The new node is ranked last. Drag it up to fill it sooner.',
+    threshold: 'Fill target in sats',
     thresholdHint:
-      'Sats of balance a node is filled to before receives move on to the next. Leave it empty to turn the target off: the first node then takes every receive.',
-    thresholdOff: 'Off',
+      'Receives fill each node to this amount, in rank order, before moving on to the next.',
     saveThreshold: 'Save fill target',
     retryAll: 'Retry connections',
     adding: 'Adding your primary node…',

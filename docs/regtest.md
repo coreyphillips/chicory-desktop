@@ -22,13 +22,13 @@ writable. This is test infrastructure, separate from the app container.
 
 ## Prepare the host engine
 
-The production image installs Beignet 0.38.0 and applies the project-owned
+The production image installs Beignet 0.38.1 and applies the project-owned
 fresh-address and zero-reserve patches during its engine stage. For local development, install
 the engine in a separate directory rather than patching a source checkout:
 
 ```sh
 mkdir -p /tmp/chicory-regtest-engine
-npm install --prefix /tmp/chicory-regtest-engine beignet@0.38.0
+npm install --prefix /tmp/chicory-regtest-engine beignet@0.38.1
 node scripts/apply-engine-patches.mjs /tmp/chicory-regtest-engine/node_modules/beignet
 ```
 
@@ -114,7 +114,7 @@ request's amount is checked against its owned invoice and URI. Receipt lookup
 sums only the exact address outputs of transactions whose IDs match their raw
 bytes.
 
-Beignet 0.38.0, like 0.36.1, reports completed outgoing payment amounts as total
+Beignet 0.38.1, like 0.36.1, reports completed outgoing payment amounts as total
 debit with fees included. The manager names that specific version's semantics explicitly.
 The browser adapter projects a recipient amount only for those explicitly
 marked completed records with known fees, preserving the original debit and

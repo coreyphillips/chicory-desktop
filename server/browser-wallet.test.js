@@ -162,7 +162,7 @@ test('only the verified engine version names completed outgoing debit semantics 
   const pending = { ...outgoing, status: 'PENDING' };
   const manager = {
     registry: { get: id => id === 'wallet-one' ? f.options.record : null },
-    paths: () => ({ base: path.dirname(f.file) }), engineVersion: '0.38.0',
+    paths: () => ({ base: path.dirname(f.file) }), engineVersion: '0.38.1',
     _daemonCall: async () => [outgoing, incoming, pending],
   };
   const app = express(); mountBrowserWalletApi(app, manager);

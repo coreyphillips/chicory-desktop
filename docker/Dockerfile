@@ -18,7 +18,7 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 FROM ${NODE_IMAGE} AS engine
-ARG BEIGNET_VERSION=0.38.0
+ARG BEIGNET_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/beignet
 RUN echo '{"private":true,"allowScripts":{"better-sqlite3":true}}' > package.json

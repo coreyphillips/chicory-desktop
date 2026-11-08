@@ -1,14 +1,14 @@
 {
   "chicory": {
     "repository": "https://github.com/coreyphillips/chicory",
-    "commit": "7f52b92eab62a196c4f0f6c991312beb1466af23",
+    "commit": "d8c0f26e2e3bbfa126135262db84c37dca660047",
     "destination": "web/chicory",
     "license": "MIT",
     "notes": "Production UI snapshot with browser adapters, static imports and public network defaults. Tests and native platform projects are excluded."
   },
   "chicory-gallery": {
     "repository": "https://github.com/coreyphillips/chicory",
-    "commit": "7f52b92eab62a196c4f0f6c991312beb1466af23",
+    "commit": "d8c0f26e2e3bbfa126135262db84c37dca660047",
     "destination": "web/gallery",
     "license": "MIT",
     "notes": "native-tests/gallery and test-support/fixtures.ts, adapted for host sessions, browser holds and aliased sealed stand-ins. Built only by vite.gallery.config.ts."
@@ -25,7 +25,7 @@
     "commit": "90273846381bbc6775bc5a9a1d27409a18ee0744",
     "destination": "package.json dependency"
   },
-  "engineVersion": "0.38.0",
+  "engineVersion": "0.38.1",
   "enginePatches": [
     "scripts/apply-engine-patches.mjs",
     "scripts/apply-storage-encryption.mjs"
