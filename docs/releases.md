@@ -1,7 +1,8 @@
 # Releases and updates
 
-[v0.3.0](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.0) is the first signed release. It covers macOS Apple Silicon only, was
-built on the owner's Mac, and has no recorded qualification run. Every other
+[v0.3.0](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.0) was the first signed release and
+[v0.3.6](https://github.com/coreyphillips/chicory-desktop/releases/tag/v0.3.6) is the latest. Both cover macOS Apple Silicon only and were
+built on the owner's Mac; neither package has a recorded qualification run. Every other
 package is a development build: its file name contains `development`, the About
 panel says "development build" and the app has no update channel.
 
