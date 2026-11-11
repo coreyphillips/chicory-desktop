@@ -515,6 +515,28 @@ try {
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);
+  await size(960, 720);
+  const zoom = factor => electron.evaluate(({ BrowserWindow }, scale) =>
+    BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(scale), factor);
+  await zoom(1.3);
+  await expect(page.locator('[data-chicory-canvas]')).toHaveAttribute('data-desktop', 'false');
+  const longNote = 'Sample reservation reference\n' + 'AB0123456789'.repeat(32) + '\nTable for four.';
+  await addNote.click();
+  await noteField.fill(longNote);
+  await saveNote.click();
+  const saved = detail.getByLabel('Private note, ' + longNote, { exact: true });
+  assert.ok(await saved.evaluate(row => row.scrollWidth <= row.clientWidth + 1),
+    'An unbroken reference wraps inside the note column');
+  assert.ok(Math.abs((await saved.locator('svg').boundingBox()).width - 20) < 1,
+    'A long private note preserves its lock glyph');
+  await editNote.click();
+  await expect(noteField).toHaveValue(longNote);
+  await noteField.fill('');
+  await saveNote.click();
+  await expect(addNote).toBeFocused();
+  checks.push('At 130 percent zoom a long private note wraps and can be reopened in the compact window');
+  await zoom(1);
+  await size(1320, 860);
   await nativeMenu('Overview');
   await nativeMenu('Receive');
   await screenshot('desktop-reduced-motion');

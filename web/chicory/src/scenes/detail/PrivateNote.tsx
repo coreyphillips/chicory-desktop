@@ -177,7 +177,7 @@ const styles = StyleSheet.create({
   // beginning of the noninteractive memo and inside the row's bounds.
   leadingPencil: { marginEnd: 20 - TARGET, zIndex: 1 },
   fill: { flex: 1 },
-  note: { ...typography.row, flex: 1, color: palette.steam },
+  note: { ...typography.row, flex: 1, minWidth: 0, color: palette.steam },
   editor: { gap: space.xs },
   input: {
     ...typography.row,

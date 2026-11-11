@@ -408,7 +408,7 @@ const styles = StyleSheet.create({
     gap: space.sm,
   },
   value: { ...typography.row, color: palette.cream },
-  note: { flex: 1, color: palette.steam },
+  note: { flex: 1, minWidth: 0, color: palette.steam },
   dim: { color: palette.dust },
   chips: { gap: space.xs },
   // Its content's width, and no wider than the line leaves it.
