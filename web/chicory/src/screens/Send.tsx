@@ -1475,7 +1475,7 @@ export function SendScreen({
   if (scanning) {
     return (
       <Scanner
-        onDetected={(code: string) => accept(code, true)}
+        onDetected={(code, source) => accept(code, source === 'camera')}
         onCancel={() => setScanning(false)}
         test={test}
       />

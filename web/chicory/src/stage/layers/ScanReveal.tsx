@@ -26,7 +26,7 @@ import { steady } from '../../motion/steady';
 import { curves, durations, springs } from '../../motion/tokens';
 import { useMotionPrefs } from '../../motion/useMotionPrefs';
 import { STATUS_ROW, WELL_DROP } from '../layout';
-import type { Point, ScanPurpose, ScanTarget } from '../scene';
+import type { Point, ScanPurpose, ScanSource, ScanTarget } from '../scene';
 import { localPoint } from '../../../../platform/geometry';
 
 /** The scan button's diameter on Home, which the disc grows out of. */
@@ -362,7 +362,7 @@ export interface ScanRevealProps {
   validate?: (value: string) => string;
   /** The Settings field a code read fills, in the window. */
   into?: Point | null;
-  onDetected: (value: string) => void;
+  onDetected: (value: string, source: ScanSource) => void;
   onCancel: () => void;
   /**
    * A wallet on a test network: slate's night in place of bloom's on the
@@ -460,9 +460,9 @@ export function ScanReveal({
 
   // The disc's exit reads `caught` to tell a code read from a close.
   const detected = useCallback(
-    (value: string) => {
+    (value: string, source: ScanSource) => {
       caught.set(1);
-      onDetected(value);
+      onDetected(value, source);
     },
     [caught, onDetected],
   );

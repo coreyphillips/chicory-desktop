@@ -16,6 +16,7 @@ import {
   useSceneBack,
   useStage,
 } from '../../stage/StageContext';
+import type { ScanSource } from '../../stage/scene';
 import { useScanReceiver } from '../../stage/useScanReceiver';
 import { anyPrimaryConnected, isTestNetwork } from '../home/visual';
 import { slotRoom } from '../receive/host';
@@ -101,7 +102,11 @@ export function SendScene({
     [actions],
   );
   useScanReceiver(
-    useCallback((code: string) => screen.current?.receive(code, true), []),
+    useCallback(
+      (code: string, source: ScanSource) =>
+        screen.current?.receive(code, source === 'camera'),
+      [],
+    ),
     current && armed,
   );
   useSceneBack(() => screen.current?.back() ?? false, usePaneActive());

@@ -6,7 +6,8 @@
     "license": "MIT",
     "notes": "Production UI snapshot with browser adapters, static imports and public network defaults. Tests and native platform projects are excluded.",
     "overlays": {
-      "ambientIdleClock": "2855c7e28b7b32a1810af51341e86265389bd20a"
+      "ambientIdleClock": "2855c7e28b7b32a1810af51341e86265389bd20a",
+      "paymentImageScan": "dedc54a9c29b6262c413c028c238d1e97a5d0376"
     }
   },
   "chicory-gallery": {

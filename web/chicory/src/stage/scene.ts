@@ -13,6 +13,9 @@ export type Point = { x: number; y: number };
  */
 export type ScanPurpose = 'payment' | 'primary' | 'address';
 
+/** Only the live camera may hand a payment to Auto-pay. */
+export type ScanSource = 'camera' | 'clipboard' | 'photo';
+
 /**
  * Where a scanned code goes: a new Send from home, the Send already open,
  * or the Settings field that asked for it.
@@ -98,7 +101,7 @@ export type StageAction =
   | { type: 'tab'; tab: Tab }
   | { type: 'link'; request: string }
   | { type: 'overlay'; overlay: Unkeyed<NonNullable<Overlay>> }
-  | { type: 'scanned'; value: string }
+  | { type: 'scanned'; value: string; source: ScanSource }
   | { type: 'busy'; busy: boolean }
   | { type: 'step'; step: string | null };
 
@@ -311,7 +314,7 @@ export function stageReducer(
       if (state.overlay.target !== 'home') {
         return settle(state, { overlay: null });
       }
-      return sendOver(state, action.value, true);
+      return sendOver(state, action.value, action.source === 'camera');
     case 'busy':
       return state.busy === action.busy
         ? state

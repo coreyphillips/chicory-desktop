@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
 import electronPath from 'electron';
+import QRCode from 'qrcode';
 import { bech32Encode, convertBits } from '../../node_modules/@beignet/wallet-core/src/payment-uri.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -137,6 +138,43 @@ try {
   await expect(page.getByTestId('scan-disc')).toHaveCount(0);
   await page.waitForTimeout(800);
   checks.push('Overview balance, Send, Receive and Scan answer a click');
+
+  await homeAction('Scan a payment request').click();
+  const chooseImage = page.getByRole('button', { name: 'Choose QR image', exact: true });
+  await expect(chooseImage).toBeVisible();
+  await page.waitForTimeout(900);
+  await screenshot('desktop-scan-image');
+  const photoRequest = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(9), 8, 5, true)]);
+  async function chooseScreenshot(buffer) {
+    const chooserOpen = page.waitForEvent('filechooser');
+    await chooseImage.focus();
+    await page.keyboard.press('Enter');
+    await (await chooserOpen).setFiles({ name: 'payment.png', mimeType: 'image/png', buffer });
+  }
+  const otherRequest = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(10), 8, 5, true)]);
+  const images = await Promise.all([photoRequest, otherRequest].map(request => QRCode.toDataURL(request)));
+  const pair = await page.evaluate(async urls => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 256;
+    const context = canvas.getContext('2d');
+    for (const [index, url] of urls.entries()) {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      context.drawImage(image, index * 256, 0, 256, 256);
+    }
+    return canvas.toDataURL('image/png').split(',')[1];
+  }, images);
+  await chooseScreenshot(Buffer.from(pair, 'base64'));
+  await expect(chooseImage).toHaveAccessibleDescription('Choose an image with only one payment code.');
+  await expect(chooseImage).toBeFocused();
+  await chooseScreenshot(await QRCode.toBuffer(photoRequest));
+  await expect(page.getByRole('button', { name: 'Payment request or address', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Payment request or address', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Payment request or address', exact: true })).toHaveValue(photoRequest);
+  await nativeMenu('Overview');
+  checks.push('Screenshot scan rejects two payment codes, restores keyboard focus, and fills Send from one code');
 
   // Between Send and Receive there is one control, whole, that stays where it
   // is, however the switch is asked for and at any window size. Every frame is

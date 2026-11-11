@@ -2,18 +2,20 @@ import React, {
   memo,
   useCallback,
   useEffect,
+  useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import {
-  AppState,
   Pressable,
   StyleSheet,
   View,
   useWindowDimensions,
 } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
+import { pickQrImage } from '../../../platform/qrImage';
 import * as BrowserCamera from '../../../platform/cameraKit';
 import Clipboard from '@react-native-clipboard/clipboard';
 import Reanimated, {
@@ -46,8 +48,9 @@ import { steady } from '../motion/steady';
 import { curves, durations, overlap, shake, springs } from '../motion/tokens';
 import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { normalizePaymentLink } from '../services/links';
+import { useAppActive } from '../scenes/home/useAppActive';
 import { STATUS_ROW } from '../stage/layout';
-import type { ScanPurpose } from '../stage/scene';
+import type { ScanPurpose, ScanSource } from '../stage/scene';
 import { duringSystemPrompt } from '../stage/systemPrompt';
 import { focusOn } from '../motion/focus';
 import { HIT_SLOP, space } from '../theme';
@@ -166,6 +169,22 @@ export function refusal(value: string): string | null {
   return null;
 }
 
+/** Keep only the distinct payable codes in the selected image. */
+function paymentFromImage(
+  codes: string[],
+): { value: string } | { reason: string } {
+  const distinct = [...new Set(codes.map(code => code.trim()).filter(Boolean))];
+  let value: string | undefined;
+  let reason: string = copy.scan.noImageCode;
+  for (const code of distinct) {
+    const invalid = refusal(code);
+    if (invalid) reason = invalid;
+    else if (value) return { reason: copy.scan.severalImageCodes };
+    else value = code;
+  }
+  return value ? { value } : { reason };
+}
+
 /**
  * What the scanner says for a scan of `purpose`, none of it drawn: its
  * name, what the reticle tells a screen reader the camera is for, what to do
@@ -176,6 +195,7 @@ export interface ScanWords {
   title: string;
   privacy: string;
   noCamera: string;
+  missingHint: string;
   detected: string;
   invalid: string;
 }
@@ -185,6 +205,7 @@ const WORDS: Record<ScanPurpose, ScanWords> = {
     title: copy.scan.title,
     privacy: copy.scan.privacy,
     noCamera: copy.scan.noCamera,
+    missingHint: copy.scan.missingHint,
     detected: copy.scan.detected,
     invalid: copy.scan.invalid,
   },
@@ -192,6 +213,7 @@ const WORDS: Record<ScanPurpose, ScanWords> = {
     title: copy.scan.primaryTitle,
     privacy: copy.scan.primaryPrivacy,
     noCamera: copy.scan.primaryNoCamera,
+    missingHint: copy.scan.missingFieldHint,
     detected: copy.scan.primaryDetected,
     invalid: copy.scan.primaryInvalid,
   },
@@ -199,6 +221,7 @@ const WORDS: Record<ScanPurpose, ScanWords> = {
     title: copy.scan.addressTitle,
     privacy: copy.scan.addressPrivacy,
     noCamera: copy.scan.addressNoCamera,
+    missingHint: copy.scan.missingFieldHint,
     detected: copy.scan.addressDetected,
     invalid: copy.scan.addressInvalid,
   },
@@ -314,23 +337,6 @@ function reticlePath(side: number): string {
   return CORNERS.map(({ dx, dy }) =>
     cornerPath(dx > 0 ? 0 : side, dy > 0 ? 0 : side, dx, dy),
   ).join('');
-}
-
-/**
- * Whether the app is in front. Loops stop in the background, and a camera
- * the user switched on in the device settings is found on the way back.
- */
-function useForeground(): boolean {
-  const [foreground, setForeground] = useState(
-    AppState.currentState !== 'background',
-  );
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', state =>
-      setForeground(state !== 'background'),
-    );
-    return () => subscription.remove();
-  }, []);
-  return foreground;
 }
 
 /**
@@ -691,13 +697,16 @@ function GlyphButton({
   onPress,
   reduced,
   refused,
+  buttonRef,
 }: {
   glyph: GlyphName;
   label: string;
   onPress: () => void | Promise<void>;
   reduced: boolean;
   refused?: { count: number; reason: string };
+  buttonRef?: React.Ref<React.ComponentRef<typeof View>>;
 }) {
+  const reasonId = useId();
   const press = useSharedValue(1);
   const nudge = useSharedValue(0);
   const ring = useSharedValue(0);
@@ -729,27 +738,29 @@ function GlyphButton({
     press.set(reduced ? 1 : withSpring(value, springs.snap));
   return (
     <Reanimated.View style={style}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={label}
-        accessibilityValue={
-          refused?.reason ? { text: refused.reason } : undefined
-        }
-        hitSlop={HIT_SLOP}
-        onPressIn={() => to(0.94)}
-        onPressOut={() => to(1)}
-        onPress={() => {
-          haptics.tick();
-          return onPress();
-        }}
-        style={styles.control}
-      >
-        <Glyph name={glyph} size={24} color={palette.cream} />
-        <Reanimated.View
-          pointerEvents="none"
-          style={[styles.ring, ringStyle]}
-        />
-      </Pressable>
+      <div title={refused?.reason || label}>
+        {refused?.reason ? <span id={reasonId} hidden>{refused.reason}</span> : null}
+        <Pressable
+          ref={buttonRef}
+          accessibilityRole="button"
+          accessibilityLabel={label}
+          aria-describedby={refused?.reason ? reasonId : undefined}
+          hitSlop={HIT_SLOP}
+          onPressIn={() => to(0.94)}
+          onPressOut={() => to(1)}
+          onPress={() => {
+            haptics.tick();
+            return onPress();
+          }}
+          style={styles.control}
+        >
+          <Glyph name={glyph} size={24} color={palette.cream} />
+          <Reanimated.View
+            pointerEvents="none"
+            style={[styles.ring, ringStyle]}
+          />
+        </Pressable>
+      </div>
     </Reanimated.View>
   );
 }
@@ -776,7 +787,7 @@ function CameraOff({
         accessible
         accessibilityRole="image"
         accessibilityLabel={label}
-        accessibilityHint={denied ? words.noCamera : copy.scan.missingHint}
+        accessibilityHint={denied ? words.noCamera : words.missingHint}
         style={styles.status}
       >
         <Glyph
@@ -823,7 +834,7 @@ export function Scanner({
   onAccess,
   test = false,
 }: {
-  onDetected: (value: string) => void;
+  onDetected: (value: string, source: ScanSource) => void;
   validate?: (value: string) => string;
   /**
    * What the scan is for: a payment request, a primary node's address, or
@@ -851,7 +862,7 @@ export function Scanner({
   const words = scanWords(purpose);
   const [access, setAccess] = useState<CameraAccess>(firstAccess);
   const { reduced } = useMotionPrefs();
-  const foreground = useForeground();
+  const foreground = useAppActive();
   const insets = useSafeAreaInsets();
   const window = useWindowDimensions();
   const [measured, setMeasured] = useState<{
@@ -873,6 +884,24 @@ export function Scanner({
   const claimed = useRef(false);
   const refused = useRef<Refused | null>(null);
   const [pasteRefused, setPasteRefused] = useState({ count: 0, reason: '' });
+
+  const [imageRefused, setImageRefused] = useState({ count: 0, reason: '' });
+  const photoButton = useRef<React.ComponentRef<typeof View>>(null);
+  const pendingImage = useRef<AbortController | null>(null);
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      pendingImage.current?.abort();
+    };
+  }, []);
+  const manual = useRef<'photo' | 'clipboard' | null>(null);
+  const [picking, setPicking] = useState(false);
+  // Deliver a file only to the open scanner after its wallet is visible again.
+  const [imageResult, setImageResult] = useState<
+    ReturnType<typeof paymentFromImage> | 'cancelled' | null
+  >(null);
 
   const caught = useSharedValue(0);
   const sage = useSharedValue(0);
@@ -903,7 +932,7 @@ export function Scanner({
     }
   }, []);
 
-  const cameraOn = live && access === 'granted' && !!Camera;
+  const cameraOn = live && !picking && access === 'granted' && !!Camera;
   const cover = useSharedValue(1);
   useEffect(() => {
     if (!cameraOn) {
@@ -914,17 +943,22 @@ export function Scanner({
   }, [cameraOn, reduced, cover]);
   const coverStyle = useAnimatedStyle(() => ({ opacity: cover.get() }));
 
-  function take(value: string) {
-    claimed.current = true;
-    caught.set(1);
-    sage.set(withTiming(1, { ...FADE, duration: durations.tick }));
-    if (!reduced) pinch.set(withSpring(CAUGHT_SCALE, springs.snap));
-    haptics.thud();
-    announce(words.detected);
-    onDetected(
-      validate ? validate(value) : normalizePaymentLink(value) || value,
-    );
-  }
+  const take = useCallback(
+    (value: string, source: ScanSource) => {
+      if (!mounted.current || claimed.current) return;
+      claimed.current = true;
+      caught.set(1);
+      sage.set(withTiming(1, { ...FADE, duration: durations.tick }));
+      if (!reduced) pinch.set(withSpring(CAUGHT_SCALE, springs.snap));
+      haptics.thud();
+      announce(words.detected);
+      onDetected(
+        validate ? validate(value) : normalizePaymentLink(value) || value,
+        source,
+      );
+    },
+    [caught, sage, reduced, pinch, onDetected, validate, words],
+  );
 
   // Every refused read flashes the corners radish. Only a loud one shakes
   // them too, and Reduce Motion holds the tint a while instead of shaking.
@@ -959,10 +993,10 @@ export function Scanner({
 
   function read(raw: string | undefined) {
     const value = raw?.trim();
-    if (claimed.current || !value) return;
+    if (!mounted.current || claimed.current || manual.current || !value) return;
     const reason = validationError(value);
     if (!reason) {
-      take(value);
+      take(value, 'camera');
       return;
     }
     const now = Date.now();
@@ -975,32 +1009,68 @@ export function Scanner({
     flash(loud);
   }
 
-  // A paste is asked for, so every refusal is felt and said, however often.
-  function refusePaste(reason: string) {
+  function refuseInput(reason: string, source: 'clipboard' | 'photo') {
     haptics.error();
     announce(reason);
-    setPasteRefused(last => ({ count: last.count + 1, reason }));
+    const setRefused = source === 'photo' ? setImageRefused : setPasteRefused;
+    setRefused(last => ({ count: last.count + 1, reason }));
   }
 
   async function paste() {
-    if (claimed.current) return;
-    let value = '';
+    if (claimed.current || manual.current) return;
+    manual.current = 'clipboard';
     try {
-      // iOS may ask whether to allow the paste: a prompt the app raised.
-      value =
-        (await duringSystemPrompt(() => Clipboard.getString()))?.trim() ?? '';
+      const value = (
+        await duringSystemPrompt(() => Clipboard.getString())
+      )?.trim();
+      if (!mounted.current) return;
+      if (!value) {
+        refuseInput(copy.scan.clipboardEmpty, 'clipboard');
+        return;
+      }
+      const reason = validationError(value);
+      if (reason) refuseInput(reason, 'clipboard');
+      else take(value, 'clipboard');
     } catch {
-      refusePaste(copy.scan.clipboardUnreadable);
-      return;
+      if (mounted.current)
+        refuseInput(copy.scan.clipboardUnreadable, 'clipboard');
+    } finally {
+      manual.current = null;
     }
-    if (!value) {
-      refusePaste(copy.scan.clipboardEmpty);
-      return;
-    }
-    const reason = validationError(value);
-    if (reason) refusePaste(reason);
-    else take(value);
   }
+
+  async function chooseImage() {
+    if (claimed.current || manual.current) return;
+    manual.current = 'photo';
+    setPicking(true);
+    const controller = new AbortController();
+    pendingImage.current = controller;
+    try {
+      const codes = await pickQrImage(controller.signal);
+      if (mounted.current)
+        setImageResult(codes === null ? 'cancelled' : paymentFromImage(codes));
+    } catch {
+      if (mounted.current)
+        setImageResult({ reason: copy.scan.unreadableImage });
+    } finally {
+      pendingImage.current = null;
+    }
+  }
+
+  useEffect(() => {
+    if (!imageResult || !foreground || manual.current !== 'photo') return;
+    manual.current = null;
+    setImageResult(null);
+    setPicking(false);
+    if (imageResult !== 'cancelled') {
+      if ('value' in imageResult) {
+        take(imageResult.value, 'photo');
+        return;
+      }
+      refuseInput(imageResult.reason, 'photo');
+    }
+    focusOn(photoButton.current);
+  }, [imageResult, foreground, take]);
 
   const openSettings = () => {
     announce('Enable camera access in your browser site settings, then try again.');
@@ -1016,7 +1086,7 @@ export function Scanner({
     <Reanimated.View
       entering={riseIn(overlap.rise, FLY_DELAY)}
       exiting={sceneOut()}
-      style={styles.controls}
+      style={[styles.controls, access === 'denied' && styles.compactControls]}
     >
       <GlyphButton
         glyph="clipboard"
@@ -1025,6 +1095,21 @@ export function Scanner({
         reduced={reduced}
         refused={pasteRefused}
       />
+      {purpose === 'payment' ? (
+        <Whisper
+          enabled={!!imageRefused.reason}
+          label={imageRefused.reason || copy.scan.chooseImage}
+        >
+          <GlyphButton
+            glyph="photo"
+            label={copy.scan.chooseImage}
+            onPress={chooseImage}
+            buttonRef={photoButton}
+            reduced={reduced}
+            refused={imageRefused}
+          />
+        </Whisper>
+      ) : null}
       {access === 'denied' ? (
         <GlyphButton
           glyph="cog"
@@ -1129,6 +1214,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: space.xl,
   },
+  compactControls: { gap: space.xs },
   control: {
     width: CONTROL,
     height: CONTROL,

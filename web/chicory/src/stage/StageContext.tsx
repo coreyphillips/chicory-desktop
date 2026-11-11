@@ -19,6 +19,7 @@ import type {
   Point,
   Rect,
   ScanPurpose,
+  ScanSource,
   StageAction,
   StageState,
 } from './scene';
@@ -107,7 +108,7 @@ export type Responder<T> = { current: T };
  * leaves the scanner its own check of a payment request.
  */
 export interface ScanReceiver {
-  receive: (value: string) => void;
+  receive: (value: string, source: ScanSource) => void;
   validate?: (value: string) => string;
 }
 
