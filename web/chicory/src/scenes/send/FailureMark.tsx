@@ -3,12 +3,13 @@ import { StyleSheet, View } from 'react-native';
 import Reanimated from 'react-native-reanimated';
 import type { GlyphName } from '../../design/glyphs';
 import { palette } from '../../design/palette';
-import { Whisper } from '../../glyphs/Whisper';
+import { WhisperAlert } from '../../glyphs/Whisper';
 import { useShake } from '../../motion/effects';
 import { durations } from '../../motion/tokens';
 import { BANG, DrawnGlyph } from './DrawnGlyph';
 import { ClosingChain, FlashingBolt } from './ErrorGlyphs';
 import type { Stroke } from './DrawnGlyph';
+import { failureExplanation } from './model';
 import type { Failure } from './model';
 import { Unplugged, WaitingClock } from './LoopingGlyphs';
 
@@ -28,9 +29,8 @@ const DRAW: Stroke[] = [{ duration: durations.draw }];
 
 /**
  * What the engine said no with (REDESIGN.md 6, Engine errors): its glyphs,
- * drawn in, in honey or radish, and a shake when it is radish. The engine's
- * own message is what a screen reader hears, as an alert, and what a long
- * press shows through Whisper.
+ * drawn in, in honey or radish, and a shake when it is radish. Tap or
+ * hold to read the same explanation that labels the mark for a screen reader.
  */
 export function FailureMark({ failure }: { failure: Failure }) {
   const color = failure.tone === 'honey' ? palette.honey : palette.radish;
@@ -40,13 +40,12 @@ export function FailureMark({ failure }: { failure: Failure }) {
     if (failure.shake) play();
   }, [failure, play]);
   return (
-    <Whisper label={failure.message}>
-      <Reanimated.View
-        accessible
-        accessibilityRole="alert"
-        accessibilityLabel={failure.message}
-        style={[styles.mark, refusal.style]}
-      >
+    <WhisperAlert
+      label={failureExplanation(failure)}
+      revision={failure}
+      style={styles.target}
+    >
+      <Reanimated.View style={[styles.mark, refusal.style]}>
         <Reanimated.View
           pointerEvents="none"
           style={[styles.tint, refusal.tint]}
@@ -73,15 +72,18 @@ export function FailureMark({ failure }: { failure: Failure }) {
           )}
         </View>
       </Reanimated.View>
-    </Whisper>
+    </WhisperAlert>
   );
 }
 
 const styles = StyleSheet.create({
   // The least a finger needs to hold it for its words (REDESIGN.md 3.4).
-  mark: {
+  target: {
     minWidth: 48,
     minHeight: 48,
+  },
+  mark: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },

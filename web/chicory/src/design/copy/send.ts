@@ -44,6 +44,9 @@ export const send = {
   quoteExpires: (seconds: number) => `Fee quote expires in ${seconds}s`,
   refreshQuote: 'Refresh quote',
   quoteExpired: 'Quote expired. Review again.',
+  invoiceExpired: 'Invoice expired. Ask for a new one.',
+  wrongNetwork:
+    'Different Bitcoin network. Ask for a request on this wallet’s network.',
   edit: 'Edit payment',
   stale: 'Balance not confirmed recently. Refresh before sending.',
   // The review's lines: the rail, the fee on top, what it should cost, and

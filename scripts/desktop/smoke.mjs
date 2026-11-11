@@ -434,6 +434,37 @@ try {
   await expect(page.getByRole('button', { name: 'Edit payment', exact: true })).toBeVisible();
   checks.push('Physical amount entry and backspace, payment review, short hold cancels');
 
+  // A request the wallet refuses says why on a click or on Enter, and reading
+  // it leaves the request where it was. The demo engine reports a request it
+  // cannot take as INVALID_REQUEST in the parser's words; a real wallet says
+  // WRONG_NETWORK, which the mark explains in Send's own copy.
+  await page.getByRole('button', { name: 'Edit payment', exact: true }).click();
+  const foldedRequest = page.getByRole('button', { name: 'Payment request or address', exact: true });
+  if (await foldedRequest.isVisible()) await foldedRequest.click();
+  const otherNetwork = bech32Encode('tb', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);
+  await request.fill(otherNetwork);
+  await page.getByRole('button', { name: 'Review payment', exact: true }).click();
+  const explanation = 'That is a testnet address, and this wallet is on mainnet. Paying it would send the coins nowhere they can be spent.';
+  const refusal = page.getByRole('alert', { name: explanation, exact: true });
+  const spoken = page.getByText(explanation, { exact: true });
+  await expect(refusal).toBeVisible();
+  await expect(spoken).toHaveCount(0);
+  // Its own box, before the request well's resting scale.
+  const [refusalWidth, refusalHeight] = await refusal.evaluate(node => [node.offsetWidth, node.offsetHeight]);
+  assert.ok(refusalWidth >= 48 && refusalHeight >= 48, 'The error mark has a full pointer target');
+  await refusal.click();
+  await expect(spoken).toBeVisible();
+  await page.waitForTimeout(400);
+  await screenshot('desktop-send-refused');
+  await expect(spoken).toHaveCount(0, { timeout: 4000 });
+  await refusal.focus();
+  await page.keyboard.press('Enter');
+  await expect(spoken).toBeVisible();
+  await expect(hold).toHaveCount(0);
+  if (await foldedRequest.isVisible()) await foldedRequest.click();
+  await expect(request).toHaveValue(otherNetwork);
+  checks.push('A refused request explains itself on a click or Enter and keeps the request');
+
   await nativeMenu('Receive');
   await assertNothingSelects();
   checks.push('A drag or triple click selects nothing on Receive');

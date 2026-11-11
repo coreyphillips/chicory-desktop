@@ -23,7 +23,7 @@ This document is the source of truth for the design of the Chicory app, as redes
    - Hides after 2400ms.
    - Fires a `tick`.
 
-   This is the only text a user can summon outside Settings.
+   A Send failure mark also answers a short tap, and on the desktop a click or Enter on the focused mark. Both gestures show its reason and, when known, the next step. Reading the mark leaves the payment in place. This is the only text a user can summon outside Settings.
 
 4. **Safety contract.** Applies to: uncertain or held send, reused receive address, expired request or quote, backup pending, stale balance, and test vs mainnet. Every such state must be:
    - persistent until resolved;
