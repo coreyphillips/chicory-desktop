@@ -23,6 +23,7 @@ const NAME = 'com.beignet.wallet.';
 const durable = new Set([
   `${NAME}haptics`,
   `${NAME}balance-face`,
+  `${NAME}balance-visibility`,
   `${NAME}auto-pay`,
   `${NAME}network-profiles`,
   `${NAME}last-session`,
@@ -91,7 +92,9 @@ function publicValue(service: string, password: string): void {
     throw new Error('Invalid haptics preference.');
   if (service === `${NAME}balance-face` && !['sats', 'symbol', 'btc'].includes(password))
     throw new Error('Invalid balance display preference.');
-  if (service === `${NAME}haptics` || service === `${NAME}balance-face`) return;
+  if (service === `${NAME}balance-visibility` && !['hidden', 'visible'].includes(password))
+    throw new Error('Invalid balance visibility preference.');
+  if (service === `${NAME}haptics` || service === `${NAME}balance-face` || service === `${NAME}balance-visibility`) return;
   const value = JSON.parse(password);
   const only = (item: unknown, keys: string[]) => {
     if (!item || typeof item !== 'object' || Array.isArray(item) ||

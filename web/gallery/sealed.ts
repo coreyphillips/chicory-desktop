@@ -14,9 +14,13 @@ import { defaultPreferences, saveNetworkPreferences } from '../chicory/src/servi
 
 seal();
 
-/** Forgets the balance face a state tapped to, so the next opens on `₿`. */
+/**
+ * Forgets the balance face and mask a state chose, so the next opens shown
+ * on `₿` and a state that hides the balance does not reveal it instead.
+ */
 export function forgetFace() {
   forget('com.beignet.wallet.balance-face');
+  forget('com.beignet.wallet.balance-visibility');
 }
 
 /**

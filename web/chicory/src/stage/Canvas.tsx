@@ -29,6 +29,7 @@ import {
   saveFacePreference,
 } from '../services/facePreference';
 import type { Face } from '../services/facePreference';
+import { useBalanceVisibility } from '../services/useBalanceVisibility';
 import { beginTransition } from '../motion/idle';
 import { dropAway, riseFrom } from '../motion/presets';
 import { ENTRY_GRACE_MS, useSureEntry } from '../motion/sureEntry';
@@ -126,7 +127,7 @@ export interface Backup {
  * before the saved face is read wins over it.
  */
 export function useCanvasView() {
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useBalanceVisibility();
   const [unit, setUnit] = useState<Unit>(DEFAULT_FACE.unit);
   const [symbol, setSymbol] = useState(DEFAULT_FACE.symbol);
   const [filter, setFilter] = useState('All');
