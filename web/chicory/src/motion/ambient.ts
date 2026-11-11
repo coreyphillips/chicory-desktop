@@ -19,7 +19,7 @@ import { useSyncExternalStore } from 'react';
 /** How long the app may go untouched before its decoration rests. */
 export const AMBIENT_REST_MS = 20_000;
 
-let stirred = Date.now();
+let restAt = performance.now() + AMBIENT_REST_MS;
 let resting = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
 const listeners = new Set<() => void>();
@@ -36,13 +36,13 @@ function schedule() {
   if (timer !== null || resting || listeners.size === 0) return;
   timer = setTimeout(() => {
     timer = null;
-    if (Date.now() - stirred < AMBIENT_REST_MS) {
+    if (performance.now() < restAt) {
       schedule();
       return;
     }
     resting = true;
     tell();
-  }, Math.max(0, stirred + AMBIENT_REST_MS - Date.now()));
+  }, Math.max(0, Math.ceil(restAt - performance.now())));
 }
 
 /**
@@ -50,7 +50,7 @@ function schedule() {
  * app shows. Decoration at rest starts again, and the quiet starts over.
  */
 export function wakeAmbient(): void {
-  stirred = Date.now();
+  restAt = performance.now() + AMBIENT_REST_MS;
   if (!resting) return;
   resting = false;
   tell();
