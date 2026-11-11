@@ -13,6 +13,7 @@ const { createDesktopDrains } = require('./desktop-drain');
 const { createDesktopAccessGuard } = require('./desktop-access');
 const { createUpdateHold } = require('./update-hold');
 const { createSecureStore } = require('./secure-store');
+const { openPaymentNotes } = require('./payment-notes');
 
 // Cap on how much of a failed daemon response is buffered before logging it.
 // Error bodies are small; this only stops a large one from being held in memory.
@@ -351,6 +352,14 @@ async function startManager({
 	api.delete('/secure-store/:service', asyncHandler(async (req, res) => {
 		res.json({ ok: true, result: secureStore.remove(req.params.service) });
 	}));
+
+	if (desktopGuard) {
+		const notes = req => openPaymentNotes(manager, req.params.id, req.params.network);
+		api.route('/wallets/:id/payment-notes/:network')
+			.get((req, res) => res.json({ ok: true, result: notes(req).read() }))
+			.put((req, res) => res.json({ ok: true, result: notes(req).save(req.body) }))
+			.post((req, res) => res.json({ ok: true, result: notes(req).move(req.body) }));
+	}
 
 	// The portable full backup: every wallet with its channel databases,
 	// under a passphrase, for a fresh profile on another computer or OS

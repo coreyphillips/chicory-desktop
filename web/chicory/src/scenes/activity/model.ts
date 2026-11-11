@@ -1,4 +1,6 @@
 import type { Activity } from '@beignet/wallet-core';
+import { paymentNoteKeys } from '../../services/paymentNotes';
+import type { NoteMap } from '../../services/paymentNotes';
 import { copy } from '../../design/copy';
 import type { GlyphName } from '../../design/glyphs';
 import { dayLabel, space, statusLabel } from '../../theme';
@@ -66,13 +68,14 @@ function amountTexts(sats: number): string[] {
 }
 
 /** `needle` is already trimmed and lowercased: this runs once per row. */
-function matchesQuery(item: Activity, needle: string) {
+function matchesQuery(item: Activity, needle: string, privateNote?: string) {
   if (!needle) return true;
   const has = (value: string | undefined) =>
     !!value && value.toLowerCase().includes(needle);
   return (
     has(item.title) ||
     has(item.description) ||
+    has(privateNote) ||
     has(item.reference) ||
     has(item.txid) ||
     has(item.paymentHash) ||
@@ -99,7 +102,13 @@ export type Band = 'solo' | 'start' | 'middle' | 'end';
 
 export type ActivitySection =
   | { kind: 'header'; id: string; label: string }
-  | { kind: 'item'; id: string; item: Activity; band?: Band };
+  | {
+      kind: 'item';
+      id: string;
+      item: Activity;
+      band?: Band;
+      privateNote?: string;
+    };
 
 function bandAt(index: number, count: number): Band {
   if (count === 1) return 'solo';
@@ -118,9 +127,19 @@ export function activitySections(
   activity: readonly Activity[],
   filter: string,
   needle: string,
+  notes?: NoteMap,
+  keys: ReadonlyMap<string, string> | undefined = notes?.size
+    ? paymentNoteKeys(activity)
+    : undefined,
 ): ActivitySection[] {
+  const privateNote = (item: Activity) => {
+    const key = keys?.get(item.id);
+    return key ? notes?.get(key)?.text : undefined;
+  };
   const matched = activity.filter(
-    item => matchesFilter(item, filter) && matchesQuery(item, needle),
+    item =>
+      matchesFilter(item, filter) &&
+      matchesQuery(item, needle, privateNote(item)),
   );
   const pinned = [
     ...matched.filter(item => attentionOf(item) === 'uncertain'),
@@ -142,7 +161,12 @@ export function activitySections(
       // come back to a day it has already headed.
       out.push({ kind: 'header', id: `day:${item.id}`, label });
     }
-    out.push({ kind: 'item', id: item.id, item });
+    out.push({
+      kind: 'item',
+      id: item.id,
+      item,
+      privateNote: privateNote(item),
+    });
   }
   return out;
 }

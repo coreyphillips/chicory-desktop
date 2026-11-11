@@ -5,6 +5,8 @@ import type {
   WalletRecord, WalletSnapshot,
 } from '@beignet/wallet-core';
 import { createHostWalletClient, UmbrelWalletClient } from './walletClient.ts';
+import type { WalletAdapter } from '../chicory/src/services/wallet.ts';
+import { DesktopDemoWallet } from './demoWallet.ts';
 import { anyPrimaryConnected } from './primaries.ts';
 import {
   defaultProfile, loadNetworkPreferences, saveNetworkPreferences, validateProfile,
@@ -57,7 +59,7 @@ const KEY = 'chicory:host-selection';
 const BACKUP = 'chicory:backup-pending:';
 const factories: SessionDependencies = {
   createHostClient: createHostWalletClient,
-  createDemoClient: () => new DemoWalletClient(),
+  createDemoClient: () => new DesktopDemoWallet(),
 };
 function selectionStorage(): Storage {
   return typeof window !== 'undefined' && window.chicoryDesktop ? localStorage : sessionStorage;
@@ -102,7 +104,7 @@ export function useWalletSession(
   const mounted = useRef(true);
   const callbacks = useRef(view);
   callbacks.current = view;
-  const [client, setClient] = useState<WalletClientInterface | null>(null);
+  const [client, setClient] = useState<WalletAdapter | null>(null);
   const current = useRef<WalletClientInterface | null>(null);
   const [wallets, setWallets] = useState<WalletRecord[]>([]);
   const [walletId, setWalletId] = useState('');
@@ -254,6 +256,8 @@ export function useWalletSession(
     exposed = new Proxy(raw, {
       get(target, property) {
         if (property === 'createWallet') return create;
+        if (property === 'openPaymentNotes' && !demoMode.current &&
+            (typeof window === 'undefined' || !window.chicoryDesktop)) return undefined;
         const value = Reflect.get(target, property, target);
         return typeof value === 'function' ? value.bind(target) : value;
       },

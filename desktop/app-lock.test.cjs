@@ -78,7 +78,7 @@ test('disabling needs a successful prompt, so it cannot stand in for a reveal', 
 test('a cold launch with the lock on admits no wallet route until authentication succeeds', async () => {
   const { lock, auth } = harness({ enabled: true, answers: [{ ok: false, reason: 'cancelled' }, { ok: true }] });
   assert.equal(lock.required(), true);
-  for (const route of ['/api/wallets', '/api/wallets/a/start', '/wallets/a/api/send', '/api/settings'])
+  for (const route of ['/api/wallets', '/api/wallets/a/start', '/wallets/a/api/send', '/api/settings', '/api/wallets/a/payment-notes/mainnet'])
     assert.equal(lock.admit(route).ok, false, route);
   assert.deepEqual(lock.admit('/assets/index.js'), { ok: true, ticket: null }, 'the interface itself still loads');
   const cancelled = await lock.unlock();

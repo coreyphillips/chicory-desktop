@@ -104,6 +104,7 @@ const TONES: Record<AmountVisual['tone'], string> = {
  */
 export const ActivityRow = React.memo(function ActivityRowItem({
   item,
+  privateNote,
   onPress,
   hidden = false,
   unit = 'sats',
@@ -113,6 +114,7 @@ export const ActivityRow = React.memo(function ActivityRowItem({
   index = 0,
 }: {
   item: Activity;
+  privateNote?: string;
   onPress: (item: Activity, rect?: Rect) => void;
   hidden?: boolean;
   unit?: Unit;
@@ -173,9 +175,10 @@ export const ActivityRow = React.memo(function ActivityRowItem({
     : look.open
     ? copy.activity.rowOpen(item.title, status)
     : copy.activity.row(item.title, item.amountSats, status);
+  const note = privateNote || item.description;
   const value = [
     ...ringFlags(ring),
-    item.description,
+    note,
     dateLabel(item.timestamp),
   ]
     .filter(Boolean)
@@ -246,13 +249,13 @@ export const ActivityRow = React.memo(function ActivityRowItem({
                 <Strike struck={look.struck} />
               </View>
             )}
-            {item.description ? (
+            {note ? (
               <Text
                 numberOfLines={1}
                 maxFontSizeMultiplier={1.4}
                 style={styles.note}
               >
-                {item.description}
+                {note}
               </Text>
             ) : null}
           </View>

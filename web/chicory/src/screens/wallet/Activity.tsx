@@ -37,6 +37,7 @@ import {
 import type { ActivitySection } from '../../scenes/activity/model';
 import { usePaneActive } from '../../stage/panes/Pane';
 import type { Rect } from '../../stage/scene';
+import { useWalletNotes } from '../../scenes/activity/WalletNotes';
 import { useStableActivity } from '../../stage/useStableActivity';
 import { space, type as typography } from '../../theme';
 import type { Unit } from '../../theme';
@@ -128,10 +129,11 @@ export function ActivityScreen({
   const test = isTestNetwork(snapshot.wallet.network);
   // Filtering trails typing by a frame. The field itself still binds `query`,
   // so it never feels behind; only the list waits.
+  const { entries, keys } = useWalletNotes();
   const needle = useDeferredValue(query).trim().toLowerCase();
   const rows = useMemo(
-    () => activitySections(activity, filter, needle),
-    [activity, filter, needle],
+    () => activitySections(activity, filter, needle, entries, keys),
+    [activity, filter, needle, entries, keys],
   );
   const layout = useMemo(() => sectionLayout(rows), [rows]);
   const getItemLayout = useCallback(
@@ -169,6 +171,7 @@ export function ActivityScreen({
       ) : (
         <ActivityRow
           item={row.item}
+          privateNote={row.privateNote}
           band={row.band}
           hidden={hidden}
           unit={unit}

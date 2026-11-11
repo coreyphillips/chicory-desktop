@@ -273,3 +273,28 @@ test('a related wallet sends only the reference to the wallet whose phrase it re
   await assert.rejects(client.createWallet({ name: 'Both', network: 'regtest', primaryUri: DEFAULT_PRIMARY_URI, mnemonic: PHRASE, seedFrom: { walletId: 'wallet-1', network: 'mainnet' } }),
     { code: 'INVALID_PARAMS' });
 });
+
+test('private notes use the local wallet and network, and reject old selections before and after a request', async () => {
+  const note = { text: 'Local lunch' };
+  const entries = [['activity:paid', note]];
+  let finishRead: (reply: Response) => void = () => {};
+  let delayRead = false;
+  const { client, calls } = fixture((path, init) => {
+    assert.equal(path, '/api/wallets/wallet-1/payment-notes/mainnet');
+    if (delayRead) return new Promise(resolve => { finishRead = resolve; });
+    if (init.method === 'PUT') assert.deepEqual(JSON.parse(String(init.body)), { key: 'activity:paid', note });
+    if (init.method === 'POST') assert.deepEqual(JSON.parse(String(init.body)), { moves: [['raw', 'matched']] });
+    return response(entries);
+  }, record.id);
+  const store = client.openPaymentNotes({ id: record.id, network: 'mainnet' });
+  assert.equal((await store.read()).get('activity:paid')?.text, 'Local lunch');
+  await store.save('activity:paid', note);
+  await store.move(new Map([['raw', 'matched']]));
+  delayRead = true;
+  const staleRead = store.read();
+  client.selectWallet('wallet-2');
+  finishRead(response(entries));
+  await assert.rejects(staleRead, { code: 'WALLET_CHANGED' });
+  await assert.rejects(store.save('activity:paid', note), { code: 'WALLET_CHANGED' });
+  assert.deepEqual(calls.map(call => call.init.method), ['GET', 'PUT', 'POST', 'GET']);
+});

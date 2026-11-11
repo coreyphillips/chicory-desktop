@@ -24,6 +24,8 @@ import {
   ringVisual,
 } from '../../scenes/activity/visual';
 import type { AmountVisual, RingVisual } from '../../scenes/activity/visual';
+import { useWalletNotes } from '../../scenes/activity/WalletNotes';
+import { PrivateNote } from '../../scenes/detail/PrivateNote';
 import { feeShown, ringWords } from '../../scenes/detail/model';
 import {
   DetailFlight,
@@ -100,7 +102,10 @@ export function DetailScreen({
   const look = amountVisual(item);
   useSafetyNotice(visual, words.label);
   const flight = useContext(DetailFlight);
-  const [entering] = useState(() => headerIn(flight, item));
+  const { entries, keys, save } = useWalletNotes();
+  const noteKey = keys.get(item.id);
+  const privateNote = noteKey ? entries.get(noteKey)?.text : undefined;
+  const [entering] = useState(() => headerIn(flight, item, !!(privateNote || item.description)));
 
   const date = dateLabel(item.timestamp);
   const fee = figureOf(item.feeSats, unit, symbol);
@@ -165,7 +170,24 @@ export function DetailScreen({
     });
   }
 
-  let line = 0;
+  const editable = !!save && !!noteKey;
+  const memoIndex = showsFee ? 2 : 1;
+  let line = memoIndex + (item.description || editable ? 1 : 0);
+  const memo = (withGlyph = true) =>
+    item.description ? (
+      <Line
+        index={memoIndex}
+        glyph={withGlyph ? 'pencil' : undefined}
+        label={copy.detail.note(item.description)}
+      >
+        <Text
+          style={[styles.value, styles.note]}
+          maxFontSizeMultiplier={LINE_CAP}
+        >
+          {item.description}
+        </Text>
+      </Line>
+    ) : null;
   return (
     <View style={styles.stack}>
       <View
@@ -221,17 +243,13 @@ export function DetailScreen({
         )}
       </View>
       <View style={styles.lines}>
-        <Line index={line++} glyph="clock" label={copy.detail.date(date)}>
+        <Line index={0} glyph="clock" label={copy.detail.date(date)}>
           <Text style={styles.value} maxFontSizeMultiplier={LINE_CAP}>
             {date}
           </Text>
         </Line>
         {showsFee ? (
-          <Line
-            index={line++}
-            glyph={RAIL_GLYPH[railOf(item)]}
-            label={feeLabel}
-          >
+          <Line index={1} glyph={RAIL_GLYPH[railOf(item)]} label={feeLabel}>
             {feeUnknown ? (
               <Glyph name="question" size={20} color={palette.steam} />
             ) : (
@@ -262,20 +280,17 @@ export function DetailScreen({
             )}
           </Line>
         ) : null}
-        {item.description ? (
-          <Line
-            index={line++}
-            glyph="pencil"
-            label={copy.detail.note(item.description)}
-          >
-            <Text
-              style={[styles.value, styles.note]}
-              maxFontSizeMultiplier={LINE_CAP}
-            >
-              {item.description}
-            </Text>
-          </Line>
-        ) : null}
+        {editable ? (
+          <PrivateNote
+            key={noteKey}
+            test={test}
+            note={privateNote ?? ''}
+            memo={memo}
+            save={text => save(item, text)}
+          />
+        ) : (
+          memo()
+        )}
       </View>
       {receipt ? (
         <Reanimated.View entering={lineIn(line++)}>
@@ -361,7 +376,7 @@ function Line({
   glyph,
   label,
   children,
-}: PropsWithChildren<{ index: number; glyph: GlyphName; label: string }>) {
+}: PropsWithChildren<{ index: number; glyph?: GlyphName; label: string }>) {
   const [entering] = useState(() => lineIn(index));
   return (
     <Reanimated.View
@@ -371,7 +386,7 @@ function Line({
       accessibilityLabel={label}
       style={styles.line}
     >
-      <Glyph name={glyph} size={20} color={palette.dust} />
+      {glyph && <Glyph name={glyph} size={20} color={palette.dust} />}
       {children}
     </Reanimated.View>
   );
@@ -393,7 +408,7 @@ const styles = StyleSheet.create({
     gap: space.sm,
   },
   value: { ...typography.row, color: palette.cream },
-  note: { flex: 1, color: palette.steam },
+  note: { flex: 1, minWidth: 0, color: palette.steam },
   dim: { color: palette.dust },
   chips: { gap: space.xs },
   // Its content's width, and no wider than the line leaves it.

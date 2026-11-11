@@ -21,6 +21,8 @@ process.env.DATA_DIR = DATA_DIR;
 const vault = require('./vault-files');
 const storage = require('./engine-storage.cjs');
 const { WalletManager } = require('./wallet-manager');
+const { openPaymentNotes } = require('./payment-notes');
+const { buildPayload } = require('./backup');
 
 const driverRoot = path.resolve(__dirname, '../.runtime/engine/node_modules/better-sqlite3-multiple-ciphers');
 const available = fs.existsSync(path.join(driverRoot, 'build/Release/better_sqlite3.node'));
@@ -70,6 +72,9 @@ function channels(manager, id = ID) {
 test('a full backup restores into a fresh profile with a different master key, held until proven current', { skip: !available }, async () => {
   const source = await profile();
   seedWallet(source);
+  openPaymentNotes(source, ID, 'regtest').save({ key: 'activity:one', note: { text: 'only on this device' } });
+  const settingsArchive = buildPayload({ dataDir: DATA_DIR, walletIds: [ID] });
+  assert.equal(settingsArchive.files.some(file => file.path.includes('payment-notes')), false);
   const { archive, walletCount } = await source.exportFullBackup({ passphrase: PASSPHRASE });
   assert.equal(walletCount, 1);
   assert.equal(archive.includes(Buffer.from(CHANNEL)), false);
@@ -86,6 +91,7 @@ test('a full backup restores into a fresh profile with a different master key, h
   const result = await fresh.restoreFullBackup({ passphrase: PASSPHRASE, archive: archive.toString('base64') });
   assert.deepEqual(result.restored.map(w => w.id), [ID]);
   assert.deepEqual(result.failed, []);
+  assert.deepEqual(openPaymentNotes(fresh, ID, 'regtest').read(), [], 'the restored wallet has no device-local notes');
   assert.deepEqual(channels(fresh), [CHANNEL], 'the database reads under the new profile key');
   assert.throws(() => storage.verifyDatabase(path.join(fresh.paths(ID).data, 'regtest.db'), sourceKey, { driverRoot }));
   const marker = JSON.parse(vault.fs.readFileSync(path.join(fresh.paths(ID).data, 'regtest.db.restored'), 'utf8'));
