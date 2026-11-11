@@ -95,3 +95,27 @@ test('a plain browser keeps its previous behavior and never calls the store', as
   assert.ok(local.getItem(`${PREFIX}${DRAFT}`));
   assert.deepEqual(requests, []);
 });
+
+test('on desktop, balance visibility is a display preference kept across launches', async () => {
+  const VISIBILITY = 'com.beignet.wallet.balance-visibility';
+  const first = await fresh(true);
+  await first.keychain.setGenericPassword('balance-visibility', 'hidden', { service: VISIBILITY });
+  assert.equal(first.store.size, 0, 'nothing goes to the encrypted store');
+  assert.deepEqual(first.requests, []);
+  const saved = first.local.getItem(`${PREFIX}${VISIBILITY}`);
+  assert.ok(saved);
+  await assert.rejects(
+    first.keychain.setGenericPassword('balance-visibility', 'shown', { service: VISIBILITY }),
+    /Invalid balance visibility preference/,
+  );
+
+  const second = await fresh(true);
+  second.local.setItem(`${PREFIX}${VISIBILITY}`, saved!);
+  assert.equal((await second.keychain.getGenericPassword({ service: VISIBILITY })).password, 'hidden');
+  assert.deepEqual(second.requests, [], 'it reads before the app lock is opened');
+
+  const damaged = await fresh(true);
+  damaged.local.setItem(`${PREFIX}${VISIBILITY}`,
+    JSON.stringify({ username: 'balance-visibility', password: 'damaged', service: VISIBILITY }));
+  await assert.rejects(damaged.keychain.getGenericPassword({ service: VISIBILITY }), /Invalid balance visibility preference/);
+});

@@ -84,6 +84,7 @@ Use VoiceOver on macOS, Narrator on Windows and Orca on Linux.
 | --- | --- | --- |
 | Every control has a spoken label, including icon-only buttons | | |
 | Hidden balances are not read out | | |
+| Hidden balances stay hidden after quitting and reopening, from the first frame | | |
 | Settings panels and sheets keep focus inside while open, and return it on close | | |
 | Recovery words are read only after a deliberate reveal, and are not left in focus after Hide | | |
 | The hold to send works with Space or Enter held, and a short press does not send | | |

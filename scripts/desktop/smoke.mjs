@@ -56,7 +56,8 @@ async function screenshot(name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), animations: 'allow' });
 }
 
-try {
+/** Opens the demo on the smoke profile, so a second launch finds what the first one saved. */
+async function launchDemo() {
   electron = await _electron.launch({
     executablePath: process.env.CHICORY_ELECTRON_EXECUTABLE || electronPath,
     args: [path.join(root, 'desktop/main.cjs'), '--demo'],
@@ -68,6 +69,17 @@ try {
   page.setDefaultTimeout(10000);
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+}
+
+/** Quits the app the way the menu does, and waits for it to be gone. */
+async function quitDemo() {
+  await electron.evaluate(({ app }) => { setTimeout(() => app.quit(), 0); }).catch(() => {});
+  await electron.close().catch(() => {});
+  electron = undefined;
+}
+
+try {
+  await launchDemo();
   await expect(page.locator('.browser-sidebar button[data-scene="send"]')).toBeEnabled({ timeout: 20000 });
   await page.waitForTimeout(1600);
   const security = await page.evaluate(() => ({
@@ -547,6 +559,26 @@ try {
   assert.equal(apiStatus, 403);
   await assert.rejects(fs.stat(path.join(profile, 'wallets')), { code: 'ENOENT' });
   checks.push('Demo mode denies wallet APIs and creates no wallet data directory');
+
+  // A hidden balance is still hidden after quitting and opening the app again,
+  // from its first frame, and it can be shown again from there.
+  await nativeMenu('Overview');
+  const heroBalance = () => page.getByTestId('home-hero').getByRole('button').first();
+  await page.getByRole('button', { name: 'Hide balances', exact: true }).click();
+  await expect(heroBalance()).toHaveAttribute('aria-label', 'Balance hidden');
+  await quitDemo();
+  await launchDemo();
+  await expect(heroBalance()).toHaveAttribute('aria-label', 'Balance hidden', { timeout: 20000 });
+  await expect(page.locator('.browser-sidebar button[data-scene="send"]')).toBeEnabled({ timeout: 20000 });
+  assert.equal(await heroBalance().getAttribute('aria-label'), 'Balance hidden', 'Hidden once the wallet is up');
+  await page.waitForTimeout(1600);
+  await screenshot('desktop-relaunched-hidden');
+  const showBalances = page.getByRole('button', { name: 'Show balances', exact: true });
+  await expect(showBalances).toBeVisible();
+  await showBalances.click();
+  await expect(heroBalance()).not.toHaveAttribute('aria-label', 'Balance hidden');
+  await expect(page.getByRole('button', { name: 'Hide balances', exact: true })).toBeVisible();
+  checks.push('A hidden balance stays hidden after quitting and reopening, and can be shown again');
   assert.deepEqual(errors, [], 'No renderer exceptions');
   const unexpectedConsole = consoleErrors.filter(line => !/Failed to load resource:.*403/.test(line));
   assert.deepEqual(unexpectedConsole, [], 'No unexpected renderer console errors');
@@ -560,9 +592,6 @@ try {
   await fs.writeFile(path.join(output, 'report.json'), JSON.stringify({ passed: false, checks, error: String(error), errors, consoleErrors }, null, 2) + '\n');
   throw error;
 } finally {
-  if (electron) {
-    await electron.evaluate(({ app }) => { setTimeout(() => app.quit(), 0); }).catch(() => {});
-    await electron.close().catch(() => {});
-  }
+  if (electron) await quitDemo();
   await fs.rm(profile, { recursive: true, force: true });
 }
