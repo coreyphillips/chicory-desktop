@@ -41,11 +41,17 @@ test('a link only fills Send: it never gets camera provenance, so auto-pay canno
   assert.equal((linked.scene as { scanned?: boolean }).scanned, undefined, 'only the camera marks a request as scanned');
   // The same request read by the camera from home is the only scanned path.
   const scanning = stageReducer(initialStage(), { type: 'overlay', overlay: { name: 'scan', target: 'home' } } as never);
-  const scanned = stageReducer(scanning, { type: 'scanned', value: INVOICE });
+  const scanned = stageReducer(scanning, { type: 'scanned', value: INVOICE, source: 'camera' });
   assert.equal((scanned.scene as { scanned?: boolean }).scanned, true);
+  for (const source of ['photo', 'clipboard'] as const) {
+    const manual = stageReducer(scanning, { type: 'scanned', value: INVOICE, source });
+    assert.equal(manual.scene.name, 'send');
+    assert.equal((manual.scene as { prefill?: string }).prefill, INVOICE);
+    assert.equal((manual.scene as { scanned?: boolean }).scanned, undefined);
+  }
   // A scanned code delivered without the scan overlay open changes nothing.
   const idle = initialStage();
-  assert.equal(stageReducer(idle, { type: 'scanned', value: INVOICE }), idle);
+  assert.equal(stageReducer(idle, { type: 'scanned', value: INVOICE, source: 'camera' }), idle);
 });
 
 test('a link that lands mid-payment is dropped, and a repeated link refills Send without paying', () => {

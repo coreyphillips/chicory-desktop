@@ -82,7 +82,7 @@ import { Pane, PanesProvider } from './panes/Pane';
 import { PrimaryFor, usePrimaryFocus } from './panes/Primary';
 import type { Primaries } from './panes/Primary';
 import { STALL_ALLOWANCE, usePaneMotion } from './panes/usePaneMotion';
-import type { Overlay, Scene } from './scene';
+import type { Overlay, ScanSource, Scene } from './scene';
 import { newestFirst, useStage } from './StageContext';
 import { useIncoming } from './useIncoming';
 import { activityWidth, useDesktopLayout } from '../../../platform/browserLayout';
@@ -499,10 +499,11 @@ export function Canvas({
   // from home it opens Send with the code.
   const scanning = overlay?.name === 'scan' ? overlay : null;
   const onScanned = useCallback(
-    (value: string) => {
+    (value: string, source: ScanSource) => {
       const [receiver] = newestFirst(responders.scan);
-      if (scanning && scanning.target !== 'home') receiver?.receive(value);
-      dispatch({ type: 'scanned', value });
+      if (scanning && scanning.target !== 'home')
+        receiver?.receive(value, source);
+      dispatch({ type: 'scanned', value, source });
     },
     [scanning, responders, dispatch],
   );
@@ -730,7 +731,7 @@ export function Canvas({
             </View>
             {scanning ? (
               <ScanReveal
-                key={scanning.key}
+                key={`${snapshot.wallet.network}:${snapshot.wallet.id}:${scanning.key}`}
                 origin={scanning.origin}
                 browserOrigin={{ x: measured.x, y: measured.y }}
                 browserWell={desktop ? { x: measured.x + mainWidth / 2, y: measured.y + belowStatus + WELL_DROP } : undefined}

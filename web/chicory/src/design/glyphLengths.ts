@@ -11,6 +11,7 @@ export const GLYPH_LENGTHS: Record<GlyphName, number[]> = {
   close: [33.95],
   copy: [80],
   scan: [44.57],
+  photo: [90.04],
   search: [49.64],
   lock: [42, 15.43],
   key: [67.05],

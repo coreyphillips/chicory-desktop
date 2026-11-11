@@ -33,6 +33,7 @@
   "devDependencies": {
     "@babel/core": "^7.28.5",
     "@beignet/wallet-core": "github:coreyphillips/beignet-wallet-core#90273846381bbc6775bc5a9a1d27409a18ee0744",
+    "@nuintun/qrcode": "5.1.0",
     "@playwright/test": "1.64.1",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.0",
@@ -43,6 +44,7 @@
     "buffer": "^6.0.3",
     "electron": "45.2.1",
     "electron-builder": "26.18.0",
+    "image-size": "2.1.0",
     "qrcode": "^1.5.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",

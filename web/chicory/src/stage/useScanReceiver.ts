@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import type { Point, ScanPurpose } from './scene';
+import type { Point, ScanPurpose, ScanSource } from './scene';
 import { useResponder, useStage } from './StageContext';
 
 /**
@@ -26,7 +26,7 @@ import { useResponder, useStage } from './StageContext';
  * the scanner checks for a payment request, as Send's scan does.
  */
 export function useScanReceiver(
-  receiver: (value: string) => void,
+  receiver: (value: string, source: ScanSource) => void,
   active: boolean,
   validate?: (value: string) => string,
 ) {
