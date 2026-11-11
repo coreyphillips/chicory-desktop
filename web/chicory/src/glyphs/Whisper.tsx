@@ -8,8 +8,15 @@ import React, {
   useState,
 } from 'react';
 import type { PropsWithChildren } from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import type {
+  GestureResponderEvent,
   HostInstance,
   LayoutChangeEvent,
   StyleProp,
@@ -244,6 +251,30 @@ interface WhisperProps {
   style?: StyleProp<ViewStyle>;
 }
 
+/** A whisper belongs to its source while that source is on the active pane. */
+function useWhisperSource(
+  label: string,
+  whispers: Whispers | null,
+  enabled: boolean,
+  // Consecutive refusals can have identical words.
+  revision?: object,
+) {
+  const source = useRef<ViewInstance>(null);
+  // This whisper's own identity, kept for its lifetime.
+  const [owner] = useState<Owner>(() => ({}));
+  const active = usePaneActive() && enabled;
+  useEffect(() => {
+    if (active) return () => whispers?.hide(owner);
+  }, [active, owner, revision, whispers]);
+  const reveal = (x: number, y: number) => {
+    if (active) {
+      const anchor = measure(source.current) ?? { x, y, width: 0, height: 0 };
+      whispers?.show(label, anchor, owner);
+    }
+  };
+  return { source, active, reveal };
+}
+
 /** A long press on `children` whispers `label` above them. */
 function Heard({
   label,
@@ -252,30 +283,12 @@ function Heard({
   whispers,
   children,
 }: PropsWithChildren<WhisperProps & { whispers: Whispers }>) {
-  const source = useRef<ViewInstance>(null);
-  // This whisper's own identity, kept for its lifetime.
-  const [owner] = useState<Owner>(() => ({}));
-  const active = usePaneActive() && enabled;
-  const { show, hide } = whispers;
-  useEffect(() => {
-    if (!active) hide(owner);
-  }, [active, hide, owner]);
-  useEffect(() => () => hide(owner), [hide, owner]);
+  const { source, active, reveal } = useWhisperSource(label, whispers, enabled);
   const hold = useLongPressGesture({
     minDuration: DELAY_MS,
     runOnJS: true,
     enabled: active,
-    onActivate: event =>
-      show(
-        label,
-        measure(source.current) ?? {
-          x: event.absoluteX || 0,
-          y: event.absoluteY || 0,
-          width: 0,
-          height: 0,
-        },
-        owner,
-      ),
+    onActivate: event => reveal(event.absoluteX || 0, event.absoluteY || 0),
   });
   return (
     <GestureDetector gesture={hold}>
@@ -296,6 +309,48 @@ export function Whisper({
     <Heard {...props} whispers={whispers}>
       {children}
     </Heard>
+  );
+}
+
+/** Send refusals also answer a short tap. Pressable consumes the release
+ * of a long press, so either gesture opens the pill exactly once. */
+export function WhisperAlert({
+  label,
+  revision,
+  style,
+  children,
+}: PropsWithChildren<{
+  label: string;
+  revision: object;
+  style?: StyleProp<ViewStyle>;
+}>) {
+  const whispers = useContext(WhisperContext);
+  const { source, active, reveal } = useWhisperSource(
+    label,
+    whispers,
+    true,
+    revision,
+  );
+  // A browser presses on Enter with the DOM event itself, which has no
+  // nativeEvent and no place, so the mark's own measured place is used.
+  const explain = (event: GestureResponderEvent) =>
+    reveal(event.nativeEvent?.pageX || 0, event.nativeEvent?.pageY || 0);
+  return (
+    <Pressable
+      ref={source}
+      collapsable={false}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLabel={label}
+      style={style}
+      disabled={!active || !whispers}
+      onPress={explain}
+      onLongPress={explain}
+      delayLongPress={DELAY_MS}
+      android_disableSound
+    >
+      {children}
+    </Pressable>
   );
 }
 

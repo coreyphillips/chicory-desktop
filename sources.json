@@ -10,7 +10,8 @@
       "paymentImageScan": "dedc54a9c29b6262c413c028c238d1e97a5d0376",
       "privatePaymentNotes": "502c8e6ad19b949689589346ad01947b92395391",
       "privateNoteAlignment": "2486e709e85580e19677d750998ba370ce15bc36",
-      "balanceVisibility": "25eb76c284343f10ee2ced9c96e049a22534718b"
+      "balanceVisibility": "25eb76c284343f10ee2ced9c96e049a22534718b",
+      "failureExplanation": "30008a8abfc2abb390a4223a39406739aae6033b"
     }
   },
   "chicory-gallery": {

@@ -337,8 +337,8 @@ export function amountWords(
  * - amount: the amount takes the tone, as it does against the balance;
  * - control: a mark beside the control that asked.
  *
- * Each carries the engine's own message, which a screen reader hears and
- * Whisper shows, and `code` for the diagnostic log.
+ * Each carries the engine's message and code for announcements and
+ * diagnostics. The mark's accessible label and Whisper share its explanation.
  */
 export interface Failure {
   code: string;
@@ -350,12 +350,28 @@ export interface Failure {
   haptic: 'warning' | 'error';
 }
 
+/** Preserve the engine's detail for shortfalls, including the available
+ * amount and when more funds are expected. Diagnostics keep the raw message. */
+export function failureExplanation(failure: Failure): string {
+  switch (failure.code) {
+    case 'INVOICE_EXPIRED':
+      return copy.send.invoiceExpired;
+    case 'QUOTE_EXPIRED':
+      return copy.send.quoteExpired;
+    case 'WRONG_NETWORK':
+      return copy.send.wrongNetwork;
+    default:
+      return failure.message;
+  }
+}
+
 /** Codes for a request the engine will not pay, whatever the amount. */
 const REFUSED = new Set([
   'INVALID_REQUEST',
   'OFFER_NOT_QUOTABLE',
   'INVOICE_EXPIRED',
   'INVALID_NETWORK',
+  'WRONG_NETWORK',
   'AMOUNT_CONFLICT',
   'INPUT_TOO_LONG',
   'BIDI_CONTROL',
