@@ -395,11 +395,12 @@ function ringIn(): EntryExitAnimationFunction {
 export function headerIn(
   flight: Flight | null,
   item: Activity,
+  hasNote: boolean,
 ): { ring: EntryExitAnimationFunction; amount?: EntryExitAnimationFunction } {
   if (!flight || motionReduced()) return { ring: ringIn() };
   const parts = rowParts(flight.from, {
     banded: attentionOf(item) !== null,
-    note: !!item.description,
+    note: hasNote,
   });
   const figure = amountVisual(item).open
     ? ROW_OPEN / HEADER_OPEN

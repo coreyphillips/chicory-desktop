@@ -467,6 +467,52 @@ try {
   await screenshot('desktop-payment-detail');
   checks.push("A payment detail leaves Overview's balance in place");
 
+  const detail = page.getByTestId('slot-detail');
+  const addNote = detail.getByRole('button', { name: 'Add a private note' });
+  const editNote = detail.getByRole('button', { name: 'Edit private note' });
+  const saveNote = detail.getByRole('button', { name: 'Save private note' });
+  const noteField = detail.getByRole('textbox', { name: 'Private note' });
+  const memo = detail.getByLabel('Note, Friday funds', { exact: true });
+  const date = detail.locator('[aria-label^="Date, "]');
+  const [target, pencil, clock, memoBox] = await Promise.all([
+    addNote.boundingBox(), addNote.locator('svg').boundingBox(),
+    date.locator('svg').boundingBox(), memo.boundingBox(),
+  ]);
+  assert.ok(target.width >= 48 && target.height >= 48, 'The pencil has a full pointer target');
+  assert.ok(Math.abs(pencil.x - clock.x) < 1, 'The empty pencil aligns with the date glyph');
+  assert.ok(Math.abs(memoBox.x - (clock.x + clock.width + 12)) < 1, 'The original memo starts in the value column');
+  await addNote.focus();
+  await page.keyboard.press('Enter');
+  await expect(noteField).toBeFocused();
+  await noteField.fill('Unfinished edit');
+  await page.keyboard.press('Escape');
+  await expect(addNote).toBeFocused();
+  await page.keyboard.press('Space');
+  await noteField.fill('  Sample lunch  ');
+  await saveNote.click();
+  await expect(editNote).toBeFocused();
+  await expect(memo).toBeVisible();
+  await expect(detail.getByLabel('Private note, Sample lunch', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-pane="activity"]').getByText('Sample lunch', { exact: true })).toBeVisible();
+  await screenshot('desktop-private-note');
+
+  const history = page.locator('[data-pane="activity"]');
+  await history.getByRole('button', { name: 'Search activity' }).click();
+  const search = history.getByRole('textbox', { name: 'Search activity' });
+  for (const term of ['sample LUNCH', 'Friday funds']) {
+    await search.fill(term);
+    await expect(history.getByText('Sample lunch', { exact: true })).toBeVisible();
+    await expect(history.getByText('Morning coffee', { exact: true })).toHaveCount(0);
+  }
+  await history.getByRole('button', { name: 'Clear search' }).click();
+
+  await editNote.click();
+  await noteField.fill(' ');
+  await saveNote.click();
+  await expect(addNote).toBeFocused();
+  await expect(page.locator('[data-pane="activity"]').getByText('Friday funds', { exact: true })).toBeVisible();
+  checks.push('Private notes align with the detail glyphs, support keyboard editing and update Activity');
+
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);
   await nativeMenu('Overview');

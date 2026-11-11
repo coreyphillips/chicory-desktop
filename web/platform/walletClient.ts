@@ -1,5 +1,7 @@
 import { WalletClient, WalletError } from '@beignet/wallet-core';
-import type { ActivityStore, CreatedWallet, CreateWalletInput, ElectrumServer, Network } from '@beignet/wallet-core';
+import type { ActivityStore, WalletRecord, CreatedWallet, CreateWalletInput, ElectrumServer, Network } from '@beignet/wallet-core';
+
+import type { PaymentNote, PaymentNoteStore } from '../chicory/src/services/paymentNotes.ts';
 
 /** The wallet whose recovery phrase a new wallet on another network reuses. */
 export interface SeedReference { walletId: string; network: Network; nodeId?: string }
@@ -188,6 +190,30 @@ export class UmbrelWalletClient extends WalletClient {
       running: true,
       primaryConnected: Array.isArray(peers) && peers.some((peer: Peer) => typeof peer.pubkey === 'string' &&
         keys.includes(peer.pubkey) && (peer.state === 'connected' || peer.state === 'ready' || peer.connected === true)),
+    };
+  }
+
+  openPaymentNotes(wallet: Pick<WalletRecord, 'id' | 'network'>): PaymentNoteStore {
+    const connection = this.connection;
+    const path = `/api/wallets/${encodeURIComponent(wallet.id)}/payment-notes/${encodeURIComponent(wallet.network)}`;
+    const checkSelection = () => {
+      if (wallet.id !== connection.walletId || this.connection !== connection)
+        throw new WalletError('Reopen the selected wallet to edit its notes.', 'WALLET_CHANGED');
+    };
+    const request = async (method: string, body?: unknown) => {
+      checkSelection();
+      const entries = await this._request(path, method, body);
+      checkSelection();
+      if (!Array.isArray(entries) || !entries.every(row => Array.isArray(row) && row.length === 2 &&
+        typeof row[0] === 'string' && typeof row[1]?.text === 'string' &&
+        (row[1].address === undefined || typeof row[1].address === 'string')))
+        throw new WalletError('The local wallet returned unreadable private notes.', 'INVALID_RESPONSE');
+      return new Map<string, PaymentNote>(entries as [string, PaymentNote][]);
+    };
+    return {
+      read: () => request('GET'),
+      save: (key, note) => request('PUT', { key, note }),
+      move: moves => request('POST', { moves: [...moves] }),
     };
   }
 

@@ -127,6 +127,7 @@ export function GlyphButton({
   onBlocked,
   size = 56,
   tone = 'raised',
+  align = 'center',
   disabled = false,
   blocked = false,
   busy = false,
@@ -147,6 +148,8 @@ export function GlyphButton({
   onBlocked?: () => void;
   size?: number;
   tone?: 'primary' | 'raised' | 'bare';
+  /** Anchor a bare glyph to the text direction's leading edge of its hit target. */
+  align?: 'center' | 'start';
   disabled?: boolean;
   blocked?: boolean;
   busy?: boolean;
@@ -254,6 +257,7 @@ export function GlyphButton({
             }
             style={[
               styles.control,
+              bare && align === 'start' && styles.leading,
               children ? [styles.pill, pill] : round,
               primary
                 ? { backgroundColor: bloom }
@@ -453,6 +457,7 @@ const styles = StyleSheet.create({
   // The arrow's box, the size of Send's, for a switch to turn it in place.
   arrow: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   control: { alignItems: 'center', justifyContent: 'center' },
+  leading: { alignItems: 'flex-start' },
   pill: {
     flexDirection: 'row',
     gap: space.xs,

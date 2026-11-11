@@ -16,6 +16,7 @@ const { TorHealth } = require('./tor-health');
 const { subscribeToEvents } = require('./node-events');
 const { ChannelEventLog } = require('./channel-events');
 const { DirectFundingFallbackLog } = require('./direct-funding-fallbacks');
+const { removePaymentNotes } = require('./payment-notes');
 const { ActionLogCursor, PrintedStepReader, DirectFundingSteps, formatStep } = require('./df-steps');
 const {
 	GUARDIAN_SET_SIZE,
@@ -2641,6 +2642,7 @@ class WalletManager {
 		this._refuseIfPrimaryInUse(rec, 'This wallet cannot be deleted');
 		await this.stopWallet(id).catch(() => {});
 		const p = this.paths(id);
+		removePaymentNotes(p.base);
 		this.registry.remove(id);
 		this.runtime.delete(id);
 		this.channelLogs.delete(id);
