@@ -3,12 +3,13 @@
 // funded or mined until RegtestGate has verified the chain and every manager.
 // See docs/desktop-qualification.md.
 import assert from 'node:assert/strict';
-import { execFileSync, fork } from 'node:child_process';
+import { execFileSync, fork, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { _electron, expect } from '@playwright/test';
 import electronPath from 'electron';
@@ -28,7 +29,7 @@ const peerPort = Number(process.env.REGTEST_PEER_PORT ?? '3920');
 const output = path.resolve(process.env.CHICORY_QUALIFY_OUTPUT || path.join(root, 'artifacts/qualification'));
 // backup runs last: restoring a stale copy of the node may lead its peer to
 // close the channel, which no later stage could use.
-const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'primaries', 'recovery', 'transport', 'backup'];
+const ALL = ['preflight', 'payments', 'restart', 'crash', 'persistence', 'offline', 'max', 'drain', 'primaries', 'porch', 'recovery', 'transport', 'backup'];
 const BACKUP_PASSPHRASE = 'regtest qualification full backup passphrase';
 const stages = new Set((process.env.CHICORY_QUALIFY_STAGES || ALL.join(',')).split(',').map(item => item.trim()).filter(Boolean));
 for (const stage of stages) assert.ok(ALL.includes(stage), `Unknown stage ${stage}`);
@@ -36,6 +37,7 @@ const record = new Recorder();
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const profiles = [];
 let peer;
+let porch;
 
 async function until(label, read, okay = Boolean, timeout = 180000) {
   const start = Date.now(); let last; let seen;
@@ -248,6 +250,77 @@ async function startPeer() {
   // wallet takes its deposit address from its own daemon.
   const address = async walletId => (await call(`/wallets/${encodeURIComponent(walletId)}/api/address/new`, {})).address;
   return { child, api, call, address, client: walletId => createHostWalletClient({ walletId, fetch: fetchPeer }) };
+}
+
+async function freePort() {
+  const probe = net.createServer();
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const { port } = probe.address();
+  await new Promise(resolve => probe.close(resolve));
+  return port;
+}
+
+/**
+ * A Porch relay and a node that waits at it, both run from the bundled engine
+ * with the bundled Node: `beignet porch-relay` on loopback, and a daemon that
+ * has no Lightning listener, so its Porch link is the only way to reach it.
+ * The app hosts no Porch link itself, so the node is a bare daemon outside
+ * any manager, on its own encrypted database.
+ */
+async function startPorchHost() {
+  const node = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
+  const cli = path.join(runtime, 'engine/node_modules/beignet/dist/cli/cli.js');
+  const base = { PATH: process.env.PATH };
+  for (const key of ['SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP']) if (process.env[key]) base[key] = process.env[key];
+  const children = [];
+  const logs = [];
+  const run = (label, args, env, cwd) => {
+    const child = spawn(node, [cli, ...args], { env: { ...base, ...env }, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const keep = chunk => { logs.push(`[${label}] ${String(chunk).trim()}`.slice(0, 500)); if (logs.length > 60) logs.shift(); };
+    child.stdout.on('data', keep); child.stderr.on('data', keep);
+    children.push(child);
+    return child;
+  };
+  const stop = () => { for (const child of children) child.kill('SIGTERM'); };
+  try {
+    const relayPort = await freePort();
+    const relayUrl = `ws://127.0.0.1:${relayPort}`;
+    const home = await profile('porch-host');
+    const relay = run('relay', ['porch-relay', '--url', relayUrl, '--port', String(relayPort), '--host', '127.0.0.1'], { HOME: home }, home);
+    await until('Porch relay listening', () => new Promise((resolve, reject) => {
+      if (relay.exitCode !== null) return reject(new Error(`the relay exited with code ${relay.exitCode}: ${logs.join(' | ')}`));
+      const socket = net.connect({ host: '127.0.0.1', port: relayPort }, () => { socket.destroy(); resolve(true); });
+      socket.on('error', reject);
+    }), Boolean, 30000);
+    const apiPort = await freePort();
+    const token = randomBytes(32).toString('hex');
+    const bip39 = createRequire(import.meta.url)(path.join(root, 'server/node_modules/bip39'));
+    const daemon = run('host', ['start'], {
+      HOME: home, BEIGNET_DATA_DIR: path.join(home, 'data'), BEIGNET_MNEMONIC: bip39.generateMnemonic(), BEIGNET_API_TOKEN: token,
+      BEIGNET_NETWORK: 'regtest', BEIGNET_ALIAS: 'qualify porch host', BEIGNET_DAEMON_HOST: '127.0.0.1', BEIGNET_DAEMON_PORT: String(apiPort),
+      BEIGNET_ELECTRUM_HOST: electrum.host, BEIGNET_ELECTRUM_PORT: String(electrum.port), BEIGNET_ELECTRUM_TLS: 'false',
+      BEIGNET_LOG_LEVEL: 'warn', BEIGNET_AUTO_BOOTSTRAP: 'false',
+      // The bundled engine opens only encrypted storage; the manager hands
+      // its daemons their key the same way.
+      CHICORY_DATABASE_KEY: randomBytes(32).toString('hex'),
+      BEIGNET_PORCH_RELAYS: relayUrl,
+    }, home);
+    const call = async (route, body, method = body === undefined ? 'GET' : 'POST') => {
+      if (daemon.exitCode !== null) throw new Error(`the hosted node exited with code ${daemon.exitCode}: ${logs.join(' | ')}`);
+      const response = await fetch(`http://127.0.0.1:${apiPort}${route}`, { method,
+        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      const packet = await response.json();
+      if (!response.ok || packet.ok === false) throw Object.assign(new Error(packet.error?.message ?? `HTTP ${response.status}`), { code: packet.error?.code });
+      return packet.result;
+    };
+    const info = await until('hosted node ready', () => call('/info'), value => !!value?.nodeId, 90000);
+    assert.equal(info.listenPort, undefined, 'the hosted node has no Lightning listener');
+    return { call, stop, relayUrl, relayPort, nodeId: info.nodeId, logs };
+  } catch (error) {
+    stop();
+    throw error;
+  }
 }
 
 const healthy = (api, id, lightning = true) => until(`wallet ${id} ready`, () => api(`/wallets/${id}`),
@@ -647,6 +720,96 @@ try {
     }
   }
 
+  if (stages.has('porch')) {
+    // A Porch link as a primary node (coreyphillips/beignet#1980): a node with
+    // no listener of its own waits at a relay, and its link is pasted into
+    // Settings > Primary nodes. The relay is on loopback and speaks plain
+    // WebSocket, so this run says nothing of TLS to a relay or of a relay
+    // reached through Tor.
+    const current = await subject.api('/config');
+    if (current.porchPrimaryAvailable !== true) {
+      record.unsupported('a Porch link as a primary node', `Bundled engine ${current.engineVersion} does not route a Porch link's dial`);
+    } else {
+      porch = await startPorchHost();
+      gate.fund((await porch.call('/address/new', {})).address, 2_000_000);
+      gate.mine(1);
+      const hosting = await until('hosted node waits at the relay', () => porch.call('/porch/links'),
+        value => value.listening === true && value.relays?.[0]?.state === 'ready' && !!value.links?.[0]?.uris?.[0]);
+      const link = hosting.links[0].uris[0];
+      assert.match(link, new RegExp(`^${porch.nodeId}@ws://127\\.0\\.0\\.1:${porch.relayPort}/v1/p/[a-z2-7]{32}$`));
+      await until('hosted node funded', async () => { await porch.call('/wallet/refresh', {}).catch(() => {}); return porch.call('/balance'); }, value => value.onchain >= 1_000_000);
+      const walletApi = async (route, body, method = body === undefined ? 'GET' : 'POST') => {
+        const response = await subject.fetch(`/wallets/${encodeURIComponent(state.walletId)}/api${route}`, { method,
+          headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        const packet = await response.json();
+        if (!response.ok || packet.ok === false) throw Object.assign(new Error(packet.error?.message ?? `HTTP ${response.status}`), { code: packet.error?.code });
+        return packet.result;
+      };
+      const before = await wallet().listPrimaries();
+      const totalBefore = (await wallet().snapshot()).balance.totalSats;
+      // Pasted into Settings > Primary nodes, as a person would: the form says
+      // who sees what before the link is saved, and offers no Tor fallback.
+      const page = subject.page;
+      await page.locator('[data-scene="settings"]').click();
+      await page.getByRole('button', { name: /^Primary nodes/ }).first().click();
+      await page.getByRole('button', { name: 'Add a primary node', exact: true }).click();
+      await page.getByRole('textbox', { name: 'Node address', exact: true }).fill(link);
+      await expect(page.getByText('A Porch link reaches the node through a relay', { exact: false })).toBeVisible();
+      await expect(page.getByRole('textbox', { name: 'Optional Tor fallback URI', exact: true })).toHaveCount(0);
+      await page.screenshot({ path: path.join(output, 'ui-porch-link-entered.png') });
+      await page.getByRole('button', { name: 'Save primary node', exact: true }).click();
+      await expect(page.getByText('Primary node added.', { exact: false }).first()).toBeVisible({ timeout: 60000 });
+      // The list names the node by its relay, never by the route id.
+      const relayLabel = `ws://127.0.0.1:${porch.relayPort}`;
+      await expect(page.getByText(relayLabel, { exact: true }).first()).toBeVisible();
+      await page.screenshot({ path: path.join(output, 'ui-porch-link-added.png') });
+      const added = await wallet().listPrimaries();
+      assert.deepEqual(added.primaries.map(entry => entry.pubkey), [...before.primaries.map(entry => entry.pubkey), porch.nodeId], 'the engine ranks the Porch node last');
+      assert.equal(added.primaries.at(-1).uri, link, 'the engine keeps the link with its route');
+      // The manager's record follows: the entry holds the link, is trusted
+      // and dialed by its URL, and names no fallback.
+      const followed = await until('manager record follows the Porch add', () => subject.api(`/wallets/${state.walletId}`), value => {
+        const entry = value.lfbw?.primaries?.find(item => item.pubkey === porch.nodeId);
+        return !!entry && entry.setup === 'ready' && entry.uri === link;
+      });
+      // until() hands back what it read, so each read is the one row wanted.
+      const peerRow = await until('wallet connected through the relay', async () => (await walletApi('/peers')).find(item => item.pubkey === porch.nodeId),
+        row => row?.transport === 'ws' && row.state === 'ready');
+      const subjectRecord = await subject.api(`/wallets/${state.walletId}`);
+      const seen = await until('hosted node sees the wallet through its link', async () => (await porch.call('/peers')).find(item => item.pubkey === subjectRecord.nodeId),
+        row => !!row?.porch);
+      assert.ok(String(seen.porch.relay).includes(`127.0.0.1:${porch.relayPort}`), `the hosted node names the relay the wallet came through: ${JSON.stringify(seen.porch)}`);
+      // The hosted node opens a channel on the relayed connection (it has no
+      // other way to the wallet's node from here: /channel/open dials nothing)
+      // and pays over it once the funding has confirmed.
+      await porch.call('/channel/open', { pubkey: subjectRecord.nodeId, amountSats: 300000 });
+      const listed = await until('channel with the Porch node listed', mining(() => wallet().listPrimaries()), policy => policy.primaries.find(entry => entry.pubkey === porch.nodeId)?.channelCount >= 1);
+      await until('channel with the Porch node usable', mining(() => walletApi('/channels')), list => list.some(channel => channel.peerPubkey === porch.nodeId && channel.htlcUsable));
+      const pay = async bolt11 => porch.call('/invoice/pay', { bolt11 });
+      const incoming = await walletApi('/invoice/create', { amountSats: 40000, description: 'qualify porch receive' });
+      await until('hosted node pays the wallet', () => pay(incoming.bolt11).then(() => true));
+      const credited = await until('Porch node holds the receive', () => wallet().listPrimaries(), policy => policy.primaries.find(entry => entry.pubkey === porch.nodeId)?.balanceSat >= 39000);
+      // And back: an invoice of the hosted node's, paid by the wallet.
+      const outgoing = await porch.call('/invoice/create', { amountSats: 5000, description: 'qualify porch send' });
+      const sent = checkSent('send to the Porch node', await wallet().send(await until('route to the Porch node', () => wallet().prepareSend({ request: outgoing.bolt11 }), Boolean, 60000)));
+      await until('send to the Porch node settled', () => wallet().snapshot(), snap => snap.activity.some(item => item.paymentHash === outgoing.paymentHash && item.kind === 'sent' && item.status === 'completed'));
+      // Removed: the list is as it was, the channel and its funds still the wallet's.
+      const removed = await wallet().removePrimary(porch.nodeId);
+      assert.deepEqual(removed.primaries.map(entry => entry.pubkey), before.primaries.map(entry => entry.pubkey));
+      await until('manager record follows the Porch remove', () => subject.api(`/wallets/${state.walletId}`), value => !value.lfbw?.primaries?.some(entry => entry.pubkey === porch.nodeId));
+      const after = await wallet().snapshot();
+      assert.ok(after.balance.totalSats >= totalBefore + 30000, `the channel with the removed Porch node still counts: ${after.balance.totalSats} against ${totalBefore} before`);
+      record.pass('a Porch link pasted into Settings connects through the relay, takes a channel and pays both ways', {
+        relay: porch.relayUrl, link: link.replace(/[a-z2-7]{32}$/, '<route id>'), peerTransport: peerRow.transport, hostSeesRelay: seen.porch.relay,
+        managerEntry: (({ pubkey, setup, fallbackUri }) => ({ pubkey, setup, fallbackUri }))(followed.lfbw.primaries.find(entry => entry.pubkey === porch.nodeId)),
+        channelCount: listed.primaries.find(entry => entry.pubkey === porch.nodeId).channelCount,
+        receivedSats: 40000, porchBalanceSat: credited.primaries.find(entry => entry.pubkey === porch.nodeId).balanceSat,
+        sentSats: 5000, sendStatus: sent.status, networkMode: subjectRecord.networkMode, totalBefore, totalAfter: after.balance.totalSats,
+        notRun: ['TLS to a relay', 'a relay reached through Tor'] });
+      state.porch = { nodeId: porch.nodeId };
+    }
+  }
+
   if (stages.has('recovery')) {
     const phrase = await wallet().getRecoveryPhrase();
     const before = await wallet().snapshot();
@@ -733,6 +896,7 @@ try {
 } finally {
   await subject?.quit().catch(() => subject?.kill().catch(() => {}));
   peer?.child.kill('SIGTERM');
+  porch?.stop();
   await fs.writeFile(path.join(output, 'report.json'), JSON.stringify(record.report({ stages: [...stages], state }), null, 2) + '\n');
   console.log(`Report written to ${path.join(output, 'report.json')}`);
   // Profiles are kept for inspection only on request. They contain test wallets.

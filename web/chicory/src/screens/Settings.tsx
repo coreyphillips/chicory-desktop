@@ -38,7 +38,10 @@ import { useMotionPrefs } from '../motion/useMotionPrefs';
 import { unlockGlyph } from '../scenes/phases/visual';
 import { EmptyWallet } from '../scenes/settings/EmptyWallet';
 import { PrimariesPanel } from '../scenes/settings/PrimariesPanel';
-import { DEFAULT_FILL_TARGET_SATS } from '../scenes/settings/primariesModel';
+import {
+  DEFAULT_FILL_TARGET_SATS,
+  looksLikePorchLink,
+} from '../scenes/settings/primariesModel';
 import { DiagnosticsPanel } from '../scenes/settings/Diagnostics';
 import { useFieldScan } from '../scenes/settings/fieldScan';
 import { AutoPayGlyph, HapticsGlyph } from '../scenes/settings/glyphMotion';
@@ -422,6 +425,7 @@ function PrimaryPanel({
               <Note>{p.fallbackHint}</Note>
             </>
           ) : null}
+          {looksLikePorchLink(primary) ? <Note>{p.porch}</Note> : null}
           <Note>{p.keeps}</Note>
           <Action
             label={p.save}

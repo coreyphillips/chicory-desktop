@@ -56,12 +56,41 @@ export function fillOf(
 }
 
 /**
+ * A Porch link (coreyphillips/beignet#1980): the node waits at a relay, and
+ * its address is the relay's WebSocket URL, a fixed path and the node's
+ * route id.
+ */
+const PORCH_LINK =
+  /^([0-9a-fA-F]{66})@(wss?:\/\/[^/?#]+)(\/v1\/p\/)([^/?#]+)$/i;
+
+/** The key, the relay, the path and the route id of a Porch link, or null. */
+export function porchLinkParts(
+  uri: string,
+): { key: string; relay: string; path: string; route: string } | null {
+  const match = PORCH_LINK.exec(uri.trim());
+  if (!match) return null;
+  const [, key, relay, path, route] = match;
+  return { key, relay, path, route };
+}
+
+/**
+ * Whether what is being typed or was scanned is headed for a Porch link:
+ * a key and a WebSocket address. The form says what such a link means
+ * before it is saved, so this does not wait for the whole link.
+ */
+export const looksLikePorchLink = (uri: string): boolean =>
+  /@wss?:\/\//i.test(uri);
+
+/**
  * A node's name in the list: its host and port, with the key left out,
  * since the key is for copying and the host is for recognising. An onion
  * host keeps its first and last characters and its `.onion`; an Iroh node
- * its id, shortened. Anything that is not a node address is drawn as it is.
+ * its id, shortened; a Porch node is named by its relay, without the route.
+ * Anything that is not a node address is drawn as it is.
  */
 export function hostLabel(uri: string): string {
+  const porch = porchLinkParts(uri);
+  if (porch) return porch.relay.toLowerCase();
   const match = /^[0-9a-fA-F]{66}@(.+?)(:\d+)?$/.exec(uri.trim());
   if (!match) return uri.trim();
   const [, host, port = ''] = match;

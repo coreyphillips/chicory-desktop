@@ -39,6 +39,7 @@ import {
   fillOf,
   fillTargetShown,
   hostLabel,
+  looksLikePorchLink,
   moved,
   restingOffset,
   shiftOf,
@@ -588,6 +589,7 @@ export function PrimariesPanel({
     test: testNetwork(snapshot.wallet.network),
   });
   const iroh = /@iroh:/i.test(uri);
+  const porch = looksLikePorchLink(uri);
   const anyAway = rows.some(entry => !entry.connected);
 
   return (
@@ -731,6 +733,7 @@ export function PrimariesPanel({
               <Note>{words.primary.fallbackHint}</Note>
             </>
           ) : null}
+          {porch ? <Note>{words.primary.porch}</Note> : null}
           <Note>{p.addHint}</Note>
           <Action
             label={words.primary.save}

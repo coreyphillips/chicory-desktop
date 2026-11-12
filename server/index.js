@@ -12,6 +12,7 @@ const { mountBrowserWalletApi, atomicSave } = require('./browser-wallet');
 const { createDesktopDrains } = require('./desktop-drain');
 const { createDesktopAccessGuard } = require('./desktop-access');
 const { createUpdateHold } = require('./update-hold');
+const { createPorchGate } = require('./porch-gate');
 const { createSecureStore } = require('./secure-store');
 const { openPaymentNotes } = require('./payment-notes');
 
@@ -154,6 +155,11 @@ async function startManager({
 		}
 	});
 
+	// A Porch link added at the engine is refused first on an engine that
+	// would dial its relay outside the wallet's route (see porch-gate.js).
+	// With the bundled engine the request passes to the proxy untouched.
+	app.post('/wallets/:id/api/primaries/add', createPorchGate(manager));
+
 	app.use('/wallets/:id/api', (req, res, next) => {
 		if (!manager.target(req.params.id)) {
 			return res
@@ -256,6 +262,10 @@ async function startManager({
 				// Several ranked primary nodes and an address send out of one or
 				// several channels (coreyphillips/beignet#1924, engine 0.37.0).
 				primariesAvailable: manager.primariesAvailable(),
+				// A primary node may be a Porch link, pubkey@wss://relay/v1/p/<route
+				// id> (coreyphillips/beignet#1980): the engine dials it by the
+				// wallet's network mode, through Tor in Tor mode.
+				porchPrimaryAvailable: manager.porchPrimaryAvailable(),
 				channelSendAvailable: manager.channelSendAvailable()
 			}
 		});

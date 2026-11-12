@@ -207,6 +207,19 @@ function torProxyScopeAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'config.js', TOR_PROXY_SCOPE_MARKERS);
 }
 
+// A Porch link (coreyphillips/beignet#1980) names a node that waits at a
+// relay, reached as a WebSocket peer. Engine 0.39.0 dials a WebSocket peer
+// through the SOCKS proxy the way it dials a TCP peer (beignet #1995); the
+// engines before it dialed one directly whatever the proxy said, which a
+// wallet that sends everything through Tor must never do. The marker is the
+// proxied client's name in the module that picks the route.
+const PORCH_DIAL_MARKERS = ['nodeWebSocketVia'];
+
+/** True when the engine behind `bin` dials a Porch link by the route the wallet's network mode gives it. */
+function porchDialAvailable(bin = process.env.BEIGNET_BIN) {
+	return probe(bin, '../lightning/transport/peer-manager.js', PORCH_DIAL_MARKERS);
+}
+
 /** True when the engine behind `bin` verifies Electrum TLS certificates on request. */
 function electrumTlsVerifyAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'electrum-tls-config.js', ELECTRUM_TLS_VERIFY_MARKERS) && probe(bin, 'daemon-options.js', ['electrumTlsVerify', 'electrumTlsFingerprints']);
@@ -300,6 +313,8 @@ module.exports = {
 
 	offlineReceiveAvailable,
 	torProxyScopeAvailable,
+	porchDialAvailable,
+	PORCH_DIAL_MARKERS,
 	electrumTlsVerifyAvailable,
 	engineVersion,
 	fforAvailable,

@@ -88,6 +88,8 @@ export const settings = {
     save: 'Save primary node',
     scan: 'Scan primary node QR',
     iroh: "Iroh is experimental. Your primary node and its relay can see your computer's IP address. Use this for a node you control. Onion connections require a configured local Tor service.",
+    porch:
+      "A Porch link reaches the node through a relay. The relay can see your computer's IP address and when you connect, not what is sent, unless this wallet sends every connection through Tor. The node does not see your IP address.",
     fallback: 'Optional Tor fallback URI',
     fallbackHint:
       'Use the onion address for the same node key. Lightning falls back to Tor if Iroh is slow or unavailable.',
