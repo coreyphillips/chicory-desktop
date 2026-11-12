@@ -36,7 +36,7 @@ npm start
 ```
 
 `runtime:prepare` downloads an official Node release, checks its pinned SHA256,
-installs the pinned Beignet 0.38.1 engine from a lockfile, applies the reviewed
+installs the pinned Beignet 0.39.0 engine from a lockfile, applies the reviewed
 fresh-address, zero-reserve and encrypted-storage patches, builds the pinned encrypted SQLite
 driver, and verifies real encrypted database files. It also downloads and verifies
 the pinned official Tor Expert Bundle. Building the driver requires a C++ toolchain

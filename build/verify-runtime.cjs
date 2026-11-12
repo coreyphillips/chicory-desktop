@@ -91,7 +91,7 @@ module.exports = async function verifyRuntime(context) {
   const engine = path.join(runtime, 'engine/node_modules/beignet');
   const lock = fs.readFileSync(path.join(root, 'build/runtime/package-lock.json'));
   const lockHash = createHash('sha256').update(lock).digest('hex');
-  if (manifest.node !== '24.22.1' || manifest.engine !== '0.38.1' || manifest.encryptedStorage !== '13.0.3' || manifest.engineLockSha256 !== lockHash) {
+  if (manifest.node !== '24.22.1' || manifest.engine !== '0.39.0' || manifest.encryptedStorage !== '13.0.3' || manifest.engineLockSha256 !== lockHash) {
     throw new Error('The bundled runtime is out of date. Run npm run runtime:prepare before packaging.');
   }
   const binding = fs.readFileSync(path.join(engine, 'dist/lightning/storage/sqlite-binding.js'), 'utf8');

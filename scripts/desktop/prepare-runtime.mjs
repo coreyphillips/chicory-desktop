@@ -94,8 +94,8 @@ await prepareTor(root);
 // The app lock's Windows Hello prompt, owned by the Chicory window.
 if (windows) await buildWindowsHello(root);
 await fs.writeFile(path.join(runtime, 'manifest.json'), JSON.stringify({
-  node: version, engine: '0.38.1', encryptedStorage: storage.driver, platform: process.platform, arch: process.arch,
+  node: version, engine: '0.39.0', encryptedStorage: storage.driver, platform: process.platform, arch: process.arch,
   nodeArchive: archiveName, nodeArchiveSha256: selected[1],
   engineLockSha256: createHash('sha256').update(await fs.readFile(path.join(engine, 'package-lock.json'))).digest('hex'),
 }, null, 2) + '\n');
-console.log(`Desktop runtime ready: Node ${version}, Beignet 0.38.1, encrypted SQLite ${storage.driver}, bundled Tor${windows ? ', Windows Hello helper' : ''}, ${target}.`);
+console.log(`Desktop runtime ready: Node ${version}, Beignet 0.39.0, encrypted SQLite ${storage.driver}, bundled Tor${windows ? ', Windows Hello helper' : ''}, ${target}.`);
