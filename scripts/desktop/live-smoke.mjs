@@ -78,7 +78,7 @@ try {
   const firstManager = await open();
   const configuration = await page.evaluate(async () => (await fetch('/api/config')).json());
   assert.equal(configuration.ok, true);
-  assert.equal(configuration.result.engineVersion, '0.38.1');
+  assert.equal(configuration.result.engineVersion, '0.39.0');
   const wallets = await page.evaluate(async () => (await fetch('/api/wallets')).json());
   assert.deepEqual(wallets, { ok: true, result: [] });
   const state = await electron.evaluate(({ app, BrowserWindow }) => ({
@@ -105,7 +105,7 @@ try {
   assert.equal(marker.subarray(0, Buffer.byteLength('CHICORYVAULT1')).toString(), 'CHICORYVAULT1');
   assert.equal(marker.includes(Buffer.from('version')), false);
   checks.push('OS-protected storage key, authenticated encrypted vault marker and restart continuity');
-  checks.push('Isolated real profile, live manager API, Beignet 0.38.1, zero wallets, sandboxed renderer');
+  checks.push('Isolated real profile, live manager API, Beignet 0.39.0, zero wallets, sandboxed renderer');
 
   if (process.env.CHICORY_SMOKE_TOR === '1') {
     // Tor Project's published Onion-Location address, used only to exercise

@@ -101,7 +101,7 @@ export async function patchStorageEncryption(directory, { node } = {}) {
   }
   if (fs.existsSync(path.join(root, '.git'))) throw new Error('Refusing to patch a source checkout.');
   const packageInfo = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  if (packageInfo.name !== 'beignet' || packageInfo.version !== '0.38.1') throw new Error('Encrypted storage requires Beignet 0.38.1.');
+  if (packageInfo.name !== 'beignet' || packageInfo.version !== '0.39.0') throw new Error('Encrypted storage requires Beignet 0.39.0.');
   const driver = path.resolve(root, '../better-sqlite3-multiple-ciphers');
   const driverInfo = JSON.parse(fs.readFileSync(path.join(driver, 'package.json'), 'utf8'));
   if (driverInfo.name !== 'better-sqlite3-multiple-ciphers' || driverInfo.version !== DRIVER_VERSION || fs.existsSync(path.join(driver, '.git'))) {

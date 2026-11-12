@@ -159,6 +159,26 @@ app was not qualified before publishing: the fresh install, the upgrade over
 a funded 0.3.5 and the update-path checks in [releases.md](releases.md) remain
 to be run and recorded here.
 
+The bundled engine then moves from Beignet 0.38.1 to 0.39.0
+(coreyphillips/beignet#1980). On 2026-11-12 the source checkout (not a
+package) passed `npm run check` (typecheck, 159 web, 134 desktop with 4
+skipped, 12 qualification and 533 server tests, build), rendered the 96 gallery
+states at both widths, and ran the regtest qualification stages `preflight`,
+`payments` and `primaries` on macOS Apple Silicon against the bundled Beignet
+0.39.0 and wallet-core `9027384`: 7 checks passed, direct funding skipped as
+always. Both host patches apply to the published 0.39.0 package at their
+reviewed anchors, and the two modules the encrypted-storage patch rewrites
+(`sqlite-binding.js` and `restore.js`) are byte-identical to 0.38.1's. The
+engine's `listPayments` and its offline-receive channel rule are unchanged, so
+the completed-debit projection and the offline capacity figure carry over, and
+every capability probe answers as it did on 0.38.1. The runtime lockfile takes
+the engine's one dependency change, bitcoinjs-lib 6.1.4 to 6.1.10. What 0.39.0
+changes for the desktop: a WebSocket peer is dialed through the SOCKS proxy
+the way a TCP peer is (coreyphillips/beignet#1995), so a wallet that sends
+everything through Tor no longer dials one directly. The engine can also wait
+at a Porch relay and run Iroh relay-only; the desktop turns neither on. The
+packaged build was not run for this change.
+
 The release workflow, signed update manifest and manual update path are
 described in [releases.md](releases.md). The workflow stays unused until the
 owner's signing identities are configured on GitHub.

@@ -33,7 +33,7 @@
     "commit": "90273846381bbc6775bc5a9a1d27409a18ee0744",
     "destination": "package.json dependency"
   },
-  "engineVersion": "0.38.1",
+  "engineVersion": "0.39.0",
   "enginePatches": [
     "scripts/apply-engine-patches.mjs",
     "scripts/apply-storage-encryption.mjs"
