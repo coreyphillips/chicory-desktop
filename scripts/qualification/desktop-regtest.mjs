@@ -722,10 +722,10 @@ try {
 
   if (stages.has('porch')) {
     // A Porch link as a primary node (coreyphillips/beignet#1980): a node with
-    // no listener of its own waits at a relay, and the wallet takes its link
-    // through the wallet client, as Settings > Primary nodes does. The relay
-    // is on loopback and speaks plain WebSocket, so this run says nothing of
-    // TLS to a relay or of a relay reached through Tor.
+    // no listener of its own waits at a relay, and its link is pasted into
+    // Settings > Primary nodes. The relay is on loopback and speaks plain
+    // WebSocket, so this run says nothing of TLS to a relay or of a relay
+    // reached through Tor.
     const current = await subject.api('/config');
     if (current.porchPrimaryAvailable !== true) {
       record.unsupported('a Porch link as a primary node', `Bundled engine ${current.engineVersion} does not route a Porch link's dial`);
@@ -747,7 +747,23 @@ try {
       };
       const before = await wallet().listPrimaries();
       const totalBefore = (await wallet().snapshot()).balance.totalSats;
-      const added = await wallet().addPrimary({ uri: link });
+      // Pasted into Settings > Primary nodes, as a person would: the form says
+      // who sees what before the link is saved, and offers no Tor fallback.
+      const page = subject.page;
+      await page.locator('[data-scene="settings"]').click();
+      await page.getByRole('button', { name: /^Primary nodes/ }).first().click();
+      await page.getByRole('button', { name: 'Add a primary node', exact: true }).click();
+      await page.getByRole('textbox', { name: 'Node address', exact: true }).fill(link);
+      await expect(page.getByText('A Porch link reaches the node through a relay', { exact: false })).toBeVisible();
+      await expect(page.getByRole('textbox', { name: 'Optional Tor fallback URI', exact: true })).toHaveCount(0);
+      await page.screenshot({ path: path.join(output, 'ui-porch-link-entered.png') });
+      await page.getByRole('button', { name: 'Save primary node', exact: true }).click();
+      await expect(page.getByText('Primary node added.', { exact: false }).first()).toBeVisible({ timeout: 60000 });
+      // The list names the node by its relay, never by the route id.
+      const relayLabel = `ws://127.0.0.1:${porch.relayPort}`;
+      await expect(page.getByText(relayLabel, { exact: true }).first()).toBeVisible();
+      await page.screenshot({ path: path.join(output, 'ui-porch-link-added.png') });
+      const added = await wallet().listPrimaries();
       assert.deepEqual(added.primaries.map(entry => entry.pubkey), [...before.primaries.map(entry => entry.pubkey), porch.nodeId], 'the engine ranks the Porch node last');
       assert.equal(added.primaries.at(-1).uri, link, 'the engine keeps the link with its route');
       // The manager's record follows: the entry holds the link, is trusted
@@ -783,7 +799,7 @@ try {
       await until('manager record follows the Porch remove', () => subject.api(`/wallets/${state.walletId}`), value => !value.lfbw?.primaries?.some(entry => entry.pubkey === porch.nodeId));
       const after = await wallet().snapshot();
       assert.ok(after.balance.totalSats >= totalBefore + 30000, `the channel with the removed Porch node still counts: ${after.balance.totalSats} against ${totalBefore} before`);
-      record.pass('a Porch link added through the wallet client connects through the relay, takes a channel and pays both ways', {
+      record.pass('a Porch link pasted into Settings connects through the relay, takes a channel and pays both ways', {
         relay: porch.relayUrl, link: link.replace(/[a-z2-7]{32}$/, '<route id>'), peerTransport: peerRow.transport, hostSeesRelay: seen.porch.relay,
         managerEntry: (({ pubkey, setup, fallbackUri }) => ({ pubkey, setup, fallbackUri }))(followed.lfbw.primaries.find(entry => entry.pubkey === porch.nodeId)),
         channelCount: listed.primaries.find(entry => entry.pubkey === porch.nodeId).channelCount,

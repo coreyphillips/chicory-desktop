@@ -51,6 +51,7 @@ import { PANE_SETTLE_MS } from '../../stage/layout';
 import { usePaneActive } from '../../stage/panes/Pane';
 import { HIT_SLOP, fonts, radius, space, type } from '../../theme';
 import { drawPlan } from './motion';
+import { porchLinkParts } from './primariesModel';
 
 /**
  * The Settings language (REDESIGN.md rule 2): the one place words stay on
@@ -1273,8 +1274,22 @@ export const unbroken = (token: string): string =>
  * `.0.0.1:19846`) and left a port's last digit on a line of its own; where
  * it is drawn gives its widest piece a line (`copyFit`). Anything that is
  * not a node address is drawn as it is.
+ *
+ * A Porch link's address is a URL (`wss://relay/v1/p/<route id>`), too long
+ * for one piece: the relay is one, and the path with the route id follows it
+ * in pieces of eight characters, with nothing drawn between them.
  */
 export function nodeAddressText(uri: string): string {
+  const porch = porchLinkParts(uri);
+  if (porch) {
+    const [first, ...rest] = porch.route.match(/.{1,8}/g)!;
+    return [
+      `${porch.key.match(/.{1,4}/g)!.join(' ')}@`,
+      unbroken(porch.relay),
+      unbroken(`${porch.path}${first}`),
+      ...rest,
+    ].join(BREAK);
+  }
   const match = /^([0-9a-fA-F]{66})(?:@(.+?)(:\d+)?)?$/.exec(uri.trim());
   if (!match) return uri;
   const [, key, host, port] = match;
