@@ -183,17 +183,118 @@ test('the onion-only Tor proxy scope is read off the config module that parses i
 	assert.equal(torProxyScopeAvailable(undefined), false);
 });
 
-test('Iroh requires implemented listener and configuration support', () => {
-	const { irohAvailable } = require('./engine');
+/**
+ * @number0/iroh beside a fake engine, the way npm lays it out: the loader
+ * package and, when `target` is given, the one addon package for a platform.
+ * `nested` puts them under the engine itself, as a global install does.
+ */
+function fakeIroh(root, { target, nested = false, addonFile = true } = {}) {
+	const modules = nested ? path.join(root, 'node_modules', 'beignet', 'node_modules') : path.join(root, 'node_modules');
+	const loader = path.join(modules, '@number0', 'iroh');
+	fs.mkdirSync(loader, { recursive: true });
+	fs.writeFileSync(path.join(loader, 'package.json'), JSON.stringify({ name: '@number0/iroh', version: '1.1.0', main: 'index.js' }));
+	fs.writeFileSync(path.join(loader, 'index.js'), '');
+	if (target) {
+		const addon = path.join(modules, '@number0', `iroh-${target}`);
+		fs.mkdirSync(addon, { recursive: true });
+		fs.writeFileSync(path.join(addon, 'package.json'), JSON.stringify({ name: `@number0/iroh-${target}`, version: '1.1.0', main: `iroh.${target}.node` }));
+		if (addonFile) fs.writeFileSync(path.join(addon, `iroh.${target}.node`), '');
+	}
+	return loader;
+}
+
+function irohEngine(bin) {
+	fs.writeFileSync(path.join(path.dirname(bin), 'config.js'), 'BEIGNET_IROH');
+	fs.writeFileSync(path.join(path.dirname(bin), 'iroh-config.js'), 'BEIGNET_IROH_RELAYS');
+	fs.writeFileSync(path.join(path.dirname(bin), 'beignet-node.js'), 'listenIroh( irohUri');
+}
+
+const MAC_ARM = { platform: 'darwin', arch: 'arm64' };
+const MAC_INTEL = { platform: 'darwin', arch: 'x64' };
+
+test('the engine knows Iroh when its listener and configuration are both there', () => {
+	const { irohEngineAvailable, irohAvailable } = require('./engine');
 	const { root, bin } = fakeInstall('0.26.0');
 	try {
-		assert.equal(irohAvailable(bin), false);
+		assert.equal(irohEngineAvailable(bin), false);
 		fs.writeFileSync(path.join(path.dirname(bin), 'config.js'), 'BEIGNET_IROH');
 		fs.writeFileSync(path.join(path.dirname(bin), 'iroh-config.js'), 'BEIGNET_IROH_RELAYS');
-		assert.equal(irohAvailable(bin), false);
+		assert.equal(irohEngineAvailable(bin), false);
 		fs.writeFileSync(path.join(path.dirname(bin), 'beignet-node.js'), 'listenIroh( irohUri');
-		assert.equal(irohAvailable(bin), true);
+		assert.equal(irohEngineAvailable(bin), true);
+		// The engine alone opens no Iroh connection: that takes its native module.
+		assert.equal(irohAvailable(bin, MAC_ARM), false);
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	assert.equal(irohEngineAvailable(undefined), false);
+});
+
+test('Iroh takes the native module for this platform and architecture, which an Intel Mac has none of (issue #80)', () => {
+	const { irohModuleAvailable, irohAvailable } = require('./engine');
+	// Each state gets its own install: Node remembers a path it resolved.
+	const state = (options, check) => {
+		const { root, bin } = fakeInstall('0.38.1');
+		try {
+			irohEngine(bin);
+			const loader = options === null ? null : fakeIroh(root, options);
+			check(bin, loader);
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	};
+
+	state(null, (bin) => {
+		assert.equal(irohModuleAvailable(bin, MAC_ARM), false, 'no @number0/iroh at all');
+		assert.equal(irohAvailable(bin, MAC_ARM), false);
+	});
+	state({}, (bin) => assert.equal(irohModuleAvailable(bin, MAC_ARM), false, 'the loader without an addon'));
+	// What an Apple Silicon build carries, and the same tree seen from an
+	// Intel Mac, where npm installs no addon because none is published.
+	state({ target: 'darwin-arm64' }, (bin) => {
+		assert.equal(irohModuleAvailable(bin, MAC_ARM), true);
+		assert.equal(irohAvailable(bin, MAC_ARM), true);
+		assert.equal(irohModuleAvailable(bin, MAC_INTEL), false);
+		assert.equal(irohAvailable(bin, MAC_INTEL), false);
+		assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'arm64' }), false);
+	});
+	state({ target: 'darwin-universal' }, (bin) => assert.equal(irohModuleAvailable(bin, MAC_INTEL), true, 'a universal addon serves both'));
+	state({ target: 'win32-x64-msvc' }, (bin) => {
+		assert.equal(irohModuleAvailable(bin, { platform: 'win32', arch: 'x64' }), true);
+		assert.equal(irohModuleAvailable(bin, { platform: 'win32', arch: 'arm64' }), false);
+	});
+	state({ target: 'linux-x64-gnu' }, (bin) => assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'x64' }), true));
+	state({ target: 'linux-x64-musl' }, (bin) => assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'x64' }), true));
+	// arm and arm64 are different targets, in both directions.
+	state({ target: 'linux-arm64-gnu' }, (bin) => {
+		assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'arm64' }), true);
+		assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'arm' }), false);
+	});
+	state({ target: 'linux-arm-gnueabihf' }, (bin) => {
+		assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'arm' }), true);
+		assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'arm64' }), false);
+	});
+	// An addon package whose binary did not arrive is no module.
+	state({ target: 'darwin-arm64', addonFile: false }, (bin) => assert.equal(irohModuleAvailable(bin, MAC_ARM), false));
+	// A local build sits beside the loader instead of in a package of its own.
+	state({}, (bin, loader) => {
+		fs.writeFileSync(path.join(loader, 'iroh.darwin-x64.node'), '');
+		assert.equal(irohModuleAvailable(bin, MAC_INTEL), true);
+		assert.equal(irohModuleAvailable(bin, MAC_ARM), false);
+	});
+	// A global install keeps the packages under the engine itself.
+	state({ target: 'linux-x64-gnu', nested: true }, (bin) => assert.equal(irohModuleAvailable(bin, { platform: 'linux', arch: 'x64' }), true));
+	// The engine has to know Iroh as well.
+	const { root, bin } = fakeInstall('0.20.0');
+	try {
+		fakeIroh(root, { target: 'darwin-arm64' });
+		assert.equal(irohModuleAvailable(bin, MAC_ARM), true);
+		assert.equal(irohAvailable(bin, MAC_ARM), false);
+	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	assert.equal(irohModuleAvailable(undefined), false);
+});
+
+test('a refusal names the computer the Iroh module is missing for', () => {
+	const { irohModuleMissing } = require('./engine');
+	assert.equal(irohModuleMissing(MAC_INTEL), 'This app has no Iroh module for this computer (macOS on x64)');
+	assert.equal(irohModuleMissing({ platform: 'win32', arch: 'arm64' }), 'This app has no Iroh module for this computer (Windows on arm64)');
+	assert.equal(irohModuleMissing({ platform: 'freebsd', arch: 'x64' }), 'This app has no Iroh module for this computer (freebsd on x64)');
 });
 
 test('Electrum certificate verification needs the env parser and the option wiring (beignet #1776)', () => {

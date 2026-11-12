@@ -153,7 +153,10 @@ test('Iroh defaults off, validates relay choices and retains settings on unrelat
 	assert.deepEqual(nm.normalizeIroh(undefined, { existing, available: true }), existing);
 	assert.deepEqual(nm.normalizeIroh({ enabled: true, relays: null }, { existing, available: true }), { enabled: true });
 	assert.deepEqual(nm.normalizeIroh(undefined, { existing, onchainOnly: true }), { ...existing, enabled: false });
-	assert.throws(() => nm.normalizeIroh({ enabled: true }), { code: 'IROH_UNSUPPORTED' });
+	assert.throws(() => nm.normalizeIroh({ enabled: true }), { code: 'IROH_UNSUPPORTED', message: 'The bundled engine does not support Iroh.' });
+	// The engine knows Iroh and this computer has no native module for it (issue #80).
+	assert.throws(() => nm.normalizeIroh({ enabled: true }, { available: false, engineAvailable: true }), { code: 'IROH_UNSUPPORTED', message: /^This app has no Iroh module for this computer \(.+ on .+\)\.$/ });
+	assert.deepEqual(nm.normalizeIroh(undefined, { existing, available: false, engineAvailable: true }), existing, 'an edit of something else keeps the block');
 	for (const relays of ['https://relay.example', ['ftp://relay.example'], ['https://user:pass@relay.example'], ['https://relay.example/?key=x'], ['https://relay.example/#x'], ['https://relay.example/,https://other.example']]) {
 		assert.throws(() => nm.normalizeIroh({ enabled: true, relays }, { available: true }), { code: 'BAD_IROH' });
 	}

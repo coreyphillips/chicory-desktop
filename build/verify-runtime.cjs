@@ -45,6 +45,40 @@ function verifyWindowsHello(root, arch) {
   }
 }
 
+// The @number0/iroh addon packages the reviewed lock names for a target.
+function irohAddonsFor(lock, platform, arch) {
+  return Object.entries(lock.packages || {})
+    .filter(([name, entry]) => /(^|\/)node_modules\/@number0\/iroh-[^/]+$/.test(name) &&
+      (entry.os || []).includes(platform) && (entry.cpu || []).includes(arch))
+    .map(([name]) => name.slice(name.lastIndexOf('@number0/')));
+}
+
+function loadIroh(node, engine) {
+  execFileSync(node, ['-e', "process.exit(require('@number0/iroh/index.js').Endpoint ? 0 : 1)"], { cwd: engine, stdio: 'pipe', timeout: 60000 });
+}
+
+// The engine opens Iroh connections through a native module published per
+// platform. Where the reviewed lock names one for this target, it must be
+// installed and must load under the bundled Node, or the app would ship
+// saying it can dial an Iroh link when it cannot. Where the lock names none
+// (macOS on x64 at @number0/iroh 1.1.0) the app takes an Iroh link only with
+// its onion fallback (issue #80), and a module found there anyway is one
+// nobody reviewed. Returns whether this target has the module.
+function verifyIroh(node, engine, lock, platform, arch, load = loadIroh) {
+  const { irohModuleAvailable } = require('../server/engine');
+  const expected = irohAddonsFor(lock, platform, arch);
+  const found = irohModuleAvailable(path.join(engine, 'dist/cli/cli.js'), { platform, arch });
+  if (!expected.length) {
+    if (found) throw new Error(`An Iroh module is bundled for ${platform}-${arch}, and the reviewed lock names none.`);
+    return false;
+  }
+  if (!found) throw new Error(`The Iroh module for ${platform}-${arch} is missing. Run npm run runtime:prepare.`);
+  try { load(node, engine); } catch (error) {
+    throw new Error(`The bundled Iroh module does not load under the bundled Node: ${String(error.stderr || error.message).trim().split('\n').pop()}`);
+  }
+  return true;
+}
+
 module.exports = async function verifyRuntime(context) {
   const root = context.packager.projectDir;
   const runtime = path.join(root, '.runtime');
@@ -55,7 +89,8 @@ module.exports = async function verifyRuntime(context) {
     throw new Error('The wallet runtime must be prepared and packaged on its target OS and architecture.');
   }
   const engine = path.join(runtime, 'engine/node_modules/beignet');
-  const lockHash = createHash('sha256').update(fs.readFileSync(path.join(root, 'build/runtime/package-lock.json'))).digest('hex');
+  const lock = fs.readFileSync(path.join(root, 'build/runtime/package-lock.json'));
+  const lockHash = createHash('sha256').update(lock).digest('hex');
   if (manifest.node !== '24.22.1' || manifest.engine !== '0.38.1' || manifest.encryptedStorage !== '13.0.3' || manifest.engineLockSha256 !== lockHash) {
     throw new Error('The bundled runtime is out of date. Run npm run runtime:prepare before packaging.');
   }
@@ -70,7 +105,10 @@ module.exports = async function verifyRuntime(context) {
   if (execFileSync(node, ['--version'], { encoding: 'utf8' }).trim() !== 'v24.22.1') throw new Error('Wrong bundled Node version.');
   const { verifyDriver } = await import(pathToFileURL(path.join(root, 'scripts/apply-storage-encryption.mjs')).href);
   verifyDriver(node, engine);
+  verifyIroh(node, engine, JSON.parse(lock), manifest.platform, manifest.arch);
   verifyTor(path.join(runtime, 'tor'), manifest.platform, manifest.arch);
   if (manifest.platform === 'win32') verifyWindowsHello(root, manifest.arch);
 };
 module.exports.verifyTor = verifyTor;
+module.exports.verifyIroh = verifyIroh;
+module.exports.irohAddonsFor = irohAddonsFor;

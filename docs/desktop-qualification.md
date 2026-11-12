@@ -69,7 +69,7 @@ against the Linux x64 package on manual dispatch and uploads the report.
 | drain | A new wallet in the same app with that one home channel and a coin below the channelize floor, confirmed in the wallet's own engine. A send-max quote, then, where the manager advertises `drainAvailable`: drain review, a deposit after review, completed two-leg drain (cooperative close and sweep, each confirmed on chain), the destination credited exactly the drained amount, the later deposit retained |
 | primaries | A second primary node on the peer manager, funded and providing liquidity, is added through the wallet client as the app's Settings > Primary nodes does (coreyphillips/beignet#1924). The engine lists both in rank order and the local manager's record follows with both set up. A soft fill target below the home channel's balance makes the second node the receive target; a Lightning receive quoted without naming a node is taken by it, paid by the payer, and opens the wallet's channel with it. The target is cleared and the second node removed: the list is one node again and the channel with the removed node still counts in the total |
 | recovery | Recovery phrase import into a fresh profile, on-chain funds restored |
-| transport | Records whether the bundled engine advertises Iroh |
+| transport | Records whether this build can open an Iroh connection: the bundled engine advertises Iroh and its native module exists for the platform |
 | backup | Full backup exported from the funded wallet, then made stale by a later payment. With the original app closed, it is restored into a fresh profile with its own keys. A wrong passphrase and a changed byte are refused and leave nothing. The restored wallet keeps its identity and history, every open channel is held (`restoreRecencyUnproven`), and a payment over it does not complete. Runs last, because the peer may close the channel when it meets the stale copy |
 
 ## Recovery support
@@ -86,9 +86,15 @@ These remain release work and are recorded as unsupported or absent, never as
 passed:
 
 - Iroh direct, relay, blocked UDP, relay failure and same-key onion fallback.
-  The manager can enable Iroh on an engine that advertises it, but the engine
-  does not report its active path, so the harness cannot record transport
-  evidence.
+  The engine reports a peer's active path (`GET /peers` gives `transport` and
+  `iroh.path`), but the harness reaches its primary over TCP on loopback and
+  has no Iroh primary to sample, so it records no transport evidence.
+- Iroh on macOS x64. `@number0/iroh` publishes no native module for it, so
+  that build cannot open an Iroh connection. The manager reports
+  `irohAvailable: false` with `irohUnavailable: "module"` there and takes an
+  Iroh link only with an onion fallback for the same node key, which the
+  engine then reaches through Tor. The packaging hooks check that every other
+  target carries the module and that it loads under the bundled Node.
 - Direct funding. No payer in the harness holds a confirmed coin outside its
   channel, so no send uses a request's funding envelope. The payments stage
   records it as skipped.

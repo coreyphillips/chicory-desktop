@@ -219,6 +219,10 @@ async function startManager({
 				// it the dashboard offers no verify switch.
 				electrumTlsVerifyAvailable: manager.electrumTlsVerifyAvailable(),
 				irohAvailable: manager.irohAvailable(),
+				// Why not, when it is not: 'engine' (the bundled engine predates
+				// Iroh) or 'module' (no native Iroh module for this platform, where
+				// an Iroh link is reached through its onion fallback alone).
+				irohUnavailable: manager.irohUnavailable(),
 				// Channel backup (the Recovery Protocol) needs an engine that
 				// carries its surface; older engines get no controls for it.
 				engineVersion: manager.engineVersion,

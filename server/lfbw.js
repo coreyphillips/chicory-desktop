@@ -22,6 +22,7 @@
  */
 
 const { parsePrimaryUri, parsePrimaryFallback } = require('./primary-uri');
+const { irohModuleMissing } = require('./engine');
 
 // On-chain funds below this wait; at or above it they move into the home
 // channel once every UTXO has confirmed.
@@ -148,6 +149,16 @@ const MAX_PRIMARIES = 32;
 
 function isIrohUri(uri) {
 	return /^[^@]+@iroh:/i.test(uri || '');
+}
+
+/**
+ * What to say of an Iroh link with no onion fallback on a computer that has
+ * no native Iroh module (issue #80). It reads the same where a link is
+ * entered and where a stored one fails to set up, and onboarding has no
+ * fallback field, so it names the other way out first.
+ */
+function irohNeedsFallback() {
+	return `${irohModuleMissing()}, so it cannot connect through an Iroh link alone. Use another address for the node, or add its onion address as the Tor fallback.`;
 }
 
 /** Whether any of a lightning-first block's primaries is reached over Iroh. */
@@ -330,8 +341,10 @@ function isLfbw(rec) {
  * is not lightning-first. `existing` is the wallet's current block, kept
  * (setup state, the one-time initial open) when the primary is unchanged so
  * an edit that only touches trust does not re-run a first open.
+ * `irohAvailable` is the engine's own Iroh support and `irohModule` whether
+ * its native module is installed on this computer.
  */
-function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, existing: existingBlock } = {}) {
+function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, irohModule, existing: existingBlock } = {}) {
 	if (!input || !input.enabled) return null;
 	if (!available) {
 		throw httpError(
@@ -432,12 +445,22 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 			} catch (err) {
 				throw httpError(400, 'BAD_LFBW_PEER', err.message);
 			}
-			if (parsed.transport && parsed.transport.type === 'iroh' && !irohAvailable) {
-				throw httpError(
-					400,
-					'IROH_UNSUPPORTED',
-					'The bundled engine does not support Iroh, so it cannot reach this primary node.'
-				);
+			if (parsed.transport && parsed.transport.type === 'iroh') {
+				if (!irohAvailable) {
+					throw httpError(
+						400,
+						'IROH_UNSUPPORTED',
+						'The bundled engine does not support Iroh, so it cannot reach this primary node.'
+					);
+				}
+				// An engine that knows Iroh and has no native module for it
+				// here (issue #80) reaches an Iroh node through the onion
+				// fallback alone, so a link without one could never connect.
+				// An entry the record already holds that way is left as it
+				// is: its setup says why it fails, and refusing it here would
+				// refuse every other edit of the wallet with it.
+				const held = !!prior && prior.uri === parsed.uri && !prior.fallbackUri;
+				if (irohModule !== true && !fallback && !held) throw httpError(400, 'IROH_UNSUPPORTED', irohNeedsFallback());
 			}
 			if (entries.some((e) => e.pubkey === parsed.pubkey)) {
 				throw httpError(400, 'BAD_LFBW_PEER', 'The same primary node is listed twice');
@@ -922,6 +945,7 @@ module.exports = {
 	parseNodeUri,
 	parsePrimaryFallback,
 	isIrohPrimary,
+	irohNeedsFallback,
 	isLfbw,
 	normalizeLfbw,
 	migratePrimaries,

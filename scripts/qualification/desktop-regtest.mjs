@@ -663,8 +663,12 @@ try {
 
   if (stages.has('transport')) {
     const current = await subject.api('/config');
-    if (!current.irohAvailable) record.unsupported('Iroh direct, relay and onion fallback', `Bundled engine ${current.engineVersion} does not advertise Iroh`);
-    else record.skip('Iroh direct, relay and onion fallback', 'Transport evidence requires the engine to report its active path. See docs/desktop-qualification.md.');
+    // No Iroh connection can be opened where the engine predates Iroh or
+    // the platform has no native module for it (macOS on x64).
+    if (!current.irohAvailable) record.unsupported('Iroh direct, relay and onion fallback', current.irohUnavailable === 'module'
+      ? `No Iroh module is bundled for ${process.platform}-${process.arch}, so an Iroh link is taken only with its onion fallback`
+      : `Bundled engine ${current.engineVersion} does not advertise Iroh`);
+    else record.skip('Iroh direct, relay and onion fallback', 'The harness reaches its primary over TCP on loopback and has no Iroh primary to sample. See docs/desktop-qualification.md.');
   }
 
   if (stages.has('backup')) {

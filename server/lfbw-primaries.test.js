@@ -30,7 +30,7 @@ const URI_C = `${PK_C}@c.example:9737`;
 const ONION = 'b'.repeat(56) + '.onion';
 
 const normalize = (input, extra = {}) =>
-	lfbw.normalizeLfbw(input, { network: 'regtest', selfId: 'w1', available: true, irohAvailable: true, getRecord: () => null, ...extra });
+	lfbw.normalizeLfbw(input, { network: 'regtest', selfId: 'w1', available: true, irohAvailable: true, irohModule: true, getRecord: () => null, ...extra });
 
 const legacy = (extra = {}) => ({
 	enabled: true,
@@ -120,6 +120,15 @@ test('a lightning-first request may list the ranked primaries; the first is the 
 		() => normalize({ enabled: true, primaries: [{ uri: URI_A }, { uri: `${PK_B}@iroh:${'8e'.repeat(32)}` }] }, { irohAvailable: false }),
 		(err) => err.code === 'IROH_UNSUPPORTED'
 	);
+	// Without the native Iroh module (issue #80) a ranked Iroh entry is taken
+	// only with its onion fallback, and the entries around it are unaffected.
+	const irohB = `${PK_B}@iroh:${'8e'.repeat(32)}`;
+	assert.throws(
+		() => normalize({ enabled: true, primaries: [{ uri: URI_A }, { uri: irohB }] }, { irohModule: false }),
+		(err) => err.code === 'IROH_UNSUPPORTED' && /Tor fallback/.test(err.message)
+	);
+	const ranked = normalize({ enabled: true, primaries: [{ uri: URI_A }, { uri: irohB, fallbackUri: `${PK_B}@${ONION}:9735` }] }, { irohModule: false });
+	assert.deepEqual(ranked.primaries.map((e) => [e.uri, e.fallbackUri]), [[URI_A, null], [irohB, `${PK_B}@${ONION}:9735`]]);
 });
 
 test('the setup state over the entries, the entry a deposit moves toward, and who depends on a sibling', () => {

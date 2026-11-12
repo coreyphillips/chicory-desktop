@@ -244,6 +244,23 @@ test('an external Iroh primary is dialed by endpoint and relay, and is a relay f
 	const cfg = fallback.m.calls.find((c) => c.path === '/direct-funding/configure').body;
 	assert.equal(cfg.lspHost, onion);
 	assert.equal(cfg.lspPort, 9735);
+
+	// On a computer with no native Iroh module (issue #80) the engine reaches
+	// the node through the onion alone. A link held without one, from a
+	// version that took it, fails with what to change and is not dialed; one
+	// with it is dialed as before, and the engine falls back.
+	const bare = harness({ wallet: irohWallet(), running: ['w1'] });
+	bare.m.irohSupported = true;
+	bare.m.irohModuleSupported = false;
+	const failed = await bare.m.setupLfbw('w1');
+	assert.equal(failed.lfbw.setup, 'failed');
+	assert.match(failed.lfbw.setupError, /^This app has no Iroh module for this computer \(.+ on .+\), so it cannot connect through an Iroh link alone\. Use another address for the node, or add its onion address as the Tor fallback\.$/);
+	assert.equal(bare.m.calls.some((c) => c.path === '/peer/connect'), false);
+	const viaTor = harness({ wallet: irohWallet({ primaryFallbackUri: `${PK_X}@${onion}:9735` }), running: ['w1'] });
+	viaTor.m.irohSupported = true;
+	viaTor.m.irohModuleSupported = false;
+	assert.equal((await viaTor.m.setupLfbw('w1')).lfbw.setup, 'ready');
+	assert.deepEqual(viaTor.m.calls.find((c) => c.path === '/peer/connect').body.fallbackOnion, { host: onion, port: 9735 });
 });
 
 test('a connect refusal is not a failure when the peer list shows the primary connected', async () => {

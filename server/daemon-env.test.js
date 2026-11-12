@@ -447,6 +447,10 @@ test('a lightning-first wallet whose primary is an Iroh link gets the endpoint i
 	assert.equal(manager._daemonEnv(rec({ lfbw: lf(`${pk}@lsp.example:9735`) }), PATHS, 'seed words', 'token').BEIGNET_IROH, undefined, 'a TCP primary needs no Iroh');
 	assert.equal(manager._daemonEnv({ ...iroh, lfbw: { ...iroh.lfbw, enabled: false } }, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
 	assert.equal(manager._daemonEnv({ ...iroh, onchainOnly: true }, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
+	// With no native module for this platform (issue #80) the engine still
+	// needs Iroh on to dial the link: it then takes the onion fallback.
+	manager.irohModuleSupported = false;
+	assert.equal(manager._daemonEnv(iroh, PATHS, 'seed words', 'token').BEIGNET_IROH, 'true');
 	manager.irohSupported = false;
 	assert.equal(manager._daemonEnv(iroh, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
 });

@@ -29,6 +29,8 @@ function normalize(input, extra = {}) {
 		network: 'regtest',
 		selfId: 'w1',
 		available: true,
+		// The computer has the native Iroh module, as most do (issue #80).
+		irohModule: true,
 		getRecord: (id) => (id === 'p1' ? primaryRec() : extra.records && extra.records[id]),
 		...extra
 	});
@@ -197,6 +199,45 @@ test('an external Iroh primary is stored with its onion fallback, and refused by
 		normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735` }, { irohAvailable: false }).primaryUri,
 		`${PK2}@lsp.example:9735`,
 		'a TCP primary needs no Iroh'
+	);
+});
+
+test('without the Iroh module an Iroh primary is taken only with its onion fallback (issue #80)', () => {
+	// An Intel Mac build: the engine knows Iroh and has no native module for it.
+	const here = { irohAvailable: true, irohModule: false };
+	const fallbackUri = `${PK2}@${ONION}:9735`;
+	const unsupported = (run, pattern) =>
+		assert.throws(run, (err) => err.status === 400 && err.code === 'IROH_UNSUPPORTED' && pattern.test(err.message));
+
+	// A bare link could never connect, so it is refused where it is entered,
+	// with what to change.
+	unsupported(() => normalize({ enabled: true, primaryUri: IROH_URI }, here), /^This app has no Iroh module for this computer \(.+ on .+\), so it cannot connect through an Iroh link alone\. Use another address for the node, or add its onion address as the Tor fallback\.$/);
+	// With the fallback the engine reaches the node through Tor, so it stays.
+	const withFallback = normalize({ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: fallbackUri }, here);
+	assert.equal(withFallback.primaryUri, IROH_URI);
+	assert.equal(withFallback.primaryFallbackUri, fallbackUri);
+	// An edit that names no fallback keeps the stored one; clearing it is refused.
+	assert.equal(normalize({ enabled: true, primaryUri: IROH_URI, trusted: false }, { ...here, existing: withFallback }).primaryFallbackUri, fallbackUri);
+	unsupported(() => normalize({ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: null }, { ...here, existing: withFallback }), /Tor fallback/);
+	// A different Iroh address does not inherit the fallback, so it needs its own.
+	unsupported(() => normalize({ enabled: true, primaryUri: `${PK2}@iroh:${'9f'.repeat(32)}` }, { ...here, existing: withFallback }), /Tor fallback/);
+
+	// A record that already holds the bare link, from a version that took
+	// it, is left as it is on an edit of something else.
+	const held = normalize({ enabled: true, primaryUri: IROH_URI }, { irohAvailable: true });
+	const edited = normalize({ enabled: true, primaryUri: IROH_URI, trusted: false }, { ...here, existing: held });
+	assert.equal(edited.primaryUri, IROH_URI);
+	assert.equal(edited.primaryFallbackUri, null);
+	assert.equal(edited.trusted, false);
+
+	// An engine without Iroh is the other reason and reads as before, fallback or not.
+	unsupported(() => normalize({ enabled: true, primaryUri: IROH_URI, primaryFallbackUri: fallbackUri }, { irohAvailable: false, irohModule: false }), /^The bundled engine does not support Iroh/);
+	// A plain address needs neither.
+	assert.equal(normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735` }, here).primaryUri, `${PK2}@lsp.example:9735`);
+	// A caller that does not say whether the module is there is refused.
+	unsupported(
+		() => lfbw.normalizeLfbw({ enabled: true, primaryUri: IROH_URI }, { network: 'regtest', selfId: 'w1', available: true, irohAvailable: true, getRecord: () => null }),
+		/no Iroh module/
 	);
 });
 
