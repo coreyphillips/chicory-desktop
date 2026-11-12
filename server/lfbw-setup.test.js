@@ -263,6 +263,56 @@ test('an external Iroh primary is dialed by endpoint and relay, and is a relay f
 	assert.deepEqual(viaTor.m.calls.find((c) => c.path === '/peer/connect').body.fallbackOnion, { host: onion, port: 9735 });
 });
 
+
+test('an external Porch primary is dialed by its WebSocket URL alone, and is no relay for payers (coreyphillips/beignet#1980)', async () => {
+	const url = `wss://relay.example/v1/p/${'a'.repeat(32)}`;
+	const porchWallet = () =>
+		walletRec({ mode: 'external', primaryWalletId: null, primaryUri: `${PK_X}@${url}`, primaryPubkey: PK_X, trusted: true });
+
+	const { m } = harness({ wallet: porchWallet(), running: ['w1'] });
+	m.porchDialSupported = true;
+	const out = await m.setupLfbw('w1');
+	assert.equal(out.lfbw.setup, 'ready', out.lfbw.setupError);
+	const seq = m.calls.map((c) => `${c.wallet} ${c.method} ${c.path}`);
+	assert.deepEqual(seq, ['w1 GET /info', 'w1 POST /trusted-peer/add', 'w1 POST /direct-funding/configure', 'w1 POST /peer/connect']);
+	// No host and no port: the engine takes the address from the URL and
+	// refuses a pair beside it that differs.
+	assert.deepEqual(m.calls.find((c) => c.path === '/peer/connect').body, { pubkey: PK_X, transport: 'ws', url });
+	// The relay is not the node, so payers are given no address for it.
+	assert.deepEqual(m.calls.find((c) => c.path === '/direct-funding/configure').body, {
+		lspPubkey: PK_X,
+		targetInboundSat: 100000,
+		trusted: true,
+		allowSplice: true,
+		allowUnpairedSplice: true
+	});
+	assert.deepEqual(await m._primaryEndpoint(out.lfbw), {
+		pubkey: PK_X,
+		connectHost: null,
+		connectPort: 0,
+		transport: { type: 'ws', url },
+		relayHost: null,
+		relayPort: 0,
+		rec: null
+	});
+
+	// An engine that would dial the relay outside the wallet's route (before
+	// beignet #1995) is never asked to: the setup fails saying so.
+	const old = harness({ wallet: porchWallet(), running: ['w1'] });
+	old.m.porchDialSupported = false;
+	const failed = await old.m.setupLfbw('w1');
+	assert.equal(failed.lfbw.setup, 'failed');
+	assert.equal(failed.lfbw.setupError, 'The bundled engine does not support Porch links, so it cannot reach this primary node.');
+	assert.equal(old.m.calls.some((c) => c.path === '/peer/connect'), false);
+	// The missing Iroh module is no obstacle to a Porch link (issue #80).
+	const noIroh = harness({ wallet: porchWallet(), running: ['w1'] });
+	noIroh.m.porchDialSupported = true;
+	noIroh.m.irohSupported = true;
+	noIroh.m.irohModuleSupported = false;
+	assert.equal((await noIroh.m.setupLfbw('w1')).lfbw.setup, 'ready');
+	assert.deepEqual(noIroh.m.calls.find((c) => c.path === '/peer/connect').body, { pubkey: PK_X, transport: 'ws', url });
+});
+
 test('a connect refusal is not a failure when the peer list shows the primary connected', async () => {
 	const { m } = harness({
 		wallet: walletRec(),

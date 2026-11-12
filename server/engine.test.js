@@ -183,6 +183,31 @@ test('the onion-only Tor proxy scope is read off the config module that parses i
 	assert.equal(torProxyScopeAvailable(undefined), false);
 });
 
+test('a Porch link needs the engine that dials a WebSocket peer through the proxy (beignet #1995)', () => {
+	const { porchDialAvailable, PORCH_DIAL_MARKERS } = require('./engine');
+	const { root, bin } = fakeInstall('0.39.0');
+	const transport = path.join(path.dirname(bin), '..', 'lightning', 'transport');
+	try {
+		assert.equal(porchDialAvailable(bin), false, 'no peer manager module at all');
+		fs.mkdirSync(transport, { recursive: true });
+		// 0.38.1 dials a WebSocket peer with the platform client, whatever the proxy says.
+		fs.writeFileSync(path.join(transport, 'peer-manager.js'), 'const webSocketImpl = this.webSocketImpl ?? defaultWebSocketImpl();');
+		assert.equal(porchDialAvailable(bin), false, 'an engine that dials a WebSocket peer directly');
+		fs.writeFileSync(
+			path.join(transport, 'peer-manager.js'),
+			'const webSocketImpl = proxy ? (0, websocket_node_client_1.nodeWebSocketVia)(this.buildSocks5Factory(proxy, timeoutMs)) : this.webSocketImpl;'
+		);
+		assert.equal(porchDialAvailable(bin), true);
+		// The marker in another module proves nothing about the route taken.
+		fs.writeFileSync(path.join(transport, 'peer-manager.js'), '');
+		fs.writeFileSync(path.join(path.dirname(bin), 'daemon.js'), PORCH_DIAL_MARKERS.join(' '));
+		assert.equal(porchDialAvailable(bin), false);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+	assert.equal(porchDialAvailable(undefined), false);
+});
+
 /**
  * @number0/iroh beside a fake engine, the way npm lays it out: the loader
  * package and, when `target` is given, the one addon package for a platform.

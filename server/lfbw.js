@@ -139,7 +139,9 @@ function httpError(status, code, message) {
 /**
  * A node URI to its parts, or throws naming what is wrong. An Iroh primary
  * comes back with port 0, its endpoint id as the host, and a `transport`
- * the daemon dials it by; a TCP one has no `transport`.
+ * the daemon dials it by. A Porch link (pubkey@wss://relay/v1/p/<route id>,
+ * coreyphillips/beignet#1980) comes back with port 0, the relay's host, and
+ * a `ws` transport holding the URL. A TCP one has no `transport`.
  */
 const parseNodeUri = parsePrimaryUri;
 
@@ -150,6 +152,18 @@ const MAX_PRIMARIES = 32;
 function isIrohUri(uri) {
 	return /^[^@]+@iroh:/i.test(uri || '');
 }
+
+/** Whether a node URI is a Porch link: the node waits at a relay and is reached as a WebSocket peer. */
+function isPorchUri(uri) {
+	return /^[^@]+@wss?:\/\//i.test(String(uri || '').trim());
+}
+
+/**
+ * What to say of a Porch link on an engine that would not dial it by the
+ * wallet's own route (see porchDialAvailable in engine.js). It reads the
+ * same where a link is entered and where a stored one is not dialed.
+ */
+const PORCH_UNSUPPORTED = 'The bundled engine does not support Porch links, so it cannot reach this primary node.';
 
 /**
  * What to say of an Iroh link with no onion fallback on a computer that has
@@ -259,8 +273,9 @@ function rankOrder(info) {
  * The engine's list as record entries, in rank order, carrying over what the
  * record held for the same node (trust, setup state, the onion fallback of
  * an Iroh primary, which sibling wallet an internal one is). A node the
- * engine reaches at an address the record cannot read is kept as the engine
- * gave it and marked failed, so the list still shows it.
+ * engine reaches at an address the record cannot read (a WebSocket peer that
+ * is not a Porch link, say) is kept as the engine gave it and marked failed,
+ * so the list still shows it.
  */
 function engineToEntries(info, prior, { siblingOf = () => null } = {}) {
 	const by = new Map((prior || []).filter(Boolean).map((e) => [e.pubkey, e]));
@@ -342,9 +357,10 @@ function isLfbw(rec) {
  * (setup state, the one-time initial open) when the primary is unchanged so
  * an edit that only touches trust does not re-run a first open.
  * `irohAvailable` is the engine's own Iroh support and `irohModule` whether
- * its native module is installed on this computer.
+ * its native module is installed on this computer. `porchAvailable` is
+ * whether the engine dials a Porch link by the wallet's own route.
  */
-function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, irohModule, existing: existingBlock } = {}) {
+function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvailable, irohModule, porchAvailable, existing: existingBlock } = {}) {
 	if (!input || !input.enabled) return null;
 	if (!available) {
 		throw httpError(
@@ -461,6 +477,13 @@ function normalizeLfbw(input, { network, selfId, getRecord, available, irohAvail
 				// refuse every other edit of the wallet with it.
 				const held = !!prior && prior.uri === parsed.uri && !prior.fallbackUri;
 				if (irohModule !== true && !fallback && !held) throw httpError(400, 'IROH_UNSUPPORTED', irohNeedsFallback());
+			}
+			// A Porch link is refused on an engine that would dial its relay
+			// outside the wallet's route. One the record already holds is left
+			// as it is, like the Iroh entry above: it is not dialed, and its
+			// setup says why.
+			if (parsed.transport && parsed.transport.type === 'ws' && porchAvailable !== true && !(prior && prior.uri === parsed.uri)) {
+				throw httpError(400, 'PORCH_UNSUPPORTED', PORCH_UNSUPPORTED);
 			}
 			if (entries.some((e) => e.pubkey === parsed.pubkey)) {
 				throw httpError(400, 'BAD_LFBW_PEER', 'The same primary node is listed twice');
@@ -867,9 +890,10 @@ function channelizeOrder(
 		if (!amount || amount < MIN_CHANNEL_SATS) return { action: 'wait', reason: 'quote-too-small' };
 		const feeWait = feeTooHigh(amount, txQuote.feeSats, force);
 		if (feeWait) return feeWait;
-		// connect-and-open dials by host and port, which an Iroh primary does
-		// not have: the manager connects it over Iroh first and opens on the
-		// live connection instead. Its open is never zero-conf, being external.
+		// connect-and-open dials by host and port, which an Iroh primary or a
+		// Porch link does not have: the manager connects it by its transport
+		// first and opens on the live connection instead. Its open is never
+		// zero-conf, being external.
 		const openPath = primary.transport ? '/channel/open' : '/channel/connect-and-open';
 		const open = primary.transport
 			? { pubkey: primary.pubkey, amountSats: amount, satsPerVbyte, max: true }
@@ -946,6 +970,8 @@ module.exports = {
 	parsePrimaryFallback,
 	isIrohPrimary,
 	irohNeedsFallback,
+	isPorchUri,
+	PORCH_UNSUPPORTED,
 	isLfbw,
 	normalizeLfbw,
 	migratePrimaries,

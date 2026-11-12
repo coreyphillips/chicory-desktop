@@ -62,6 +62,7 @@ const {
 	concurrentOfflineReceiveAvailable,
 	offlineReceiveAvailable,
 	torProxyScopeAvailable,
+	porchDialAvailable,
 	electrumTlsVerifyAvailable,
 	irohEngineAvailable,
 	irohModuleAvailable
@@ -234,6 +235,11 @@ class WalletManager {
 		// this platform. An Intel Mac build has the first alone (issue #80).
 		this.irohSupported = irohEngineAvailable();
 		this.irohModuleSupported = irohModuleAvailable();
+		// A Porch link as a primary (coreyphillips/beignet#1980) needs an
+		// engine that dials a WebSocket peer through the proxy the way it
+		// dials a TCP peer (beignet #1995, engine 0.39.0): before it, a wallet
+		// in Tor mode would have dialed the relay directly.
+		this.porchDialSupported = porchDialAvailable();
 		// Electrum TLS certificate verification (beignet #1776, engine 0.31.0).
 		this.electrumTlsVerifySupported = electrumTlsVerifyAvailable();
 		// The routes the desktop drain drives (issue #29), probed on the bundle.
@@ -857,6 +863,11 @@ class WalletManager {
 		return this.torProxyScopeSupported === true;
 	}
 
+	/** True when a wallet here can take a Porch link as a primary node: the engine dials it by the wallet's network mode. */
+	porchPrimaryAvailable() {
+		return this.porchDialSupported === true;
+	}
+
 	electrumTlsVerifyAvailable() {
 		return this.electrumTlsVerifySupported === true;
 	}
@@ -1383,6 +1394,7 @@ class WalletManager {
 			available: this.lfbwAvailable(),
 			irohAvailable: this.irohEngineAvailable(),
 			irohModule: this.irohModuleSupported === true,
+			porchAvailable: this.porchPrimaryAvailable(),
 			getRecord: (id) => this.registry.get(id)
 		});
 	}
@@ -3311,7 +3323,9 @@ class WalletManager {
 	 * payers off-box reach it at its public address or its onion, whichever it
 	 * announces (walletReach picks); an external primary is its URI. An Iroh
 	 * primary carries the transport the daemon dials it by, with its onion
-	 * fallback inside, and has a relay for payers only through that onion.
+	 * fallback inside, and has a relay for payers only through that onion. A
+	 * Porch link carries its WebSocket URL: the relay it names is not the
+	 * node, so payers are given no address for it.
 	 */
 	async _primaryEndpoint(lf) {
 		if (lf.mode === 'internal') {
@@ -3354,6 +3368,17 @@ class WalletManager {
 				rec: null
 			};
 		}
+		if (parsed.transport.type === 'ws') {
+			return {
+				pubkey: parsed.pubkey,
+				connectHost: null,
+				connectPort: 0,
+				transport: parsed.transport,
+				relayHost: null,
+				relayPort: 0,
+				rec: null
+			};
+		}
 		const fallback = lfbw.parsePrimaryFallback(parsed, lf.primaryFallbackUri);
 		return {
 			pubkey: parsed.pubkey,
@@ -3369,27 +3394,35 @@ class WalletManager {
 	}
 
 	/**
-	 * Connect a wallet's daemon to its primary: by host and port, or over Iroh
-	 * by endpoint id and relay, falling back to the onion when one is set. An
-	 * already-connected peer can make /peer/connect complain; that is success
-	 * by another name, so the live peer list is checked before it counts as a
-	 * failure.
+	 * Connect a wallet's daemon to its primary: by host and port, over Iroh
+	 * by endpoint id and relay, falling back to the onion when one is set, or
+	 * by the WebSocket URL of a Porch link alone (the engine takes the
+	 * address from the URL). An already-connected peer can make /peer/connect
+	 * complain; that is success by another name, so the live peer list is
+	 * checked before it counts as a failure.
 	 */
 	async _connectPrimary(rec, primary) {
 		const t = primary.transport;
-		const body = t
-			? {
-				pubkey: primary.pubkey,
-				transport: 'iroh',
-				endpointId: t.endpointId,
-				...(t.relayUrl ? { relayUrl: t.relayUrl } : {}),
-				...(t.fallbackOnion ? { fallbackOnion: t.fallbackOnion } : {})
-			}
-			: { pubkey: primary.pubkey, host: primary.connectHost, port: primary.connectPort };
+		const porch = !!t && t.type === 'ws';
+		const iroh = !!t && !porch;
+		// A Porch link is never dialed on an engine that would reach its
+		// relay outside the wallet's route.
+		if (porch && !this.porchPrimaryAvailable()) throw new Error(lfbw.PORCH_UNSUPPORTED);
+		const body = porch
+			? { pubkey: primary.pubkey, transport: 'ws', url: t.url }
+			: iroh
+				? {
+					pubkey: primary.pubkey,
+					transport: 'iroh',
+					endpointId: t.endpointId,
+					...(t.relayUrl ? { relayUrl: t.relayUrl } : {}),
+					...(t.fallbackOnion ? { fallbackOnion: t.fallbackOnion } : {})
+				}
+				: { pubkey: primary.pubkey, host: primary.connectHost, port: primary.connectPort };
 		// A record from before issue #80 can hold an Iroh primary with no
 		// onion fallback on a computer that has no Iroh module. The engine
 		// would name a missing binding; this says what to change.
-		if (t && !t.fallbackOnion && this.irohUnavailable() === 'module') throw new Error(lfbw.irohNeedsFallback());
+		if (iroh && !t.fallbackOnion && this.irohUnavailable() === 'module') throw new Error(lfbw.irohNeedsFallback());
 		try {
 			await this._daemonCall(rec, 'POST', '/peer/connect', body);
 		} catch (err) {
@@ -3579,7 +3612,8 @@ class WalletManager {
 	/**
 	 * The engine's row for a ranked entry: host and port for a TCP or onion
 	 * node (the engine reads those back as the relay address it signs into
-	 * direct-funding requests), the canonical URI for an Iroh one.
+	 * direct-funding requests), the canonical URI for an Iroh one or a Porch
+	 * link.
 	 */
 	async _engineRow(lf, entry) {
 		const endpoint = await this._entryEndpoint(lf, entry);

@@ -398,6 +398,69 @@ test('the record follows a write the dashboard made at the engine: the new node 
 	await assert.rejects(m.syncPrimaries('w1'), (err) => err.code === 'NOT_RUNNING');
 });
 
+test('a Porch link the dashboard added at the engine is mirrored, trusted and dialed by its URL; pushed to the engine it goes by its URI (coreyphillips/beignet#1980)', async () => {
+	const url = `wss://relay.example/v1/p/${'a'.repeat(32)}`;
+	const PORCH_C = `${PK_C}@${url}`;
+	// The engine's rows read as record entries: a Porch link is an address
+	// the record can read, another WebSocket address is not.
+	const rows = { primaries: [{ pubkey: PK_A, host: 'a.example', port: 9735, rank: 1 }, { pubkey: PK_C, uri: `${PK_C}@WSS://Relay.Example:443/v1/p/${'a'.repeat(32)}`, rank: 2 }, { pubkey: PK_B, uri: `${PK_B}@wss://relay.example/somewhere`, rank: 3 }] };
+	const read = lfbw.engineToEntries(rows, []);
+	assert.deepEqual(read.map((e) => [e.pubkey, e.uri, e.setup]), [
+		[PK_A, URI_A, 'pending'],
+		[PK_C, PORCH_C, 'pending'],
+		[PK_B, `${PK_B}@wss://relay.example/somewhere`, 'failed']
+	]);
+	assert.match(read[2].setupError, /^Unsupported primary address: Invalid Porch link/);
+	// The engine keeps the URI it was given, so the same link is the same address.
+	const porchRow = { pubkey: PK_C, uri: PORCH_C };
+	assert.deepEqual(lfbw.planPrimariesSync({ primaries: [{ pubkey: PK_A, host: 'a.example', port: 9735, rank: 1 }, { ...porchRow, rank: 2 }] }, [{ pubkey: PK_A, host: 'a.example', port: 9735 }, porchRow], null), []);
+
+	const engine = { primaries: [{ pubkey: PK_A, host: 'a.example', port: 9735 }], fillThresholdSat: null, receiveTarget: PK_A };
+	const { m, records } = harness({
+		wallet: external([{ pubkey: PK_A, uri: URI_A, setup: 'ready', setupAt: 't0' }], { setup: 'ready', setupAt: 't0', primariesSyncedAt: 't0' }),
+		engine
+	});
+	m.porchDialSupported = true;
+	// The dashboard added the link through the proxy.
+	engine.primaries.push({ pubkey: PK_C, uri: PORCH_C });
+	const out = await m.syncPrimaries('w1');
+	assert.deepEqual(seq(m), ['w1 GET /primaries', 'w1 POST /trusted-peer/add', 'w1 POST /peer/connect']);
+	assert.deepEqual(m.calls[2].body, { pubkey: PK_C, transport: 'ws', url });
+	assert.deepEqual(records.w1.lfbw.primaries.map((e) => [e.pubkey, e.uri, e.fallbackUri, e.setup]), [[PK_A, URI_A, null, 'ready'], [PK_C, PORCH_C, null, 'ready']]);
+	assert.equal(out.lfbw.setup, 'ready');
+
+	// With the Porch link at the head, direct funding names the node and no address.
+	m.calls = [];
+	engine.primaries = engine.primaries.filter((p) => p.pubkey !== PK_A);
+	engine.receiveTarget = PK_C;
+	await m.syncPrimaries('w1');
+	assert.deepEqual(seq(m), ['w1 GET /primaries', 'w1 POST /direct-funding/configure']);
+	assert.equal(m.calls[1].body.lspPubkey, PK_C);
+	assert.equal('lspHost' in m.calls[1].body, false);
+	assert.equal('lspPort' in m.calls[1].body, false);
+	assert.equal(records.w1.lfbw.primaryUri, PORCH_C);
+
+	// A record that names the link seeds an empty engine with the URI, not a host and port.
+	const seeded = harness({ wallet: external([{ pubkey: PK_C, uri: PORCH_C }]) });
+	seeded.m.porchDialSupported = true;
+	await seeded.m.setupLfbw('w1');
+	assert.deepEqual(seeded.m.calls.find((c) => c.path === '/primaries/add').body, { pubkey: PK_C, uri: PORCH_C });
+	assert.deepEqual(seeded.engine.primaries, [{ pubkey: PK_C, host: undefined, port: undefined, uri: PORCH_C }]);
+	assert.equal(seeded.records.w1.lfbw.setup, 'ready', seeded.records.w1.lfbw.setupError);
+
+	// On an engine that would dial the relay outside the wallet's route the
+	// mirrored entry is not dialed, and says why.
+	const old = harness({
+		wallet: external([{ pubkey: PK_A, uri: URI_A, setup: 'ready', setupAt: 't0' }], { setup: 'ready', setupAt: 't0', primariesSyncedAt: 't0' }),
+		engine: { primaries: [{ pubkey: PK_A, host: 'a.example', port: 9735 }, { pubkey: PK_C, uri: PORCH_C }], fillThresholdSat: null, receiveTarget: PK_A }
+	});
+	await old.m.syncPrimaries('w1');
+	assert.equal(old.m.calls.some((c) => c.path === '/peer/connect'), false);
+	const entry = old.records.w1.lfbw.primaries.find((e) => e.pubkey === PK_C);
+	assert.equal(entry.setup, 'failed');
+	assert.equal(entry.setupError, 'The bundled engine does not support Porch links, so it cannot reach this primary node.');
+});
+
 test('a deposit moves toward the receive target when the wallet keeps several primaries', async () => {
 	const PK_X = PK_B;
 	const rec = {

@@ -241,6 +241,74 @@ test('without the Iroh module an Iroh primary is taken only with its onion fallb
 	);
 });
 
+test('a Porch link is a primary on an engine that routes its dial, alone or in a ranked list (coreyphillips/beignet#1980)', () => {
+	const route = 'a'.repeat(32);
+	const url = `wss://relay.example/v1/p/${route}`;
+	const PORCH_URI = `${PK2}@${url}`;
+	const here = { porchAvailable: true };
+
+	// The parser's own form: the relay's host, port 0 and the URL to dial.
+	assert.deepEqual(lfbw.parseNodeUri(`${PK2.toUpperCase()}@WSS://Relay.Example:443/v1/p/${route}`), {
+		pubkey: PK2,
+		host: 'relay.example',
+		port: 0,
+		transport: { type: 'ws', url },
+		uri: PORCH_URI
+	});
+	assert.equal(lfbw.isPorchUri(PORCH_URI), true);
+	assert.equal(lfbw.isPorchUri(`${PK2}@lsp.example:9735`), false);
+	assert.equal(lfbw.isPorchUri(`${PK2}@iroh:${'8e'.repeat(32)}`), false);
+
+	const block = normalize({ enabled: true, primaryUri: PORCH_URI }, here);
+	assert.equal(block.mode, 'external');
+	assert.equal(block.primaryUri, PORCH_URI);
+	assert.equal(block.primaryPubkey, PK2);
+	assert.equal(block.primaryFallbackUri, null);
+	assert.deepEqual(block.primaries.map((e) => [e.pubkey, e.uri, e.fallbackUri]), [[PK2, PORCH_URI, null]]);
+	// It needs neither Iroh nor its module.
+	assert.equal(normalize({ enabled: true, primaryUri: PORCH_URI }, { ...here, irohAvailable: false, irohModule: false }).primaryUri, PORCH_URI);
+	// Beside a TCP primary in a ranked list, in the order given.
+	const ranked = normalize({ enabled: true, primaries: [{ uri: `${PK}@lsp.example:9735` }, { uri: PORCH_URI, trusted: false }] }, here);
+	assert.deepEqual(ranked.primaries.map((e) => [e.uri, e.trusted]), [[`${PK}@lsp.example:9735`, true], [PORCH_URI, false]]);
+
+	// The relay is not the node: no onion fallback, and no other WebSocket address.
+	const bad = (input, pattern) => assert.throws(() => normalize(input, here), (err) => err.status === 400 && err.code === 'BAD_LFBW_PEER' && pattern.test(err.message));
+	bad({ enabled: true, primaryUri: PORCH_URI, primaryFallbackUri: `${PK2}@${ONION}:9735` }, /fallback must be an onion address/);
+	bad({ enabled: true, primaryUri: `${PK2}@ws://relay.example/v1/p/${route}` }, /must use wss:\/\//);
+	bad({ enabled: true, primaryUri: `${PK2}@wss://relay.example/v1/p/${route}?x=1` }, /Invalid Porch link/);
+	bad({ enabled: true, primaryUri: `${PK2}@wss://relay.example/elsewhere` }, /Invalid Porch link/);
+	bad({ enabled: true, primaryUri: `${PK2}@wss://${ONION}/v1/p/${route}` }, /cannot name an onion relay/);
+	// A relay on this computer or its own network may be reached without TLS.
+	assert.equal(normalize({ enabled: true, primaryUri: `${PK2}@ws://127.0.0.1:2114/v1/p/${route}` }, here).primaryUri, `${PK2}@ws://127.0.0.1:2114/v1/p/${route}`);
+
+	// Nothing is signed into a direct-funding request as the node's address.
+	const cfg = lfbw.directFundingConfig({ mode: 'external', trusted: true }, { pubkey: PK2, relayHost: null, relayPort: 0, transport: { type: 'ws', url } });
+	assert.equal(cfg.lspPubkey, PK2);
+	assert.equal('lspHost' in cfg, false);
+	assert.equal('lspPort' in cfg, false);
+});
+
+test('a Porch link is refused on an engine that would dial its relay outside the wallet\'s route', () => {
+	const PORCH_URI = `${PK2}@wss://relay.example/v1/p/${'a'.repeat(32)}`;
+	const unsupported = (run) =>
+		assert.throws(run, (err) => err.status === 400 && err.code === 'PORCH_UNSUPPORTED' && err.message === 'The bundled engine does not support Porch links, so it cannot reach this primary node.');
+	unsupported(() => normalize({ enabled: true, primaryUri: PORCH_URI }, { porchAvailable: false }));
+	// A caller that does not say is refused: the gate fails closed.
+	unsupported(() => normalize({ enabled: true, primaryUri: PORCH_URI }));
+	unsupported(() => normalize({ enabled: true, primaries: [{ uri: `${PK}@lsp.example:9735` }, { uri: PORCH_URI }] }, { porchAvailable: false }));
+	// A record that already holds the link is left as it is on an edit of
+	// something else: it is not dialed (the manager's half), and refusing it
+	// here would refuse every other edit of the wallet with it.
+	const held = normalize({ enabled: true, primaryUri: PORCH_URI }, { porchAvailable: true });
+	const edited = normalize({ enabled: true, primaryUri: PORCH_URI, trusted: false }, { porchAvailable: false, existing: held });
+	assert.equal(edited.primaryUri, PORCH_URI);
+	assert.equal(edited.trusted, false);
+	// A different link is a new one, and is refused.
+	unsupported(() => normalize({ enabled: true, primaryUri: `${PK2}@wss://relay.example/v1/p/${'b'.repeat(32)}` }, { porchAvailable: false, existing: held }));
+	// A plain address is taken either way.
+	assert.equal(normalize({ enabled: true, primaryUri: `${PK2}@lsp.example:9735` }, { porchAvailable: false }).primaryUri, `${PK2}@lsp.example:9735`);
+});
+
 test('re-normalizing against the same primary keeps setup state; a new primary starts over', () => {
 	const existing = {
 		enabled: true,

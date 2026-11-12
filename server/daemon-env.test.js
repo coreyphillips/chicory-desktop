@@ -454,3 +454,26 @@ test('a lightning-first wallet whose primary is an Iroh link gets the endpoint i
 	manager.irohSupported = false;
 	assert.equal(manager._daemonEnv(iroh, PATHS, 'seed words', 'token').BEIGNET_IROH, undefined);
 });
+
+test('a wallet whose primary is a Porch link is routed by its network mode alone (coreyphillips/beignet#1980)', () => {
+	const pk = '02' + '33'.repeat(32);
+	const porch = `${pk}@wss://relay.example/v1/p/${'a'.repeat(32)}`;
+	const lf = { enabled: true, mode: 'external', primaryWalletId: null, primaryUri: porch, primaryPubkey: pk, primaries: [{ pubkey: pk, walletId: null, uri: porch, fallbackUri: null }] };
+	withTor((m) => {
+		m.irohSupported = true;
+		// Tor mode: the proxy with no onion-only scope, so the engine sends
+		// the relay dial through Tor as it sends every other peer.
+		const tor = m._daemonEnv(rec({ networkMode: 'tor', lfbw: lf }), PATHS, 's', 't');
+		assert.equal(tor.BEIGNET_TOR_PROXY, 'chicory-wallet_tor_1:9050');
+		assert.equal(tor.BEIGNET_TOR_PROXY_ONION_ONLY, undefined);
+		// Hybrid: the relay is a clearnet host, dialed directly.
+		const hybrid = m._daemonEnv(rec({ networkMode: 'hybrid', lfbw: lf }), PATHS, 's', 't');
+		assert.equal(hybrid.BEIGNET_TOR_PROXY_ONION_ONLY, 'true');
+		// A Porch link is a WebSocket peer: no Iroh endpoint is started for it,
+		// and the wallet hosts no Porch link of its own.
+		for (const env of [tor, hybrid]) {
+			assert.equal(env.BEIGNET_IROH, undefined);
+			assert.deepEqual(Object.keys(env).filter((key) => /PORCH/.test(key)), []);
+		}
+	});
+});
