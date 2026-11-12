@@ -16,6 +16,7 @@
  */
 const net = require('net');
 const { isIrohPrimary } = require('./lfbw');
+const { irohModuleMissing } = require('./engine');
 
 const MODES = ['tor', 'clearnet', 'hybrid'];
 const DEFAULT_MODE = 'hybrid';
@@ -186,15 +187,19 @@ function validateNetworkChoice({ mode, publicHost, onchainOnly } = {}) {
 	}
 }
 
-/** Iroh is an opt-in listener independent of the routing mode. */
-function normalizeIroh(input, { existing, available = false, onchainOnly = false } = {}) {
+/**
+ * Iroh is an opt-in listener independent of the routing mode. `available`
+ * is whether a listener can run here; `engineAvailable` is the engine's own
+ * support, which says why when it cannot.
+ */
+function normalizeIroh(input, { existing, available = false, engineAvailable = available, onchainOnly = false } = {}) {
 	const value = input === undefined ? (existing || { enabled: false }) : input;
 	const bad = (message) => httpError(400, 'BAD_IROH', message);
 	if (!value || typeof value !== 'object' || Array.isArray(value)) throw bad('Iroh settings must be an object.');
 	if (value.enabled !== undefined && typeof value.enabled !== 'boolean') throw bad('Iroh enabled must be true or false.');
 	const enabled = !onchainOnly && (value.enabled ?? existing?.enabled ?? false);
 	if (enabled && !available && input !== undefined) {
-		throw httpError(400, 'IROH_UNSUPPORTED', 'The bundled engine does not support Iroh.');
+		throw httpError(400, 'IROH_UNSUPPORTED', engineAvailable ? `${irohModuleMissing()}.` : 'The bundled engine does not support Iroh.');
 	}
 	const relays = !enabled || value.relays === undefined ? existing?.relays : value.relays === null ? undefined : value.relays;
 	if (relays !== undefined && (!Array.isArray(relays) || relays.length > 16)) throw bad('Provide at most 16 relay URLs.');
@@ -216,6 +221,9 @@ function normalizeIroh(input, { existing, available = false, onchainOnly = false
  * endpoint as well, because the engine dials Iroh only through it; that one
  * runs as the phone runs it, discovery off on the default relays, so nothing
  * about the wallet is published and only a peer given its address reaches it.
+ * `available` is the engine's support alone: where the native module is
+ * missing the engine still needs Iroh on to dial such a primary, which it
+ * then reaches through the onion fallback (issue #80).
  */
 function irohEnv(rec, available) {
 	if (!available || rec.onchainOnly) return {};

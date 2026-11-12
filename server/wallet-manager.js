@@ -63,7 +63,8 @@ const {
 	offlineReceiveAvailable,
 	torProxyScopeAvailable,
 	electrumTlsVerifyAvailable,
-	irohAvailable
+	irohEngineAvailable,
+	irohModuleAvailable
 } = require('./engine');
 const { normalizeElectrumTls, electrumTlsEnv } = require('./electrum-tls');
 const { electrumRequests, cachedProbe, discoverServers } = require('./electrum-probe');
@@ -229,7 +230,10 @@ class WalletManager {
 		// what lets a Clearnet or Hybrid wallet dial clearnet peers directly and
 		// still reach onion peers through the app's Tor.
 		this.torProxyScopeSupported = torProxyScopeAvailable();
-		this.irohSupported = irohAvailable();
+		// Iroh takes the engine's support and the native module it loads for
+		// this platform. An Intel Mac build has the first alone (issue #80).
+		this.irohSupported = irohEngineAvailable();
+		this.irohModuleSupported = irohModuleAvailable();
 		// Electrum TLS certificate verification (beignet #1776, engine 0.31.0).
 		this.electrumTlsVerifySupported = electrumTlsVerifyAvailable();
 		// The routes the desktop drain drives (issue #29), probed on the bundle.
@@ -833,8 +837,20 @@ class WalletManager {
 		return this.offlineReceiveSupported === true;
 	}
 
+	/** True when a wallet here can open an Iroh connection: the engine knows Iroh and its native module is installed. */
 	irohAvailable() {
+		return this.irohSupported === true && this.irohModuleSupported === true;
+	}
+
+	/** True when the bundled engine knows Iroh, whether or not its native module is here. */
+	irohEngineAvailable() {
 		return this.irohSupported === true;
+	}
+
+	/** Why Iroh cannot be used here, or null when it can: 'engine' or 'module'. */
+	irohUnavailable() {
+		if (this.irohAvailable()) return null;
+		return this.irohEngineAvailable() ? 'module' : 'engine';
 	}
 
 	torProxyScopeAvailable() {
@@ -1305,7 +1321,7 @@ class WalletManager {
 		const mode = netmode.requestedMode({ networkMode, tor }, netmode.DEFAULT_MODE);
 		const host = netmode.normalizePublicHost(publicHost);
 		netmode.validateNetworkChoice({ mode, publicHost: host, onchainOnly: !!onchainOnly });
-		const irohBlock = netmode.normalizeIroh(iroh, { available: this.irohAvailable(), onchainOnly: !!onchainOnly });
+		const irohBlock = netmode.normalizeIroh(iroh, { available: this.irohAvailable(), engineAvailable: this.irohEngineAvailable(), onchainOnly: !!onchainOnly });
 		const rec = {
 			id,
 			name: (name && String(name).trim()) || `Wallet ${id.slice(0, 4)}`,
@@ -1365,7 +1381,8 @@ class WalletManager {
 			selfId,
 			existing,
 			available: this.lfbwAvailable(),
-			irohAvailable: this.irohAvailable(),
+			irohAvailable: this.irohEngineAvailable(),
+			irohModule: this.irohModuleSupported === true,
 			getRecord: (id) => this.registry.get(id)
 		});
 	}
@@ -1452,7 +1469,12 @@ class WalletManager {
 		const nextMode = netmode.requestedMode({ networkMode, tor }, netmode.networkMode(rec));
 		const nextHost = publicHost !== undefined ? netmode.normalizePublicHost(publicHost) : rec.publicHost || '';
 		netmode.validateNetworkChoice({ mode: nextMode, publicHost: nextHost, onchainOnly: nextOnchainOnly });
-		const nextIroh = netmode.normalizeIroh(iroh, { existing: rec.iroh, available: this.irohAvailable(), onchainOnly: nextOnchainOnly });
+		const nextIroh = netmode.normalizeIroh(iroh, {
+			existing: rec.iroh,
+			available: this.irohAvailable(),
+			engineAvailable: this.irohEngineAvailable(),
+			onchainOnly: nextOnchainOnly
+		});
 		// The server is checked against the wallet's network only when it is
 		// actually being changed, so an edit to anything else goes through
 		// even if the server it already has is on the wrong chain or away.
@@ -1638,7 +1660,7 @@ class WalletManager {
 			publicHost: rec.publicHost,
 			publicPort: this.publicPort(rec)
 		});
-		Object.assign(env, netmode.irohEnv(rec, this.irohAvailable()));
+		Object.assign(env, netmode.irohEnv(rec, this.irohEngineAvailable()));
 		if (announced.length) env.BEIGNET_ANNOUNCE_ADDRESSES = announced.join(',');
 		// Channel backup (the Recovery Protocol). Off contributes nothing, so
 		// an engine that predates the feature sees the env it always saw. It
@@ -3364,6 +3386,10 @@ class WalletManager {
 				...(t.fallbackOnion ? { fallbackOnion: t.fallbackOnion } : {})
 			}
 			: { pubkey: primary.pubkey, host: primary.connectHost, port: primary.connectPort };
+		// A record from before issue #80 can hold an Iroh primary with no
+		// onion fallback on a computer that has no Iroh module. The engine
+		// would name a missing binding; this says what to change.
+		if (t && !t.fallbackOnion && this.irohUnavailable() === 'module') throw new Error(lfbw.irohNeedsFallback());
 		try {
 			await this._daemonCall(rec, 'POST', '/peer/connect', body);
 		} catch (err) {

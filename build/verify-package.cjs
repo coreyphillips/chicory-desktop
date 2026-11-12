@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { verifyTor } = require('./verify-runtime.cjs');
+const { verifyTor, verifyIroh } = require('./verify-runtime.cjs');
 
 module.exports = async function verifyPackage(context) {
   const resources = context.electronPlatformName === 'darwin'
@@ -28,6 +28,11 @@ module.exports = async function verifyPackage(context) {
   if (!fs.readFileSync(path.join(engine, 'dist/cli/restore.js'), 'utf8').includes('chicory-desktop-encrypted-restore-v1')) throw new Error('Packaged engine is missing encrypted database restore.');
   const { verifyDriver } = await import(pathToFileURL(path.join(context.packager.projectDir, 'scripts/apply-storage-encryption.mjs')).href);
   verifyDriver(node, engine);
+  const lock = JSON.parse(fs.readFileSync(path.join(context.packager.projectDir, 'build/runtime/package-lock.json'), 'utf8'));
+  const iroh = verifyIroh(node, engine, lock, context.electronPlatformName, process.arch);
   verifyTor(path.join(resources, 'runtime/tor'), context.electronPlatformName, process.arch);
   console.log('Packaged wallet dependencies, encrypted SQLite files and bundled Tor verified.');
+  console.log(iroh
+    ? 'The packaged Iroh module loads under the bundled Node.'
+    : `No Iroh module is published for ${context.electronPlatformName}-${process.arch}: this build takes an Iroh link only with its onion fallback.`);
 };

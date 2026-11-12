@@ -218,11 +218,71 @@ function offlineReceiveAvailable(bin = process.env.BEIGNET_BIN) {
 		probe(bin, 'config.js', ['BEIGNET_FFOR_RECEIVE_FUNDING'])
 	);
 }
-/** Require the configuration, listener and connection-string surface together. */
-function irohAvailable(bin = process.env.BEIGNET_BIN) {
+/**
+ * True when the engine behind `bin` knows Iroh: the configuration, listener
+ * and connection-string surface are required together. This is the engine's
+ * JavaScript only. Whether it can open an Iroh connection on this computer
+ * is irohModuleAvailable's question.
+ */
+function irohEngineAvailable(bin = process.env.BEIGNET_BIN) {
 	return probe(bin, 'config.js', ['BEIGNET_IROH'])
 		&& probe(bin, 'iroh-config.js', ['BEIGNET_IROH_RELAYS'])
 		&& probe(bin, 'beignet-node.js', ['listenIroh(', 'irohUri']);
+}
+
+// How @number0/iroh names its native addons after the platform and
+// architecture: bare on macOS and Android arm64, with the C library or the
+// toolchain elsewhere. The loader asks for exactly one of them, so any
+// that is installed for this platform and architecture is that one.
+const IROH_ADDON_SUFFIXES = ['', '-msvc', '-gnu', '-musl', '-gnueabihf', '-musleabihf', '-eabi'];
+
+function irohAddonTargets({ platform, arch }) {
+	const targets = IROH_ADDON_SUFFIXES.map((suffix) => `${platform}-${arch}${suffix}`);
+	return platform === 'darwin' ? ['darwin-universal', ...targets] : targets;
+}
+
+/**
+ * True when the native module the engine loads for Iroh is installed for
+ * this platform and architecture. @number0/iroh publishes one package per
+ * target and none for macOS on x64 (as of 1.1.0), so an Intel Mac build
+ * carries an engine that knows Iroh and cannot open an Iroh connection: it
+ * would only say so at its first dial (issue #80).
+ *
+ * Nothing is loaded. The files are found the way the engine's own
+ * `require('@number0/iroh/index.js')` and that loader's require of the
+ * addon would find them: a file beside the loader (a local build) or the
+ * `@number0/iroh-<target>` package.
+ */
+function irohModuleAvailable(bin = process.env.BEIGNET_BIN, host = process) {
+	if (!bin) return false;
+	let loader;
+	try {
+		loader = require.resolve('@number0/iroh/index.js', { paths: [path.dirname(path.resolve(bin))] });
+	} catch (_) {
+		return false;
+	}
+	const dir = path.dirname(loader);
+	return irohAddonTargets(host).some((target) => {
+		if (fs.existsSync(path.join(dir, `iroh.${target}.node`))) return true;
+		try {
+			require.resolve(`@number0/iroh-${target}`, { paths: [dir] });
+			return true;
+		} catch (_) {
+			return false;
+		}
+	});
+}
+
+/** True when a wallet on the engine behind `bin` can open an Iroh connection on this computer. */
+function irohAvailable(bin = process.env.BEIGNET_BIN, host = process) {
+	return irohEngineAvailable(bin) && irohModuleAvailable(bin, host);
+}
+
+const PLATFORM_NAMES = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
+
+/** The start of a refusal's sentence when the engine knows Iroh and its native module is not here. */
+function irohModuleMissing(host = process) {
+	return `This app has no Iroh module for this computer (${PLATFORM_NAMES[host.platform] || host.platform} on ${host.arch})`;
 }
 
 module.exports = {
@@ -233,6 +293,9 @@ module.exports = {
 	channelSendAvailable,
 	CHANNEL_SEND_ROUTE_MARKERS,
 	irohAvailable,
+	irohEngineAvailable,
+	irohModuleAvailable,
+	irohModuleMissing,
 	concurrentOfflineReceiveAvailable,
 
 	offlineReceiveAvailable,

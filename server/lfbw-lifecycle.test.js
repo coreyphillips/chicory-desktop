@@ -157,6 +157,9 @@ test('the app can point a wallet at an Iroh primary, as the phone can, unless th
 
 	const { m, store } = managerWith({ p1: primary(), w1: dependent() });
 	m.irohSupported = true;
+	m.irohModuleSupported = true;
+	assert.equal(m.irohAvailable(), true);
+	assert.equal(m.irohUnavailable(), null);
 	const out = await m.updateWallet('w1', body(null));
 	assert.equal(out.lfbw.mode, 'external');
 	assert.equal(out.lfbw.primaryUri, uri);
@@ -170,8 +173,32 @@ test('the app can point a wallet at an Iroh primary, as the phone can, unless th
 
 	const old = managerWith({ p1: primary(), w1: dependent() });
 	old.m.irohSupported = false;
-	await assert.rejects(old.m.updateWallet('w1', body(null)), (err) => err.code === 'IROH_UNSUPPORTED');
+	old.m.irohModuleSupported = true;
+	assert.equal(old.m.irohUnavailable(), 'engine');
+	await assert.rejects(old.m.updateWallet('w1', body(null)), (err) => err.code === 'IROH_UNSUPPORTED' && /bundled engine/.test(err.message));
 	assert.equal(old.store.w1.lfbw.mode, 'internal', 'the record is untouched');
+
+	// An Intel Mac build (issue #80): the engine knows Iroh and there is no
+	// native module for it, so the link is refused where it is entered unless
+	// it comes with the onion the engine can reach the node through.
+	const intel = managerWith({ p1: primary(), w1: dependent() });
+	intel.m.irohSupported = true;
+	intel.m.irohModuleSupported = false;
+	assert.equal(intel.m.irohAvailable(), false);
+	assert.equal(intel.m.irohUnavailable(), 'module');
+	await assert.rejects(
+		intel.m.updateWallet('w1', body(null)),
+		(err) => err.code === 'IROH_UNSUPPORTED' && /no Iroh module for this computer/.test(err.message) && /Tor fallback/.test(err.message)
+	);
+	assert.equal(intel.store.w1.lfbw.mode, 'internal', 'the record is untouched');
+	await intel.m.updateWallet('w1', body(onion));
+	assert.equal(intel.store.w1.lfbw.primaryUri, uri);
+	assert.equal(intel.store.w1.lfbw.primaryFallbackUri, onion);
+	assert.equal(
+		intel.m._daemonEnv(intel.store.w1, { home: '/h', data: '/d' }, 's', 't').BEIGNET_IROH,
+		'true',
+		'the engine still dials the link, and falls back to the onion'
+	);
 });
 
 test('an edit that keeps the primary keeps the setup state; a bad primary leaves the record untouched', async () => {
