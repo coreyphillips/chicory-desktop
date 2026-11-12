@@ -434,6 +434,16 @@ async function interactions(names) {
   assert.equal(clipped, 'hidden', 'Settings leaves under the Activity column, not over it');
   checks.push('Settings leaves under the Activity column and leaves nothing behind');
 
+  // The words can be copied from beside Hide phrase, and the button itself says
+  // how long they stay, where it cannot be scrolled out of view.
+  assert.deepEqual(await reach(indexOf(names, 'settings, showing the phrase')), []);
+  const copyPhrase = page.getByRole('button', { name: 'Copy phrase', exact: true });
+  const [copyAt, hideAt] = await Promise.all([copyPhrase.boundingBox(), page.getByRole('button', { name: 'Hide phrase', exact: true }).boundingBox()]);
+  assert.ok(Math.abs(copyAt.y - hideAt.y) < 2 && copyAt.x > hideAt.x, 'Copy phrase sits beside Hide phrase');
+  await copyPhrase.click();
+  await expect(page.getByRole('button', { name: 'Copied for 60 seconds', exact: true })).toBeInViewport();
+  checks.push('The recovery phrase can be copied, and says how long it stays');
+
   // Leaving raises the privacy cover. Coming back, nothing of it may stay over
   // the wallet. Playwright keeps a hidden window awake, so the page is told it
   // is hidden instead.

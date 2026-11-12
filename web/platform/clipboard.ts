@@ -23,4 +23,15 @@ function legacyCopy(value: string): void {
   field.select();
   try { document.execCommand('copy'); } finally { field.remove(); }
 }
-export default { getString, setString };
+/** A secret goes on the clipboard only where the host can take it back. */
+function canHoldSecret(): boolean {
+  return typeof window !== 'undefined' && !!window.chicoryDesktop?.copySecret;
+}
+async function setSecret(value: string): Promise<boolean> {
+  try {
+    return (await window.chicoryDesktop?.copySecret?.(value)) === true;
+  } catch {
+    return false;
+  }
+}
+export default { getString, setString, canHoldSecret, setSecret };

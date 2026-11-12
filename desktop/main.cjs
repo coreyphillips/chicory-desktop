@@ -7,6 +7,7 @@ const { createAuthenticator } = require('./os-auth.cjs');
 const { loadStorageKey, ENVELOPE_VERSION } = require('./storage-key.cjs');
 const { BundledTor, TOR_VERSION } = require('./tor.cjs');
 const { DesktopDiagnostics, INPUT_LIMIT, desktopResources, stopChild } = require('./diagnostics.cjs');
+const { secretClipboard } = require('./secret-clipboard.cjs');
 const { UpdateGate, cleanStaging, download, loadPublicKeys, verifyManifest, verifyStaged } = require('./update.cjs');
 const { ProfileEraser, hasPendingErase } = require('./erase.cjs');
 const { installFullBackupIpc } = require('./full-backup-ipc.cjs');
@@ -39,6 +40,7 @@ let loaded = false;
 let tor;
 let torProxy;
 const torRequests = new Set();
+const secrets = secretClipboard(clipboard);
 let origin;
 let stopping = false;
 // While set, the wallet service is being stopped and the profile erased, so
@@ -507,6 +509,7 @@ function createWindow(desktopSession) {
     if (!trustedSender(event) || demo || !eraser) return { ok: false, code: 'ERASE_REFUSED', error: 'Erase is unavailable.' };
     return eraser.erase();
   });
+  ipcMain.handle('clipboard:copy-secret', (event, text) => trustedSender(event) && secrets.copy(text));
   ipcMain.handle('desktop:diagnostics', async (event, input) => {
     if (!trustedSender(event)) throw new Error('Diagnostics are unavailable.');
     let size = Infinity;
@@ -607,7 +610,7 @@ async function finishPendingErase() {
 
 function installLock() {
   installLockIpc({ ipcMain, appLock, trusted: trustedSender, ensureManager });
-  const relock = (reason) => () => { appLock.conceal(reason); appLock.relock(reason); };
+  const relock = (reason) => () => { secrets.clear(); appLock.conceal(reason); appLock.relock(reason); };
   powerMonitor.on('lock-screen', relock('lock-screen'));
   powerMonitor.on('suspend', relock('suspend'));
   if (process.platform === 'darwin') powerMonitor.on('user-did-resign-active', relock('switch-user'));
@@ -624,6 +627,7 @@ app.on('before-quit', (event) => {
       .then(torOutcome => diagnostics.shutdownEnded({ manager: managerOutcome, tor: tor ? torOutcome : 'not-started' })))
     .finally(() => { stopped = true; app.quit(); });
 });
+app.on('will-quit', () => secrets.clear());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', showWindow);
 

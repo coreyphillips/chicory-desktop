@@ -61,6 +61,11 @@ export const settings = {
     channels:
       'Keep your wallet’s current channel state too. The recovery phrase alone does not restore active Lightning channels.',
     hide: 'Hide phrase',
+    copy: 'Copy phrase',
+    copied: 'Copied for 60 seconds',
+    copiedDone:
+      'Copied. Paste it somewhere private. Your clipboard clears in 60 seconds.',
+    copyFailed: 'Could not copy',
     saved: 'I saved my recovery phrase',
     savedHint: 'Hold to confirm.',
     savedDone: 'Recovery phrase saved.',

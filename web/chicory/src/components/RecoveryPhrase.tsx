@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AppState, StyleSheet } from 'react-native';
+import Clipboard from '@react-native-clipboard/clipboard';
+import { AppState, StyleSheet, View } from 'react-native';
 import Reanimated, { LayoutAnimationConfig } from 'react-native-reanimated';
 import { announce } from '../design/announce';
 import { copy } from '../design/copy';
@@ -13,6 +14,9 @@ import { duringSystemPrompt } from '../stage/systemPrompt';
 import { space } from '../theme';
 
 const words = copy.settings.recovery;
+
+/** As long as the host leaves the words on the clipboard. */
+const COPIED_FOR_MS = 60_000;
 
 /**
  * Where a screen reader lands once the control it was on goes away: the
@@ -33,8 +37,12 @@ export type PhraseLanding = 'reveal' | 'heading' | null;
  *    someone else's hands.
  *  - The words are cleared the moment the app stops being active, so they are
  *    not in the app switcher.
- *  - They are never copied to the clipboard and never written to app state
- *    that outlives the screen.
+ *  - They are never written to app state that outlives the screen, and go on
+ *    the clipboard only when the owner asks, and only where the host can take
+ *    them back: the desktop clears them after a minute, or sooner on quit,
+ *    sleep or a locked screen. Anything that read the clipboard in that minute
+ *    has them, and clipboard history or syncing may keep them, so it remains
+ *    the owner's choice to make rather than a default.
  *
  * Screenshot blocking is deliberately not claimed: neither platform offers it
  * through React Native core, and a partial version would be worse than none.
@@ -60,6 +68,14 @@ export function RecoveryPhraseBody({
   const [phrase, setPhrase] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [copied, setCopied] = useState<boolean | null>(null);
+  const copiedFor = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedFor.current) clearTimeout(copiedFor.current);
+    },
+    [],
+  );
   // An exit animation keeps a view on screen until it ends, on a frame clock
   // that stops in the background, so words leaving that way could still be
   // there for the app switcher. The words are held with their exit skipped,
@@ -97,9 +113,22 @@ export function RecoveryPhraseBody({
       }),
     [],
   );
+  async function copyPhrase() {
+    const done = await Clipboard.setSecret(shown.join(' '));
+    setCopied(done);
+    if (copiedFor.current) clearTimeout(copiedFor.current);
+    copiedFor.current = setTimeout(() => setCopied(null), COPIED_FOR_MS);
+    if (done) {
+      haptics.success();
+      announce(words.copiedDone);
+    } else {
+      haptics.error();
+    }
+  }
   async function reveal() {
     setBusy(true);
     setError('');
+    setCopied(null);
     try {
       // The biometric prompt is one the app raised, so the phrase stays in
       // view behind it rather than going under the privacy cover.
@@ -159,12 +188,32 @@ export function RecoveryPhraseBody({
                 }}
               />
             ) : null}
-            <Action
-              label={words.hide}
-              glyph="eyeOff"
-              tone="quiet"
-              onPress={() => setLetGo('reveal')}
-            />
+            <View style={styles.actions}>
+              <View style={styles.action}>
+                <Action
+                  label={words.hide}
+                  glyph="eyeOff"
+                  tone="quiet"
+                  onPress={() => setLetGo('reveal')}
+                />
+              </View>
+              {Clipboard.canHoldSecret() ? (
+                <View style={styles.action}>
+                  <Action
+                    label={
+                      copied === null
+                        ? words.copy
+                        : copied
+                        ? words.copied
+                        : words.copyFailed
+                    }
+                    glyph={copied ? 'check' : 'copy'}
+                    tone="quiet"
+                    onPress={copyPhrase}
+                  />
+                </View>
+              ) : null}
+            </View>
           </Reanimated.View>
         </LayoutAnimationConfig>
       ) : (
@@ -228,4 +277,8 @@ export function RecoveryPhrase({
   );
 }
 
-const styles = StyleSheet.create({ stack: { gap: space.md } });
+const styles = StyleSheet.create({
+  stack: { gap: space.md },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  action: { flexGrow: 1, flexBasis: 180 },
+});

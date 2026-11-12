@@ -35,3 +35,30 @@ test('copying falls back to the page when the clipboard API is missing or refuse
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(copied, ['bcrt1qexample', 'lnbcrt1copy']);
 });
+
+function host(copySecret?: (text: string) => Promise<boolean>) {
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: copySecret ? { copySecret } : {} } });
+}
+afterEach(() => { Reflect.deleteProperty(globalThis, 'window'); });
+
+test('a secret goes on the clipboard only where the host can take it back', async () => {
+  assert.equal(Clipboard.canHoldSecret(), false);
+  assert.equal(await Clipboard.setSecret('twelve words'), false);
+  host();
+  assert.equal(Clipboard.canHoldSecret(), false);
+  assert.equal(await Clipboard.setSecret('twelve words'), false);
+  browser({ writeText: () => { throw new Error('a secret never reaches the page clipboard'); } });
+  assert.equal(await Clipboard.setSecret('twelve words'), false);
+  assert.deepEqual(copied, []);
+});
+test('the host is handed the secret and its answer stands, and a failure is an answer', async () => {
+  const handed: string[] = [];
+  host(async text => { handed.push(text); return true; });
+  assert.equal(Clipboard.canHoldSecret(), true);
+  assert.equal(await Clipboard.setSecret('twelve words'), true);
+  assert.deepEqual(handed, ['twelve words']);
+  host(async () => false);
+  assert.equal(await Clipboard.setSecret('twelve words'), false);
+  host(async () => { throw new Error('refused'); });
+  assert.equal(await Clipboard.setSecret('twelve words'), false);
+});

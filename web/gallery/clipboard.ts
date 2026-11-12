@@ -5,4 +5,9 @@ export async function getString(): Promise<string> {
 
 export function setString(_value: string) {}
 
-export default { getString, setString };
+export const canHoldSecret = () => true;
+export async function setSecret(_value: string) {
+  return true;
+}
+
+export default { getString, setString, canHoldSecret, setSecret };
