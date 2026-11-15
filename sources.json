@@ -31,10 +31,10 @@
   },
   "wallet-core": {
     "repository": "https://github.com/coreyphillips/beignet-wallet-core",
-    "commit": "ee6e40423c4584f96552746ec75aa6e9995a5d07",
+    "commit": "190854c6d894be911e2bb585d86dbaa816834bf7",
     "destination": "package.json dependency"
   },
-  "engineVersion": "0.39.0",
+  "engineVersion": "0.41.0",
   "enginePatches": [
     "scripts/apply-engine-patches.mjs",
     "scripts/apply-storage-encryption.mjs"
