@@ -47,7 +47,12 @@ installation.
 
 On first launch, Chicory creates a mainnet wallet with its default Electrum
 server and primary node, and its recovery phrase waits behind the backup banner
-until it is saved. Erase all wallets, in Settings, returns to setup, where a
+until it is saved. The default primary node is the one Chicory on the phone
+uses, at its relay-only Iroh link (`docs/IROH.md` in the mobile repository), so
+the wallet reaches it through n0's relay without starting Tor. The relay sees
+this computer's IP address. A computer with no native Iroh module, which is
+an Intel Mac, makes its wallet on the same node's onion address instead. A
+network profile saved by an earlier version keeps the node it was saved with. Erase all wallets, in Settings, returns to setup, where a
 wallet can be restored from its phrase instead. Change the network or servers
 in Settings > Network & servers; testnet and regtest need a server entered there
 first, and a new wallet on either asks for its primary node. Set

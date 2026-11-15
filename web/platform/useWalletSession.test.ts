@@ -4,7 +4,7 @@ import { registerHooks } from 'node:module';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import type { ReactTestRenderer } from 'react-test-renderer';
-import { DemoWalletClient, DEFAULT_PRIMARY_URI, WalletError } from '@beignet/wallet-core';
+import { DemoWalletClient, DEFAULT_PRIMARY_URI, parsePrimaryUri, WalletError } from '@beignet/wallet-core';
 import type {
   CreatedWallet, CreateWalletInput, HostConfig, WalletRecord, WalletSnapshot,
 } from '@beignet/wallet-core';
@@ -418,13 +418,48 @@ test('a native desktop wallet explicitly stopped stays stopped across launches',
 
 test('desktop defaults use the mobile primary and preserve custom profiles', async () => {
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { chicoryDesktop: {} } });
-  const { defaultPreferences, loadNetworkPreferences, saveNetworkPreferences } = await import('../chicory/src/services/networks.ts');
+  const {
+    DEFAULT_MAINNET_PRIMARY_URI, defaultPreferences, loadNetworkPreferences, saveNetworkPreferences,
+  } = await import('../chicory/src/services/networks.ts');
   const preferences = defaultPreferences();
-  assert.equal(preferences.profiles.mainnet.primaryUri, DEFAULT_PRIMARY_URI);
+  assert.equal(preferences.profiles.mainnet.primaryUri, DEFAULT_MAINNET_PRIMARY_URI);
+  // The Iroh link and the onion address wallet-core ships name the same node.
+  assert.equal(parsePrimaryUri(DEFAULT_MAINNET_PRIMARY_URI).pubkey, parsePrimaryUri(DEFAULT_PRIMARY_URI).pubkey);
+  assert.equal(parsePrimaryUri(DEFAULT_MAINNET_PRIMARY_URI).uri, DEFAULT_MAINNET_PRIMARY_URI);
   const customPrimary = '02' + 'a'.repeat(64) + '@node.example:9735';
   preferences.profiles.mainnet.primaryUri = customPrimary;
   await saveNetworkPreferences(preferences);
   assert.equal((await loadNetworkPreferences()).profiles.mainnet.primaryUri, customPrimary);
+});
+
+for (const [irohAvailable, expected] of [[false, 'onion'], [true, 'iroh'], [undefined, 'iroh']] as const) {
+  test(`the first wallet is made on the default node's ${expected} address when the host says Iroh is ${irohAvailable ?? 'unknown'}`, async () => {
+    const { DEFAULT_MAINNET_PRIMARY_URI } = await import('../chicory/src/services/networks.ts');
+    // A computer that never saved a network profile, so the default applies.
+    const Keychain = await import('./keychain.ts');
+    await Keychain.resetGenericPassword({ service: 'com.beignet.wallet.network-profiles' });
+    const records: WalletRecord[] = [];
+    const host = new Host(records);
+    const creator = new Host(records);
+    for (const item of [host, creator])
+      item.config = async () => ({ defaultNetwork: 'mainnet', irohAvailable } as unknown as HostConfig);
+    const sent: (string | undefined)[] = [];
+    creator.provision = async input => { sent.push(input?.primaryUri); return { ...newRecord, mnemonic: PHRASE }; };
+    const app = await mount(host, [creator]);
+    await act(async () => { await app.session.createDefaultWallet(); });
+    // A computer with no Iroh module (an Intel Mac) cannot dial the link, so
+    // it takes the same node's onion address; anywhere else, the link.
+    assert.deepEqual(sent, [expected === 'onion' ? DEFAULT_PRIMARY_URI : DEFAULT_MAINNET_PRIMARY_URI]);
+    await app.unmount();
+  });
+}
+test('only the Iroh default gives way to the onion address, and only where Iroh cannot be dialled', async () => {
+  const { DEFAULT_MAINNET_PRIMARY_URI, reachablePrimary } = await import('../chicory/src/services/networks.ts');
+  assert.equal(reachablePrimary(DEFAULT_MAINNET_PRIMARY_URI, false), DEFAULT_PRIMARY_URI);
+  assert.equal(reachablePrimary(DEFAULT_MAINNET_PRIMARY_URI, true), DEFAULT_MAINNET_PRIMARY_URI);
+  const own = `${parsePrimaryUri(DEFAULT_PRIMARY_URI).pubkey}@iroh:${'c'.repeat(64)}`;
+  assert.equal(reachablePrimary(own, false), own);
+  assert.equal(reachablePrimary('', false), '');
 });
 
 test('erase is offered only by a desktop host that can erase, never in a plain browser', async () => {

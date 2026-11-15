@@ -3,6 +3,30 @@ import { DEFAULT_PRIMARY_URI } from '@beignet/wallet-core';
 import type { Network } from '@beignet/wallet-core';
 
 export const NETWORKS: Network[] = ['mainnet', 'testnet', 'regtest'];
+/**
+ * The primary node a new mainnet wallet starts with: the Beignet Umbrel node
+ * at its relay-only Iroh link, as Chicory on the phone has it from 0.7.21.
+ * The engine dials it through the relay the link names and needs no Tor for
+ * it, and the node offers no address of its own. The same node also answers
+ * at an onion address, which wallet-core still exports as DEFAULT_PRIMARY_URI.
+ *
+ * This only seeds a profile that has never been saved. A saved profile, and
+ * every wallet's own primary, keep the node its owner chose.
+ */
+export const DEFAULT_MAINNET_PRIMARY_URI =
+  '025501f56b72e7b999443b836ae1bff4c6fff514943d3f6677302a9189949bd99c@iroh:8ec01f040891cb3f9973a1f6139d36c24a4e42b2939186e1508848fc09f8a640?relay=https%3A%2F%2Fuse1-1.relay.n0.iroh.link.%2F';
+/**
+ * The primary a new wallet is made with on this computer. One with no native
+ * Iroh module (an Intel Mac, issue #80) cannot dial the Iroh default, so it
+ * takes the same node's onion address instead. `irohAvailable` is the host
+ * config's: undefined until it is known, and only false changes anything. Any
+ * other primary is the owner's and is returned as it is.
+ */
+export function reachablePrimary(uri: string, irohAvailable: boolean | undefined) {
+  return irohAvailable === false && uri === DEFAULT_MAINNET_PRIMARY_URI
+    ? DEFAULT_PRIMARY_URI
+    : uri;
+}
 /** Regtest always requires an explicitly configured local server. */
 export const DEFAULT_REGTEST_ELECTRUM = Object.freeze({
   host: '',
@@ -37,8 +61,9 @@ export function defaultProfile(network: Network): NetworkProfile {
         : network === 'regtest'
         ? { ...DEFAULT_REGTEST_ELECTRUM }
         : { host: '', port: 50002, tls: true },
-    // The desktop app owns bundled Tor for the shared mobile onion primary.
-    primaryUri: network === 'mainnet' ? DEFAULT_PRIMARY_URI : '',
+    // The mobile app's Iroh default. A computer that cannot dial Iroh makes
+    // its wallet on the same node's onion address (reachablePrimary).
+    primaryUri: network === 'mainnet' ? DEFAULT_MAINNET_PRIMARY_URI : '',
     // The local service owns native TCP and bundled Tor transport.
     transport: 'native',
     relayUrl: '',
