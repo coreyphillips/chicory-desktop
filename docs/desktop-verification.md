@@ -179,6 +179,30 @@ everything through Tor no longer dials one directly. The engine can also wait
 at a Porch relay and run Iroh relay-only; the desktop turns neither on. The
 packaged build was not run for this change.
 
+The bundled engine then moves from Beignet 0.39.0 to 0.41.0. On 2026-11-15 the
+source checkout passed `npm run check` (typecheck, 163 web, 134 desktop with 4
+skipped, 12 qualification and 544 server tests, build) and ran the regtest
+qualification stages `preflight`, `payments`, `primaries` and `porch` on macOS
+Apple Silicon against the bundled Beignet 0.41.0 and wallet-core `190854c`: 8
+checks passed, direct funding skipped as always. Both host patches apply to the
+published 0.41.0 package at their reviewed anchors, and the three modules the
+encrypted-storage patch and the offline capacity figure depend on
+(`sqlite-binding.js`, `restore.js`, `cli/offline-receive.js`) are byte-identical
+to 0.39.0's. `listPayments` and `toPaymentInfo` are unchanged, so the
+completed-debit projection stays on for 0.41.0, and every capability probe
+answers as it did on 0.39.0. The runtime lockfile changes only the engine's
+own entry. An encrypted wallet made by the 0.39.0 runtime through the engine
+bootstrap (an on-chain deposit and an invoice whose description has a line
+break and a joined emoji) opened on the 0.41.0 runtime with its balance and
+invoice, made a new invoice, and opened again on 0.39.0. What 0.41.0 changes
+for the desktop: the engine refuses a node alias or an invoice description
+holding a character BOLT 1 forbids (coreyphillips/beignet#2074), so the manager
+now cleans the wallet name it passes as `BEIGNET_ALIAS` (a name with a joined
+emoji would otherwise stop the wallet starting) and wallet-core cleans receive
+notes (coreyphillips/beignet-wallet-core#50). Reconnects no longer re-send
+updates the peer holds (coreyphillips/beignet#2089, #2090). The packaged build
+was not run for this change.
+
 The release workflow, signed update manifest and manual update path are
 described in [releases.md](releases.md). The workflow stays unused until the
 owner's signing identities are configured on GitHub.

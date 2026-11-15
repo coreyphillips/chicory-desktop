@@ -185,7 +185,7 @@ test('the onion-only Tor proxy scope is read off the config module that parses i
 
 test('a Porch link needs the engine that dials a WebSocket peer through the proxy (beignet #1995)', () => {
 	const { porchDialAvailable, PORCH_DIAL_MARKERS } = require('./engine');
-	const { root, bin } = fakeInstall('0.39.0');
+	const { root, bin } = fakeInstall('0.41.0');
 	const transport = path.join(path.dirname(bin), '..', 'lightning', 'transport');
 	try {
 		assert.equal(porchDialAvailable(bin), false, 'no peer manager module at all');
@@ -257,7 +257,7 @@ test('Iroh takes the native module for this platform and architecture, which an 
 	const { irohModuleAvailable, irohAvailable } = require('./engine');
 	// Each state gets its own install: Node remembers a path it resolved.
 	const state = (options, check) => {
-		const { root, bin } = fakeInstall('0.39.0');
+		const { root, bin } = fakeInstall('0.41.0');
 		try {
 			irohEngine(bin);
 			const loader = options === null ? null : fakeIroh(root, options);
@@ -340,7 +340,7 @@ test('Electrum certificate verification needs the env parser and the option wiri
 
 test('ranked primaries and the channel send are probed on the daemon module (coreyphillips/beignet#1924)', () => {
 	const { primariesAvailable, channelSendAvailable, PRIMARIES_ROUTE_MARKERS, CHANNEL_SEND_ROUTE_MARKERS } = require('./engine');
-	const { root, bin } = fakeInstall('0.39.0');
+	const { root, bin } = fakeInstall('0.41.0');
 	const dir = path.dirname(bin);
 	try {
 		assert.equal(primariesAvailable(bin), false, 'no daemon module at all');

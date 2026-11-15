@@ -17,4 +17,4 @@ submitter: Corey Phillips
 submission: https://github.com/coreyphillips/chicory-umbrel
 dependencies: []
 releaseNotes: >-
-  Initial Chicory browser foundation. Bundles Beignet 0.39.0.
+  Initial Chicory browser foundation. Bundles Beignet 0.41.0.
