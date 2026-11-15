@@ -11,7 +11,8 @@
       "privatePaymentNotes": "502c8e6ad19b949689589346ad01947b92395391",
       "privateNoteAlignment": "2486e709e85580e19677d750998ba370ce15bc36",
       "balanceVisibility": "25eb76c284343f10ee2ced9c96e049a22534718b",
-      "failureExplanation": "30008a8abfc2abb390a4223a39406739aae6033b"
+      "failureExplanation": "30008a8abfc2abb390a4223a39406739aae6033b",
+      "irohDefaultPrimary": "0b71f9f0c9856f1fc9c2ed150b16299d6f424c33"
     }
   },
   "chicory-gallery": {

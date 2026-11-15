@@ -13,7 +13,7 @@ import { haptics } from '../../design/haptics';
 import { riseIn, smooth } from '../../motion/presets';
 import { seedSourceNetwork, seedSourceWallet } from '../../embedded/seed';
 import type { SeedSourceWallet } from '../../embedded/seed';
-import { defaultProfile } from '../../services/networks';
+import { defaultProfile, reachablePrimary } from '../../services/networks';
 import type { NetworkProfile } from '../../services/networks';
 import type { WalletAdapter } from '../../services/wallet';
 import { fullBackupAvailable, restoreFullBackup } from '../../services/fullBackup';
@@ -38,6 +38,10 @@ type DeviceNetwork = 'mainnet' | 'regtest' | 'testnet';
 const NETWORKS: readonly DeviceNetwork[] = ['mainnet', 'regtest', 'testnet'];
 
 const words = copy.settings.create;
+
+/** Whether the host can dial an Iroh link, as its config says; undefined until read. */
+const irohOf = (config: HostConfig | null) =>
+  (config as { irohAvailable?: boolean } | null)?.irohAvailable;
 
 /**
  * A new wallet, or one restored from its phrase, in the Settings language
@@ -118,7 +122,11 @@ export function CreateWalletScreen({
     client
       .getConfig()
       .then(value => {
-        if (active) setConfig(value);
+        if (!active) return;
+        setConfig(value);
+        // A computer that cannot dial Iroh makes its wallet on the default
+        // node's onion address instead (issue #80).
+        setPrimary(current => reachablePrimary(current, irohOf(value)));
       })
       .catch(e => {
         if (active)
@@ -142,7 +150,7 @@ export function CreateWalletScreen({
     setNetwork(value);
     // One source for what a network starts with, so this form and the network
     // settings cannot disagree about a default.
-    setPrimary(defaultProfile(value).primaryUri);
+    setPrimary(reachablePrimary(defaultProfile(value).primaryUri, irohOf(config)));
   }
   function typePhrase(value: string) {
     setPhrase(value);
@@ -407,6 +415,7 @@ export function CreateWalletScreen({
           }
         />
       </Section>
+      {/@iroh:/i.test(primary) ? <Note>{copy.settings.primary.iroh}</Note> : null}
       {source && sourceLabel ? <Note glyph="key">{words.reuses(sourceLabel)}</Note> : null}
       {source && sourceWallet ? (
         <Link

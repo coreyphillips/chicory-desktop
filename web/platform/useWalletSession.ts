@@ -9,7 +9,7 @@ import type { WalletAdapter } from '../chicory/src/services/wallet.ts';
 import { DesktopDemoWallet } from './demoWallet.ts';
 import { anyPrimaryConnected } from './primaries.ts';
 import {
-  defaultProfile, loadNetworkPreferences, saveNetworkPreferences, validateProfile,
+  defaultProfile, loadNetworkPreferences, reachablePrimary, saveNetworkPreferences, validateProfile,
 } from '../chicory/src/services/networks.ts';
 import type { NetworkProfile } from '../chicory/src/services/networks.ts';
 import { mergeSnapshot } from '../chicory/src/services/activityMerge.ts';
@@ -112,6 +112,8 @@ export function useWalletSession(
   const [snapshot, setSnapshot] = useState<WalletSnapshot | null>(null);
   const [activeProfile, setActiveProfile] = useState(() => defaultProfile('mainnet'));
   const profile = useRef(activeProfile);
+  // Whether the host can dial an Iroh link, from its config: undefined until read.
+  const irohAvailable = useRef<boolean | undefined>(undefined);
   const [rememberedSession, setRememberedSession] = useState<Remembered | null>(null);
   const [initializing, setInitializing] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -299,6 +301,7 @@ export function useWalletSession(
         adapter.getConfig(), adapter.listWallets(), loadNetworkPreferences(),
       ]);
       if (!valid(token)) return;
+      irohAvailable.current = (config as { irohAvailable?: boolean }).irohAvailable;
       const saved = demoMode.current ? {} : savedSelection();
       const requested = options.walletId ?? saved.walletId;
       const candidates = configured ? records.filter(item => item.network === configured.network) : records;
@@ -457,7 +460,7 @@ export function useWalletSession(
       const selected = profile.current;
       const created = await adapter.createWallet({
         name: 'My wallet', network: selected.network,
-        primaryUri: selected.primaryUri, electrum: selected.electrum,
+        primaryUri: reachablePrimary(selected.primaryUri, irohAvailable.current), electrum: selected.electrum,
       });
       if (!mounted.current || generation.current !== at + 1 || current.current !== adapter) return;
       const { mnemonic: _phrase, warnings: _warnings, ...record } = created;
