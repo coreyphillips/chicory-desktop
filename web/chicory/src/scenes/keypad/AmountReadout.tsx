@@ -6,7 +6,7 @@ import React, {
   useState,
 } from 'react';
 import type { ComponentRef, KeyboardEvent, MouseEvent, ReactNode, Ref } from 'react';
-import { Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import Reanimated, {
   ReduceMotion,
@@ -283,6 +283,10 @@ export interface AmountReadoutProps {
   shake?: number;
   /** What sits between the amount and its keypad, such as preset chips. */
   children?: ReactNode;
+  /** Controls above the amount, such as Receive's note. */
+  header?: ReactNode;
+  /** The fitted form scrolls its fields independently of its keypad. */
+  scrollID?: string;
   /**
    * The unit is drawn as the bitcoin sign before the digits, `₿2,000`,
    * rather than "sats" after them (`unitAffixes`). What is keyed, and what
@@ -331,6 +335,8 @@ export function AmountReadout({
   empty,
   shake: shakes,
   children,
+  header,
+  scrollID,
   symbol = false,
   ref,
 }: AmountReadoutProps) {
@@ -429,8 +435,9 @@ export function AmountReadout({
     size === AMOUNT_SIZES[0]
       ? null
       : { fontSize: size, lineHeight: amountLine(size) };
-  return (
+  const fields = (
     <>
+      {header}
       <Reanimated.View
         {...(Platform.OS === 'web' ? browserViewProps({
           tabIndex: live ? 0 : -1,
@@ -457,7 +464,7 @@ export function AmountReadout({
         }}
         accessibilityHint={hint}
         accessibilityState={{ disabled: !editable, busy }}
-        style={[styles.readout, refusal.style]}
+        style={[styles.readout, scrollID && editable ? styles.fittedReadout : null, refusal.style]}
       >
         <Reanimated.View
           pointerEvents="none"
@@ -528,6 +535,23 @@ export function AmountReadout({
         </Reanimated.View>
       </Reanimated.View>
       {children}
+    </>
+  );
+  return (
+    <>
+      {scrollID ? (
+        <ScrollView
+          {...{ dataSet: { amountFields: 'true' } }}
+          testID={scrollID}
+          style={styles.scroll}
+          contentContainerStyle={styles.fields}
+          alwaysBounceVertical={false}
+          keyboardShouldPersistTaps="handled"
+          nestedScrollEnabled
+        >
+          {fields}
+        </ScrollView>
+      ) : fields}
       {editable ? (
         <Keypad
           onKey={onKey}
@@ -541,6 +565,9 @@ export function AmountReadout({
 }
 
 const styles = StyleSheet.create({
+  scroll: { flex: 1 },
+  fields: { flexGrow: 1, justifyContent: 'center', gap: space.sm },
+  fittedReadout: { minHeight: amountLine(AMOUNT_SIZES[0]) },
   // Across the whole field whatever its parent aligns, since the amount is
   // sized to fit what it measures.
   readout: {

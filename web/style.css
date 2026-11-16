@@ -73,6 +73,49 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid #8fa5e4; outlin
   .browser-sidebar nav button, .browser-sidebar kbd { transition: none; }
 }
 
+/* Use the space in the payment column, which excludes the title bar and
+   Activity. The amount, presets and note can scroll together while the
+   keypad and primary action keep their own space. */
+[data-payment-column] { container: payment-column / size; }
+@container payment-column (min-width: 390px) and (max-height: 680px) {
+  [data-amount-form] {
+    display: grid;
+    grid-template:
+      "fields keys" minmax(0, 1fr)
+      "action action" auto / minmax(0, 1.1fr) minmax(0, .9fr);
+  }
+  [data-amount-form] > [data-amount-fields] {
+    grid-area: fields;
+  }
+  [data-amount-form] > [data-amount-fields] > div {
+    justify-content: safe center;
+    gap: 8px;
+  }
+  [data-amount-form] > [data-amount-keypad] {
+    grid-area: keys;
+    align-self: center;
+    height: 100%;
+    min-height: 176px;
+    max-height: 240px;
+  }
+  [data-amount-keypad] > div { flex: 1; }
+  [data-amount-keypad] > div > * { height: auto; }
+  [data-amount-form] > [data-amount-actions] { grid-area: action; }
+}
+/* On short or zoomed windows the last row of keys shares the action's
+   vertical space. Each of the four rows still has a 44px pointer target. */
+@container payment-column (min-width: 390px) and (max-height: 500px) {
+  [data-amount-form] {
+    grid-template-areas: "fields keys" "action keys";
+  }
+}
+
+/* At very high zoom, the outer scene can scroll the single-column form.
+   Give the fields a usable viewport alongside the fixed keypad and action. */
+@container payment-column (width < 390px) {
+  [data-amount-form] > [data-amount-fields] { min-height: 96px; }
+}
+
 /* Send and Receive swap in one commit under a view transition (sceneSwap),
    run by the compositor and not by the page. Only the layers named here take
    part: the content clears before the next arrives, since the keypads sit at

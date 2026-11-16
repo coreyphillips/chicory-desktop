@@ -57,6 +57,8 @@ export function AmountField({
   editable = true,
   busy = false,
   presets,
+  header,
+  scrollID,
   autoFocus,
   empty,
   tone,
@@ -71,6 +73,8 @@ export function AmountField({
   editable?: boolean;
   busy?: boolean;
   presets?: number[];
+  header?: ReactNode;
+  scrollID?: string;
   autoFocus?: boolean;
   empty?: ReactNode;
   tone?: keyof typeof TONES;
@@ -88,6 +92,8 @@ export function AmountField({
   }, [autoFocus]);
   return (
     <AmountReadout
+      header={header}
+      scrollID={scrollID}
       ref={readout}
       accessibilityLabel={label}
       value={grouped(digits)}
@@ -127,6 +133,7 @@ const styles = StyleSheet.create({
   presets: {
     flexDirection: 'row',
     justifyContent: 'center',
+    flexWrap: 'wrap',
     gap: space.xs,
     paddingVertical: space.xs,
   },

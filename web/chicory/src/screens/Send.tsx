@@ -8,7 +8,7 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import type { ReactNode, Ref } from 'react';
-import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, StyleSheet, Text, View } from 'react-native';
 import type { HostInstance } from 'react-native';
 import Reanimated, { useSharedValue } from 'react-native-reanimated';
 import Clipboard from '@react-native-clipboard/clipboard';
@@ -1828,15 +1828,8 @@ export function SendScreen({
       .join(' ');
     content = (
       <>
-        <ScrollView
-          testID="send-entry"
-          style={styles.entry}
-          contentContainerStyle={styles.entryContent}
-          alwaysBounceVertical={false}
-          keyboardShouldPersistTaps="handled"
-          nestedScrollEnabled
-        >
         <AmountReadout
+          scrollID={room === undefined ? undefined : 'send-entry'}
           ref={readout}
           accessibilityLabel={copy.amount.field}
           value={grouped(shownAmount)}
@@ -1876,8 +1869,11 @@ export function SendScreen({
             </Reanimated.View>
           ) : null}
         </AmountReadout>
-        </ScrollView>
-        <View style={styles.controls} onLayout={launchLanding.onLayout}>
+        <View
+          {...{ dataSet: { amountActions: 'true' } }}
+          style={styles.controls}
+          onLayout={launchLanding.onLayout}
+        >
           <View style={styles.side} />
           {/* Home's Send circle lands exactly on it (REDESIGN.md 7, T1),
               and it is unseen until the circle hands over, so the two are
@@ -1928,6 +1924,7 @@ export function SendScreen({
       <View
         style={[
           styles.screen,
+          fitted && fixedSats === null && room < 360 && styles.shortCompose,
           fitted ? { height: Math.max(room, PINNED_MIN) } : styles.unfitted,
         ]}
       >
@@ -1975,6 +1972,7 @@ export function SendScreen({
           layout={smooth()}
           onTouchStart={result || resolved ? touched : undefined}
           onFocus={result || resolved ? touched : undefined}
+          {...{ dataSet: fitted && fixedSats === null ? { amountForm: 'true' } : undefined }}
           style={[styles.step, fitted && styles.fitted]}
         >
           {content}
@@ -1992,11 +1990,11 @@ const PINNED_MIN = PRIMARY_CONTROL * 3;
 
 const styles = StyleSheet.create({
   screen: { gap: space.lg },
+  // Leave room for the whole amount line above the action in a short window.
+  shortCompose: { gap: space.xs },
   unfitted: { flex: 1 },
   step: { flexGrow: 1, gap: space.lg },
   fitted: { flexShrink: 1, flexBasis: 0 },
-  entry: { flex: 1 },
-  entryContent: { flexGrow: 1, gap: space.lg },
   body: {
     flexGrow: 1,
     alignItems: 'center',

@@ -167,6 +167,7 @@ export const Keypad = memo(function KeypadView({
   return (
     <View
       {...(Platform.OS === 'web' ? browserViewProps({
+        dataSet: { amountKeypad: 'true' },
         onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
           if (!live || editableTarget(event.target)) return;
           const key = amountKey(event.nativeEvent);
@@ -218,8 +219,9 @@ const styles = StyleSheet.create({
   },
   disc: {
     position: 'absolute',
-    width: KEY_HEIGHT,
-    height: KEY_HEIGHT,
+    height: '100%',
+    maxHeight: KEY_HEIGHT,
+    aspectRatio: 1,
     borderRadius: KEY_HEIGHT / 2,
     backgroundColor: palette.mocha,
   },

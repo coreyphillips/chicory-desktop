@@ -56,6 +56,25 @@ async function screenshot(name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), animations: 'allow' });
 }
 
+const keypad = () => page.getByLabel('Amount keypad', { exact: true });
+
+/** Check the resting form before a click or focus can scroll a key into view. */
+async function assertKeypadInView() {
+  const keys = keypad().getByRole('button');
+  await expect(keys).toHaveCount(11);
+  for (const key of await keys.all()) {
+    await expect(key).toBeInViewport({ ratio: 1 });
+    const name = await key.getAttribute('aria-label');
+    assert.ok(await key.evaluate(el => el.checkVisibility({ opacityProperty: true })), `Key ${name} is drawn`);
+    if (await key.isEnabled()) {
+      assert.ok(await key.evaluate(el => {
+        const box = el.getBoundingClientRect();
+        return el.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      }), `Key ${name} can be pressed`);
+    }
+  }
+}
+
 /** Opens the demo on the smoke profile, so a second launch finds what the first one saved. */
 async function launchDemo() {
   electron = await _electron.launch({
@@ -286,8 +305,11 @@ try {
     await electron.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(...size), [width, height]);
     await page.waitForTimeout(700);
     await steady(`Receive at ${width}x${height}`, () => scene('receive').click());
+    await assertKeypadInView();
     await steady(`Send at ${width}x${height}`, () => scene('send').click());
+    await assertKeypadInView();
   }
+  checks.push('Every amount key is in view on Send and Receive at full and minimum window sizes');
 
   // The flight from Home and back, at a size the window was not opened at. The
   // circle never dims against the control, one fading over the other whole,
@@ -405,6 +427,17 @@ try {
     assert.ok(level >= low && level <= high, `Painted frame ${at}: the disc stays between its looks, ${level} in ${low} to ${high}`);
   checks.push('One big control, whole and in place, every frame, by sidebar, menu and back and forth, at any window size');
 
+  async function captureAmountForm(name) {
+    await page.waitForTimeout(500);
+    await screenshot(name);
+    await size(900, 640);
+    await page.waitForTimeout(700);
+    await assertKeypadInView();
+    await screenshot(`${name}-compact`);
+    await size(1320, 860);
+    await page.waitForTimeout(700);
+  }
+
   await nativeMenu('Send');
   await assertNothingSelects();
   const address = bech32Encode('bc', [0, ...convertBits(new Array(20).fill(7), 8, 5, true)]);
@@ -418,8 +451,9 @@ try {
   await amount.focus();
   await page.keyboard.type('1251');
   await page.keyboard.press('Backspace');
-  await page.keyboard.type('0');
+  await keypad().getByRole('button', { name: '0', exact: true }).click();
   await expect.poll(async () => (await amount.textContent()).replace(/\s/g, '')).toContain('1,250');
+  await captureAmountForm('desktop-send-amount');
   await page.getByRole('button', { name: 'Review payment', exact: true }).click();
   const hold = page.locator('[data-hold-confirmation]');
   await expect(hold).toBeVisible();
@@ -432,7 +466,7 @@ try {
   await page.waitForTimeout(1100);
   await expect(hold).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit payment', exact: true })).toBeVisible();
-  checks.push('Physical amount entry and backspace, payment review, short hold cancels');
+  checks.push('Keyboard and pointer amount entry, physical backspace, payment review, short hold cancels');
 
   // A request the wallet refuses says why on a click or on Enter, and reading
   // it leaves the request where it was. The demo engine reports a request it
@@ -470,9 +504,10 @@ try {
   checks.push('A drag or triple click selects nothing on Receive');
   const receiveAmount = page.locator('[data-amount-entry]').first();
   await receiveAmount.focus();
-  await page.keyboard.type('2500');
+  await page.keyboard.type('250');
+  await keypad().getByRole('button', { name: '0', exact: true }).click();
   await expect.poll(async () => (await receiveAmount.textContent()).replace(/\s/g, '')).toContain('2,500');
-  await screenshot('desktop-receive');
+  await captureAmountForm('desktop-receive');
   await nativeMenu('Settings');
   await expect(page.getByText('This computer', { exact: true })).toBeVisible();
   // The page is drawn through to Help, below Funds and exits, which no longer offers Stop wallet.
@@ -578,6 +613,13 @@ try {
   await saveNote.click();
   await expect(addNote).toBeFocused();
   checks.push('At 130 percent zoom a long private note wraps and can be reopened in the compact window');
+  for (const label of ['Send', 'Receive']) {
+    await nativeMenu(label);
+    await assertKeypadInView();
+    await keypad().getByRole('button', { name: '7', exact: true }).click();
+    await expect(amount).toContainText('7');
+  }
+  checks.push('At 130 percent zoom with reduced motion all keys remain in view and enter an amount on both forms');
   await zoom(1);
   await size(1320, 860);
   await nativeMenu('Overview');
