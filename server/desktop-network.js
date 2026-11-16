@@ -11,13 +11,53 @@ function onionInUri(value) {
   return typeof value === 'string' && /(?:^|@|\/\/)[a-z2-7]{56}\.onion(?::\d+)?(?:\/|$)/i.test(value.trim());
 }
 
-function requiresTor(record) {
+/**
+ * Whether a record names an onion anywhere: Tor mode, an onion Electrum
+ * server, a primary, a primary's fallback or a recovery guardian. Such a
+ * wallet brings up the app's Tor as it starts, so Tor is warm when an onion is
+ * dialed. Whether the start waits for it is `requiresTor`.
+ */
+function wantsTor(record) {
   if (!record) return false;
   if (record.networkMode === 'tor' || record.tor === true || isOnionHost(record.electrum?.host)) return true;
   const ranked = Array.isArray(record.lfbw?.primaries) ? record.lfbw.primaries.flatMap(entry => [entry?.uri, entry?.fallbackUri]) : [];
   if ([record.primaryUri, record.lfbw?.primaryUri, record.lfbw?.primaryFallbackUri, ...ranked].some(onionInUri)) return true;
   return (record.recovery?.guardians || []).some(guardian =>
     onionInUri(typeof guardian === 'string' ? guardian : guardian?.uri || guardian?.address));
+}
+
+/** The record's primaries, ranked or the one its scalar fields name. */
+function primaryRoutes(record) {
+  const lf = record.lfbw;
+  if (Array.isArray(lf?.primaries) && lf.primaries.some(Boolean))
+    return lf.primaries.filter(Boolean).map(entry => ({ walletId: entry.walletId, uri: entry.uri, fallbackUri: entry.fallbackUri }));
+  const single = { walletId: lf?.mode === 'internal' ? lf.primaryWalletId : null,
+    uri: lf?.primaryUri || record.primaryUri, fallbackUri: lf?.primaryFallbackUri };
+  return single.walletId || single.uri ? [single] : [];
+}
+
+/** Whether a primary is reached with Tor down: a sibling wallet, a clearnet host, a Porch link or a dialable Iroh link. */
+function reachableWithoutTor(entry, irohAvailable) {
+  if (entry.walletId) return true;
+  if (typeof entry.uri !== 'string' || !entry.uri.trim() || onionInUri(entry.uri)) return false;
+  return /^[^@]+@iroh:/i.test(entry.uri) ? irohAvailable : true;
+}
+
+/**
+ * Whether a wallet cannot run without Tor, so its engine start waits for it:
+ * Tor mode, an onion Electrum server (its bridge runs through Tor), or
+ * primaries that are all reached only over Tor. Any primary with another way
+ * in means the wallet runs without Tor, and an onion it also names, a fallback,
+ * a lower-ranked primary or a guardian, is reached through the app's proxy,
+ * which starts Tor on first use. Those only warm Tor (`wantsTor`). Without
+ * `irohAvailable`, an Iroh link counts as reached by its onion fallback alone.
+ */
+function requiresTor(record, { irohAvailable = false } = {}) {
+  if (!record) return false;
+  if (record.networkMode === 'tor' || record.tor === true || isOnionHost(record.electrum?.host)) return true;
+  const routes = primaryRoutes(record);
+  return routes.length > 0 && !routes.some(entry => reachableWithoutTor(entry, irohAvailable)) &&
+    routes.some(entry => onionInUri(entry.uri) || onionInUri(entry.fallbackUri));
 }
 
 class DesktopNetwork {
@@ -107,4 +147,4 @@ async function resolveElectrum(server) {
   return { ...server, ...endpoint, tls: false, tlsVerify: false, onionHost: host };
 }
 
-module.exports = { DesktopNetwork, configureDesktopNetwork, ensureTor, resolveElectrum, requiresTor, isOnionHost, validOnionHost, enabled, torStatus };
+module.exports = { DesktopNetwork, configureDesktopNetwork, ensureTor, resolveElectrum, requiresTor, wantsTor, isOnionHost, validOnionHost, enabled, torStatus };

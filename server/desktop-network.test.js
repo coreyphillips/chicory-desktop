@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { DesktopNetwork, configureDesktopNetwork, resolveElectrum, ensureTor, requiresTor, isOnionHost } = require('./desktop-network');
+const { DesktopNetwork, configureDesktopNetwork, resolveElectrum, ensureTor, requiresTor, wantsTor, isOnionHost } = require('./desktop-network');
 
 const onion = 'a'.repeat(56) + '.onion';
 const nodeUri = '02' + 'a'.repeat(64) + '@' + onion + ':9735';
@@ -13,17 +13,43 @@ function transport() {
   return channel;
 }
 
-test('Tor demand includes onion primaries, onion Electrum, Tor-only mode and recovery guardians', () => {
-  assert.equal(requiresTor({ lfbw: { primaryUri: nodeUri } }), true);
-  assert.equal(requiresTor({ electrum: { host: onion } }), true);
-  assert.equal(requiresTor({ networkMode: 'tor' }), true);
-  assert.equal(requiresTor({ recovery: { guardians: [{ uri: nodeUri }] } }), true);
-  assert.equal(requiresTor({ lfbw: { primaryUri: '02' + 'a'.repeat(64) + '@node.example:9735' } }), false);
-  // An Iroh primary needs Tor only for the onion it falls back to.
+test('Tor is warmed for every onion a record names: primaries, fallbacks, Electrum, Tor-only mode and guardians', () => {
+  assert.equal(wantsTor({ lfbw: { primaryUri: nodeUri } }), true);
+  assert.equal(wantsTor({ electrum: { host: onion } }), true);
+  assert.equal(wantsTor({ networkMode: 'tor' }), true);
+  assert.equal(wantsTor({ recovery: { guardians: [{ uri: nodeUri }] } }), true);
+  assert.equal(wantsTor({ lfbw: { primaryUri: '02' + 'a'.repeat(64) + '@node.example:9735' } }), false);
   const irohUri = '02' + 'a'.repeat(64) + '@iroh:' + '8e'.repeat(32);
-  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri } }), false);
-  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }), true);
+  assert.equal(wantsTor({ lfbw: { primaryUri: irohUri } }), false);
+  assert.equal(wantsTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }), true);
   assert.equal(isOnionHost('bad.onion'), true);
+});
+
+test('a start waits for Tor only when the wallet cannot run without it', () => {
+  const irohUri = '02' + 'a'.repeat(64) + '@iroh:' + '8e'.repeat(32);
+  const clearnet = '02' + 'b'.repeat(64) + '@node.example:9735';
+  // Tor is the only way in.
+  assert.equal(requiresTor({ networkMode: 'tor' }), true);
+  assert.equal(requiresTor({ electrum: { host: onion } }), true);
+  assert.equal(requiresTor({ lfbw: { primaryUri: nodeUri } }), true);
+  assert.equal(requiresTor({ lfbw: { primaries: [{ uri: nodeUri }] } }), true);
+  // An Iroh link this computer can dial needs its onion fallback only if Iroh fails.
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }, { irohAvailable: true }), false);
+  // Without the Iroh module the fallback is the only way to that node.
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }, { irohAvailable: false }), true);
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri, primaryFallbackUri: nodeUri } }), true, 'Iroh is not assumed');
+  // A wallet made on the old onion default, with an Iroh link added beside it.
+  const both = { lfbw: { primaryUri: nodeUri, primaries: [{ uri: nodeUri }, { uri: irohUri }] } };
+  assert.equal(requiresTor(both, { irohAvailable: true }), false);
+  assert.equal(wantsTor(both), true, 'the onion primary still warms Tor');
+  assert.equal(requiresTor({ lfbw: { primaries: [{ uri: nodeUri }, { uri: clearnet }] } }), false);
+  assert.equal(requiresTor({ lfbw: { primaries: [{ uri: nodeUri }, { walletId: 'sibling', uri: null }] } }), false);
+  assert.equal(requiresTor({ lfbw: { mode: 'internal', primaryWalletId: 'sibling', primaryFallbackUri: nodeUri } }), false);
+  // Guardians are reached when recovery needs them, through the proxy.
+  assert.equal(requiresTor({ lfbw: { primaryUri: clearnet }, recovery: { guardians: [{ uri: nodeUri }] } }), false);
+  // No primary at all, or one Tor cannot reach either: nothing to wait for.
+  assert.equal(requiresTor({}), false);
+  assert.equal(requiresTor({ lfbw: { primaryUri: irohUri } }, { irohAvailable: false }), false);
 });
 
 test('private network replies must match a pending request and private endpoint', async t => {

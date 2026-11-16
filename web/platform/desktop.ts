@@ -27,15 +27,25 @@ declare global {
   interface Window { chicoryDesktop?: DesktopBridge }
 }
 
+/** The scenes that only show the open wallet, which its cached view can show while its engine starts. */
+const VIEW_SCENES: readonly string[] = ['home', 'activity', 'settings'];
+
 /**
- * Whether a native menu, shortcut or payment link may act now. Each is
- * dropped, never queued, while no wallet is ready, a wallet is being chosen,
- * opened or switched, a payment is under way or an overlay is open, so a link
- * can never land in a wallet other than the one on screen or replace a
- * payment in review.
+ * Whether a native menu, shortcut, sidebar button or payment link may act
+ * now. Each is dropped, never queued, while no wallet is ready, a wallet is
+ * being chosen, opened or switched, a payment is under way or an overlay is
+ * open, so a link can never land in a wallet other than the one on screen or
+ * replace a payment in review. While the open wallet's engine is `starting`
+ * behind its last view, Overview, Activity and Settings still open, so a
+ * wallet that cannot connect can be looked at and reconfigured; Send,
+ * Receive and links wait for it to answer.
  */
-export function commandAccepted(state: { ready: boolean; choosing: boolean; busy: boolean; overlay: unknown }): boolean {
-  return state.ready && !state.choosing && !state.busy && !state.overlay;
+export function commandAccepted(
+  state: { ready: boolean; choosing: boolean; busy: boolean; overlay: unknown; starting?: boolean },
+  command?: string,
+): boolean {
+  if (!state.ready || state.choosing || state.busy || state.overlay) return false;
+  return !state.starting || (command !== undefined && VIEW_SCENES.includes(command));
 }
 
 export function desktopScene(command: string): DesktopScene | null {
