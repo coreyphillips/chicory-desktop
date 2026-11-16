@@ -611,6 +611,7 @@ export function Canvas({
                 the slot does. It is always drawn, so without this it would
                 catch every press on Home while Send and Receive are closed. */}
                 <View
+                  {...{ dataSet: { paymentColumn: 'true' } }}
                   style={[styles.flex, desktop ? styles.browserForm : null]}
                   pointerEvents={blocking ? 'none' : 'box-none'}
                 >

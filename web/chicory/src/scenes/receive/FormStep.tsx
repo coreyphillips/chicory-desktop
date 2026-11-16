@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { StyleSheet, TextInput, View } from 'react-native';
 import Reanimated from 'react-native-reanimated';
 import { AmountField } from '../../components/AmountField';
 import { copy } from '../../design/copy';
@@ -151,7 +151,7 @@ export function FormStep({
       </View>
     </View>
   );
-  const entry = (
+  const header = (
     <>
       {tools}
       {showNote ? (
@@ -172,26 +172,30 @@ export function FormStep({
           />
         </Reanimated.View>
       ) : null}
-      <AmountField
-        value={amount}
-        onChangeText={onAmount}
-        presets={PRESETS}
-        busy={busy}
-        hint={
-          refusedAmount
-            ? error?.message
-            : cue.kind === 'any' && cue.empty
-            ? copy.amount.any
-            : undefined
-        }
-        empty={<AmountFace cue={cue} />}
-        tone={
-          cue.over || refusedAmount ? 'radish' : cue.under ? 'dust' : undefined
-        }
-        shake={asked.times}
-        symbol={symbol}
-      />
     </>
+  );
+  const entry = (
+    <AmountField
+      header={header}
+      scrollID={room === undefined ? undefined : 'receive-entry'}
+      value={amount}
+      onChangeText={onAmount}
+      presets={PRESETS}
+      busy={busy}
+      hint={
+        refusedAmount
+          ? error?.message
+          : cue.kind === 'any' && cue.empty
+          ? copy.amount.any
+          : undefined
+      }
+      empty={<AmountFace cue={cue} />}
+      tone={
+        cue.over || refusedAmount ? 'radish' : cue.under ? 'dust' : undefined
+      }
+      shake={asked.times}
+      symbol={symbol}
+    />
   );
   // The way on, with what went wrong beside it as Send has it, so a refusal
   // is never pushed past the bottom of the screen. The row holds still as
@@ -201,7 +205,11 @@ export function FormStep({
   // rises in on its own. The row moves as the step is fitted to its slot,
   // which Continue's own layout does not see, so it is measured again then.
   const controls = (
-    <View style={styles.controls} onLayout={landing.onLayout}>
+    <View
+      {...{ dataSet: { amountActions: 'true' } }}
+      style={styles.controls}
+      onLayout={landing.onLayout}
+    >
       <View style={styles.side}>
         {onDismissRetry && (
           <GlyphButton
@@ -251,17 +259,11 @@ export function FormStep({
   // In the scene, the step fits its slot: what is entered scrolls on a
   // short phone, and the way on stays pinned above the bottom inset.
   return (
-    <View style={[styles.pinned, { height: Math.max(room, PINNED_MIN) }]}>
-      <ScrollView
-        testID="receive-entry"
-        style={styles.entry}
-        contentContainerStyle={styles.form}
-        alwaysBounceVertical={false}
-        keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled
-      >
-        {entry}
-      </ScrollView>
+    <View
+      {...{ dataSet: { amountForm: 'true' } }}
+      style={[styles.pinned, { height: Math.max(room, PINNED_MIN) }]}
+    >
+      {entry}
       {controls}
     </View>
   );
@@ -270,7 +272,6 @@ export function FormStep({
 const styles = StyleSheet.create({
   form: { flexGrow: 1, gap: space.lg },
   pinned: { gap: space.lg },
-  entry: { flex: 1 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   // Either side of the cue, the same width, so the cue is centred whether
   // or not the moon is offered.
