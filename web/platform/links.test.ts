@@ -34,6 +34,18 @@ test('menus, shortcuts and links act only on a ready wallet that is not being sw
   assert.equal(commandAccepted({ ...ready, overlay: { name: 'scan' } }), false, 'a scan or sheet open');
 });
 
+test('while the open wallet\'s engine starts behind its last view, Settings and the views open but payments wait', () => {
+  const starting = { ready: true, choosing: false, busy: false, overlay: null, starting: true };
+  for (const scene of ['settings', 'home', 'activity'])
+    assert.equal(commandAccepted(starting, scene), true, `${scene} opens while the wallet connects`);
+  for (const command of ['send', 'receive', 'payment-link'])
+    assert.equal(commandAccepted(starting, command), false, `${command} waits for the live wallet`);
+  assert.equal(commandAccepted(starting), false, 'an unnamed command waits too');
+  assert.equal(commandAccepted({ ...starting, choosing: true }, 'settings'), false, 'a real switch still blocks Settings');
+  assert.equal(commandAccepted({ ...starting, busy: true }, 'settings'), false);
+  assert.equal(commandAccepted({ ...starting, ready: false }, 'settings'), false, 'no wallet view to put Settings over');
+});
+
 test('a link only fills Send: it never gets camera provenance, so auto-pay cannot act on it', () => {
   const linked = stageReducer(initialStage(), { type: 'link', request: INVOICE });
   assert.equal(linked.scene.name, 'send');

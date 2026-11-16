@@ -26,7 +26,10 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
   const wallet = session.snapshot?.wallet;
   const active = state.scene.name === 'detail' ? 'activity' : state.scene.name;
   const ready = phase.kind === 'wallet' && !!wallet;
-  const choosing = session.connecting || session.selecting || session.switching || session.closing;
+  // `connecting` also covers the open wallet's engine starting behind its
+  // last view, which is not a wallet being chosen (`commandAccepted`).
+  const starting = session.starting;
+  const choosing = (session.connecting && !starting) || session.selecting || session.switching || session.closing;
   const desktop = window.chicoryDesktop;
   const modifier = desktop?.platform === 'darwin' || (!desktop && /Mac/.test(navigator.platform)) ? '⌘' : 'Ctrl+';
   const shortcuts: Record<string, string> = { home: '1', send: '2', receive: '3', activity: '4', settings: ',' };
@@ -34,7 +37,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
     const command = (name: string, value?: string) => {
       // The same guard covers native menus, shortcuts and external payment links.
       // A link only fills Send and is dropped while a wallet is not ready.
-      if (!commandAccepted({ ready, choosing, busy: state.busy, overlay: state.overlay })) return;
+      if (!commandAccepted({ ready, choosing, starting, busy: state.busy, overlay: state.overlay }, name)) return;
       if (name === 'payment-link') {
         const request = normalizePaymentLink(value);
         if (request) dispatch({ type: 'link', request });
@@ -53,7 +56,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [desktop, ready, choosing, state.busy, state.overlay, actions, dispatch]);
+  }, [desktop, ready, choosing, starting, state.busy, state.overlay, actions, dispatch]);
   return (
     <div className="browser-shell">
       <a className="skip-link" href="#wallet-workspace">Skip to wallet</a>
@@ -64,7 +67,7 @@ export function BrowserShell({ session, phase, children }: PropsWithChildren<{
             aria-current={active === item.name ? 'page' : undefined}
             aria-label={item.label} title={`${item.label} (${modifier}${shortcuts[item.name]})`}
             data-scene={item.name}
-            disabled={!ready || choosing || state.busy || !!state.overlay}
+            disabled={!commandAccepted({ ready, choosing, starting, busy: state.busy, overlay: state.overlay }, item.name)}
             onClick={() => actions.navigate(item.name)}>
             <Glyph name={item.glyph} size={20} color="currentColor" />
             <span className="browser-nav-label">{item.label}</span>

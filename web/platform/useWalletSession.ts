@@ -599,6 +599,9 @@ export function useWalletSession(
   return {
     client, wallets, walletId, snapshot, activeProfile, rememberedSession, deviceHint,
     initializing, connecting: connecting || starting, selecting, refreshing, closing, erasing,
+    // The open wallet's engine coming up while nothing else connects: the
+    // wallet on screen is the one starting, so moving around it is safe.
+    starting: starting && !connecting,
     switching, switchTarget, switchError, networkEditor, deviceVisible, error,
     setError, setSwitchError, setNetworkEditor, setDeviceVisible, refresh, manualRefresh,
     retrySetup, selectWallet, openDevice, openWallet, createDefaultWallet,

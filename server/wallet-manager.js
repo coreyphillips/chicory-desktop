@@ -115,6 +115,9 @@ const WINDOWS_KILL_GRACE_MS = 35000;
 // connections, and restart a daemon whose chain view is stuck.
 const ELECTRUM_PROBE_TIMEOUT_MS = 3000;
 const ELECTRUM_WAIT_POLL_MS = 5000;
+// The pause before a start that needs Tor asks again while Tor is still
+// bootstrapping. Each ask itself waits up to two minutes for Tor.
+const TOR_WAIT_RETRY_MS = 2000;
 // When a failed lightning-first setup tries again, as the phone does. The
 // engine backs off on its own after a failed dial, but only this brings the
 // setup back from failed, and a first dial over Tor often misses.
@@ -1736,6 +1739,31 @@ class WalletManager {
 		}
 	}
 
+	/**
+	 * Wait for the app's Tor, for a wallet that cannot run without it. One ask
+	 * gives up after two minutes, but Tor keeps bootstrapping (a stalled
+	 * descriptor fetch alone holds it that long), so while Tor reports itself
+	 * still starting the wallet waits as waiting-tor and asks again, and starts
+	 * once Tor is up. A Tor that failed outright fails the start. False when
+	 * the start was stopped meanwhile.
+	 */
+	async _awaitTor(id, rt) {
+		for (;;) {
+			try {
+				await desktopNetwork.ensureTor();
+				return !(rt.stopping || this.shuttingDown);
+			} catch (err) {
+				if (rt.stopping || this.shuttingDown) return false;
+				const tor = desktopNetwork.torStatus();
+				if (tor?.phase !== 'starting') throw err;
+				if (rt.status !== 'waiting-tor') this._log(id, `tor still connecting (${tor.progress}%); waiting for it before starting`);
+				rt.status = 'waiting-tor';
+			}
+			await new Promise((resolve) => setTimeout(resolve, TOR_WAIT_RETRY_MS));
+			if (rt.stopping || this.shuttingDown) return false;
+		}
+	}
+
 	async startWallet(id) {
 		if (this.shuttingDown) throw httpError(503, 'SHUTTING_DOWN', 'Chicory is closing.');
 		const rec = this.registry.get(id);
@@ -1780,10 +1808,15 @@ class WalletManager {
 		rt.startMarks = new Set();
 		rt.setupRetries = 0;
 
-		if (desktopNetwork.enabled() && desktopNetwork.requiresTor(rec)) {
-			await desktopNetwork.ensureTor();
+		if (desktopNetwork.enabled() && desktopNetwork.requiresTor(rec, { irohAvailable: this.irohAvailable() })) {
+			if (!(await this._awaitTor(id, rt))) return;
+			if (rt.status === 'waiting-tor') rt.status = 'starting';
 			this._markStart(id, rt, 'tor ready');
-			if (rt.stopping || this.shuttingDown) return;
+		} else if (desktopNetwork.enabled() && desktopNetwork.wantsTor(rec)) {
+			// An onion this wallet can do without, a fallback, a lower-ranked
+			// primary or a guardian: Tor comes up beside the engine rather than
+			// ahead of it, and a Tor that is slow or down never holds the start.
+			desktopNetwork.ensureTor().catch(() => {});
 		}
 		if (rec.pendingChainGuard) {
 			await this._refuseWrongChain(rec.electrum, rec.network, { allow: rec.pendingChainGuard.allow === true });

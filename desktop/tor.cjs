@@ -145,6 +145,9 @@ class BundledTor {
     this.closed = false; this.child = null; this.control = null; this.ready = null;
     this.proxy = null; this.proxyReady = null; this.endpoint = null; this.nativeEndpoint = null;
     this.sockets = new Set(); this.bridges = new Set(); this.finishedChildren = new WeakSet();
+    // Settles every wait as Tor stops, rather than when its own time runs out.
+    this.cancelled = new Promise((_resolve, reject) => { this.cancel = () => reject(error('Tor startup was cancelled.')); });
+    this.cancelled.catch(() => {});
   }
   status() { return { phase: this.phase, progress: this.progress, error: this.failure }; }
   _state(phase, progress = this.progress, failure = null) {
@@ -182,6 +185,13 @@ class BundledTor {
     socket.once('error', () => {});
     socket.once('close', () => this.sockets.delete(socket));
   }
+  /**
+   * Waits up to `bootstrapTimeoutMs` for Tor to be ready. A wait that runs
+   * out leaves Tor bootstrapping: a stalled descriptor fetch alone can hold a
+   * healthy Tor for two minutes before it retries, and killing it then threw
+   * away the work and started over from the same state. The next wait joins
+   * the same bootstrap. Only a Tor that failed outright is stopped.
+   */
   async ensureReady() {
     if (this.closed) throw error('Tor has stopped. Reopen Chicory to reconnect.');
     await this.startProxy();
@@ -193,8 +203,15 @@ class BundledTor {
         if (!this.closed) this._state('failed', this.progress, cause.message);
         throw cause;
       });
+      // A failure after every wait has given up is reported by its status.
+      this.ready.catch(() => {});
     }
-    await this.ready;
+    let timer;
+    const late = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(error('Tor is still connecting. Check the network and retry.')), this.bootstrapTimeoutMs);
+    });
+    try { await Promise.race([this.ready, late, this.cancelled]); }
+    finally { clearTimeout(timer); }
     return this.endpoint;
   }
   async _start() {
@@ -254,7 +271,9 @@ class BundledTor {
     const match = /^net\/listeners\/socks="(127\.0\.0\.1:\d+)"$/.exec(socks || '');
     if (!match) throw error('Tor did not open a private SOCKS endpoint.');
     this.nativeEndpoint = loopbackEndpoint(match[1]);
-    while (Date.now() < deadline) {
+    // No deadline here: Tor retries its own fetches and circuits for as long
+    // as it runs, and each caller bounds only its own wait (`ensureReady`).
+    for (;;) {
       if (this.closed) throw error('Tor startup was cancelled.');
       if (processFailure) throw processFailure;
       const lines = await this.control.request('GETINFO status/bootstrap-phase');
@@ -265,7 +284,6 @@ class BundledTor {
       if (progress === 100) return;
       await wait(500);
     }
-    throw error('Tor could not connect within two minutes. Check the network and retry.');
   }
   async createBridge(host, port) {
     host = typeof host === 'string' ? host.trim().toLowerCase() : host;
@@ -333,6 +351,7 @@ class BundledTor {
   async stop() {
     if (this.closed) return;
     this.closed = true;
+    this.cancel();
     // Let an in-flight bind settle before closing its server.
     if (this.proxyReady) await this.proxyReady.catch(() => {});
     for (const socket of this.sockets) socket.destroy();

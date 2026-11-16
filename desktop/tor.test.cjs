@@ -87,7 +87,7 @@ async function fakeTor(t, { progress = 100, rejectAuthentication = false, socksP
             else if (command === 'TAKEOWNERSHIP') { owned = true; socket.write('250 OK\r\n'); }
             else if (command.startsWith('RESETCONF')) socket.write('250 OK\r\n');
             else if (command === 'GETINFO net/listeners/socks') socket.write(`250-net/listeners/socks="127.0.0.1:${socksServer.address().port}"\r\n250 OK\r\n`);
-            else if (command === 'GETINFO status/bootstrap-phase') socket.write(`250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=${progress} TAG=done\r\n250 OK\r\n`);
+            else if (command === 'GETINFO status/bootstrap-phase') socket.write(`250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=${typeof progress === 'function' ? progress() : progress} TAG=done\r\n250 OK\r\n`);
             else socket.write('510 Unknown\r\n');
           }
         });
@@ -151,10 +151,42 @@ test('control authentication failure fails closed and reaps the child', async t 
   assert.equal(tor.status().phase, 'failed'); assert.equal(stopped(), 1);
 });
 
-test('bootstrap is bounded and never forwards a connection before Tor is ready', async t => {
-  const { tor, stopped } = await fakeTor(t, { progress: 10 });
-  await assert.rejects(tor.ensureReady(), /could not connect/);
-  assert.equal(stopped(), 1); assert.equal(tor.status().phase, 'failed');
+test('a wait is bounded, but a slow bootstrap keeps going and never forwards a connection before Tor is ready', { timeout: 5000 }, async t => {
+  const { tor, stopped, children } = await fakeTor(t, { progress: 10 });
+  const endpoint = await tor.startProxy();
+  await assert.rejects(tor.ensureReady(), /still connecting/);
+  assert.equal(stopped(), 0, 'Tor is left bootstrapping');
+  assert.equal(tor.status().phase, 'starting'); assert.equal(tor.status().progress, 10);
+  const socket = net.createConnection(endpoint);
+  t.after(() => socket.destroy());
+  const closed = new Promise(resolve => socket.once('close', resolve));
+  socket.on('error', () => {});
+  socket.write('too-early');
+  await closed;
+  assert.equal(children.length, 1, 'a later wait joins the same Tor');
+});
+
+test('a bootstrap slower than one wait finishes, and the next wait joins it instead of restarting Tor', async t => {
+  let progress = 68;
+  const { tor, stopped, children } = await fakeTor(t, { progress: () => progress });
+  await assert.rejects(tor.ensureReady(), /still connecting/);
+  assert.equal(tor.status().phase, 'starting'); assert.equal(stopped(), 0);
+  progress = 100;
+  await pause(600);
+  assert.equal(tor.status().phase, 'ready', 'Tor finished on its own, with no one waiting');
+  const endpoint = await tor.ensureReady();
+  assert.deepEqual(endpoint, tor.endpoint);
+  assert.equal(tor.status().phase, 'ready'); assert.equal(children.length, 1); assert.equal(stopped(), 0);
+});
+
+test('a Tor that exits while no one waits is reported failed and restarts on the next wait', async t => {
+  const { tor, children, stopped } = await fakeTor(t, { progress: 10 });
+  await assert.rejects(tor.ensureReady(), /still connecting/);
+  children[0].kill(); await pause(600);
+  assert.equal(tor.status().phase, 'failed'); assert.equal(stopped(), 1);
+  assert.equal(tor.ready, null);
+  await assert.rejects(tor.ensureReady(), /still connecting/);
+  assert.equal(children.length, 2); assert.equal(tor.status().phase, 'starting');
 });
 
 test('closing during bootstrap cancels startup and leaves no child or listener', async t => {

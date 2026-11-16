@@ -146,6 +146,71 @@ test('a stop during Tor bootstrap prevents later probe or spawn', async t => {
   assert.equal(manager.probes.length, 0); assert.equal(spawns().length, 0);
 });
 
+const until = async (check, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (!check()) { if (Date.now() > end) throw new Error('timed out waiting'); await new Promise(resolve => setTimeout(resolve, 20)); }
+};
+const torStatus = (channel, phase, progress) => channel.emit('message', { type: 'tor:status', status: { phase, progress } });
+
+test('a Tor-only wallet waits through a slow Tor bootstrap and starts once Tor is up', async t => {
+  const { manager, rec, channel, reply, spawns } = harness(t, { networkMode: 'tor' });
+  torStatus(channel, 'starting', 68);
+  await manager.startWallet(rec.id);
+  const runtime = manager.runtimeState(rec.id); const task = runtime.startTask;
+  // One ask gives up after its two minutes while Tor keeps bootstrapping.
+  reply(channel.sent[0], undefined, 'Tor could not connect. Check the network and retry.'); await tick();
+  assert.equal(runtime.status, 'waiting-tor'); assert.equal(runtime.lastStartError, null);
+  assert.equal(rec.running, true); assert.equal(spawns().length, 0);
+  torStatus(channel, 'ready', 100);
+  await until(() => channel.sent.length === 2);
+  assert.equal(channel.sent[1].type, 'tor:ensure', 'it asks again rather than failing');
+  reply(channel.sent[1]); await task;
+  assert.equal(manager.probes.length, 1); assert.equal(spawns().length, 1);
+  assert.equal(runtime.lastStartError, null); assert.notEqual(runtime.status, 'error');
+});
+
+test('stopping a wallet that waits for Tor ends the wait without a spawn', async t => {
+  const { manager, rec, channel, reply, spawns } = harness(t, { networkMode: 'tor' });
+  torStatus(channel, 'starting', 40);
+  await manager.startWallet(rec.id);
+  const runtime = manager.runtimeState(rec.id); const task = runtime.startTask;
+  reply(channel.sent[0], undefined, 'Tor could not connect. Check the network and retry.'); await tick();
+  assert.equal(runtime.status, 'waiting-tor');
+  await manager.stopWallet(rec.id); await task;
+  assert.equal(runtime.status, 'stopped'); assert.equal(rec.running, false);
+  assert.equal(channel.sent.length, 1); assert.equal(spawns().length, 0);
+});
+
+test('a Tor that failed outright still fails a Tor-only start', async t => {
+  const { manager, rec, channel, reply, spawns } = harness(t, { networkMode: 'tor' });
+  await manager.startWallet(rec.id);
+  const runtime = manager.runtimeState(rec.id); const task = runtime.startTask;
+  torStatus(channel, 'failed', 30);
+  reply(channel.sent[0], undefined, 'Tor could not connect. Check the network and retry.'); await task;
+  assert.equal(runtime.status, 'error'); assert.match(runtime.lastStartError.message, /could not connect/);
+  assert.equal(spawns().length, 0);
+});
+
+test('an Iroh primary with an onion fallback starts without waiting for Tor, which warms beside it', async t => {
+  const node = '02' + 'a'.repeat(64);
+  const { manager, rec, channel, spawns } = harness(t, {
+    lfbw: { primaryUri: `${node}@iroh:${'8e'.repeat(32)}`, primaryFallbackUri: `${node}@${onion}:9735` } });
+  manager.irohAvailable = () => true;
+  await manager.startWallet(rec.id); await manager.runtimeState(rec.id).startTask;
+  assert.equal(channel.sent[0].type, 'tor:ensure', 'Tor is warmed for the fallback');
+  assert.equal(manager.probes.length, 1); assert.equal(spawns().length, 1, 'the engine started with Tor still unanswered');
+  assert.notEqual(manager.runtimeState(rec.id).status, 'error');
+});
+
+test('a wallet whose only primary is an onion still waits for Tor', async t => {
+  const { manager, rec, channel, spawns } = harness(t, { lfbw: { primaryUri: '02' + 'a'.repeat(64) + '@' + onion + ':9735' } });
+  manager.irohAvailable = () => true;
+  await manager.startWallet(rec.id); await tick();
+  assert.equal(channel.sent[0].type, 'tor:ensure');
+  assert.equal(spawns().length, 0); assert.equal(manager.probes.length, 0);
+  await manager.stopWallet(rec.id);
+});
+
 test('cold onion creation returns the record and phrase before its guarded background start', async t => {
   const { manager, channel, reply, spawns } = harness(t);
   manager._validateNetwork = value => value;

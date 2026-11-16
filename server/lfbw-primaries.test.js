@@ -16,7 +16,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const lfbw = require('./lfbw');
 const { WalletManager } = require('./wallet-manager');
-const { requiresTor } = require('./desktop-network');
+const { requiresTor, wantsTor } = require('./desktop-network');
 const { createOfflineCapacity } = require('./offline-capacity');
 
 const PK_W = '02' + '11'.repeat(32);
@@ -74,9 +74,13 @@ test('the keys, the Iroh test and the Tor demand read every ranked entry, and fa
 	assert.deepEqual(lfbw.primaryPubkeys({ enabled: false, primaryPubkey: PK_A }), []);
 	assert.equal(lfbw.isIrohPrimary(two), true, 'an Iroh node at rank 2 needs the endpoint');
 	assert.equal(lfbw.isIrohPrimary(lfbw.migratePrimaries(legacy())), false);
-	assert.equal(requiresTor({ lfbw: two }), true, 'the onion fallback of the second node warms Tor');
-	assert.equal(requiresTor({ lfbw: { ...two, primaries: [{ pubkey: PK_A, uri: URI_A }, { pubkey: PK_B, uri: URI_B }] } }), false);
-	assert.equal(requiresTor({ lfbw: { ...two, primaries: [{ pubkey: PK_A, uri: URI_A }, { pubkey: PK_B, uri: `${PK_B}@${ONION}:9735` }] } }), true);
+	assert.equal(wantsTor({ lfbw: two }), true, 'the onion fallback of the second node warms Tor');
+	assert.equal(requiresTor({ lfbw: two }), false, 'but the first node is reached without it');
+	assert.equal(wantsTor({ lfbw: { ...two, primaries: [{ pubkey: PK_A, uri: URI_A }, { pubkey: PK_B, uri: URI_B }] } }), false);
+	const onionSecond = { lfbw: { ...two, primaries: [{ pubkey: PK_A, uri: URI_A }, { pubkey: PK_B, uri: `${PK_B}@${ONION}:9735` }] } };
+	assert.equal(wantsTor(onionSecond), true);
+	assert.equal(requiresTor(onionSecond), false);
+	assert.equal(requiresTor({ lfbw: { ...two, primaries: [{ pubkey: PK_B, uri: `${PK_B}@${ONION}:9735` }] } }), true, 'an onion-only primary still waits');
 });
 
 test('a lightning-first request may list the ranked primaries; the first is the block\'s primary and the others keep their state', () => {
